@@ -1,0 +1,616 @@
+//! Deterministic looper tests: synthetic input, no audio hardware.
+//!
+//! Most tests run at 1 kHz so loop lengths are small round numbers, and with
+//! `fade_frames = 0` so recorded values can be checked exactly.
+
+use super::*;
+use crate::model::LoopMode;
+use crate::transport::{grid_frame, LoopLength, TransportState};
+
+use super::LooperCommand as C;
+
+const BLOCK: usize = 64;
+
+fn config(fade: u32) -> LooperConfig {
+    LooperConfig {
+        max_tracks: 2,
+        max_loop_seconds: 10.0,
+        pool_layers: 6,
+        max_layers_per_track: 4,
+        memory_limit_bytes: 64 << 20,
+        fade_frames: fade,
+    }
+}
+
+fn transport(sample_rate: u32, mode: LoopMode) -> TransportState {
+    let mut t = TransportState::default();
+    t.sample_rate = sample_rate;
+    t.mode = mode;
+    t.metronome.enabled = false;
+    t.metronome.count_in_bars = 0;
+    t
+}
+
+/// 1 kHz, 120 BPM, 4/4, one-bar loop: 500 frames per beat, 2000 per loop.
+fn one_bar_synced() -> TransportState {
+    let mut t = transport(1_000, LoopMode::Synced);
+    t.loop_length = LoopLength { bars: 1, beats: 0 };
+    t
+}
+
+struct Rig {
+    core: LooperCore,
+    h: LooperHandles,
+    /// Absolute output frames processed so far (index into `out`).
+    frame: u64,
+    out: Vec<f32>,
+}
+
+impl Rig {
+    fn new(cfg: LooperConfig, t: TransportState) -> Self {
+        let (core, h) = LooperCore::new(&cfg, t, t.sample_rate).expect("valid config");
+        Self { core, h, frame: 0, out: Vec::new() }
+    }
+
+    /// Queue a command; it takes effect at the next processed frame.
+    fn send(&mut self, c: LooperCommand) {
+        self.h.commands.push(c).expect("command ring has space");
+    }
+
+    /// Process `frames` frames. `input` maps an absolute output frame to an input sample.
+    fn run(&mut self, frames: usize, mut input: impl FnMut(u64) -> f32) {
+        let mut inb = [0.0f32; BLOCK];
+        let mut outb = [0.0f32; BLOCK];
+        let mut left = frames;
+        while left > 0 {
+            let n = left.min(BLOCK);
+            for (i, s) in inb[..n].iter_mut().enumerate() {
+                *s = input(self.frame + i as u64);
+            }
+            self.core.process(&inb[..n], &mut outb[..n]);
+            self.out.extend_from_slice(&outb[..n]);
+            self.frame += n as u64;
+            left -= n;
+            // Drain like the control thread does.
+            while self.h.snapshots.pop().is_ok() {}
+        }
+        self.h.recycler.service();
+    }
+
+    fn silence(&mut self, frames: usize) {
+        self.run(frames, |_| 0.0);
+    }
+
+    fn snap(&self) -> LooperSnapshot {
+        self.core.snapshot()
+    }
+
+    fn notices(&mut self) -> Vec<LooperNotice> {
+        let mut v = Vec::new();
+        while let Ok(n) = self.h.notices.pop() {
+            v.push(n);
+        }
+        v
+    }
+}
+
+fn impulse(at: u64) -> impl FnMut(u64) -> f32 {
+    move |f| if f == at { 1.0 } else { 0.0 }
+}
+
+fn nonzero_from(out: &[f32], from: usize) -> Vec<usize> {
+    out.iter().enumerate().skip(from).filter(|(_, v)| v.abs() > 1e-6).map(|(i, _)| i).collect()
+}
+
+fn rejected(reason: RejectReason) -> LooperNotice {
+    LooperNotice::Rejected { reason }
+}
+
+// ---- configuration and memory ---------------------------------------------
+
+#[test]
+fn config_enforces_memory_and_count_limits() {
+    let ok = LooperConfig::default();
+    assert_eq!(ok.max_loop_frames(48_000).unwrap(), 30 * 48_000);
+    assert_eq!(ok.memory_bytes(48_000), 30 * 48_000 * 8 * 4);
+
+    let tiny_limit = LooperConfig { memory_limit_bytes: 1024, ..ok };
+    assert!(matches!(tiny_limit.max_loop_frames(48_000), Err(EngineError::ResourceLimit(_))));
+    let too_many_tracks = LooperConfig { max_tracks: MAX_TRACKS + 1, ..ok };
+    assert!(matches!(too_many_tracks.max_loop_frames(48_000), Err(EngineError::Invalid(_))));
+    let no_pool = LooperConfig { pool_layers: 0, ..ok };
+    assert!(matches!(no_pool.max_loop_frames(48_000), Err(EngineError::Invalid(_))));
+}
+
+#[test]
+fn pool_is_preallocated_and_reported() {
+    let r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    let s = r.snap();
+    assert_eq!(s.free_layers, 6);
+    assert_eq!(s.track_count, 2);
+    assert_eq!(r.h.recycler.layer_frames(), 10_000);
+    assert_eq!(r.h.recycler.total_layers(), 6);
+}
+
+// ---- free loop mode ---------------------------------------------------------
+
+#[test]
+fn free_first_take_sets_exact_loop_length() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_234, |_| 0.5);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1);
+    let s = r.snap();
+    assert_eq!(s.loop_period, Some(1_234.0));
+    assert_eq!(s.run, RunState::Running);
+    assert_eq!(s.tracks[0].state, TrackState::Playing);
+    assert_eq!(s.tracks[0].layers, 1);
+}
+
+#[test]
+fn free_loop_repeats_at_exact_period() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, impulse(100));
+    r.send(C::StopRecording { track: 0 });
+    r.silence(10_000);
+    let expected: Vec<usize> = (1..=10).map(|k| 100 + k * 1_000).collect();
+    assert_eq!(nonzero_from(&r.out, 0), expected);
+}
+
+#[test]
+fn recording_is_not_monitored_live() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, |_| 0.5);
+    assert!(r.out.iter().all(|&v| v == 0.0), "input must not reach the output while recording");
+}
+
+#[test]
+fn too_short_first_take_is_discarded() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(5, |_| 0.5); // min loop is 20 frames at 1 kHz
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1);
+    assert!(r.notices().contains(&rejected(RejectReason::TooShort)));
+    let s = r.snap();
+    assert_eq!(s.loop_period, None);
+    assert_eq!(s.tracks[0].state, TrackState::Empty);
+    assert_eq!(s.free_layers, 6);
+}
+
+#[test]
+fn second_track_synchronises_to_first_in_free_mode() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, impulse(0));
+    r.send(C::StopRecording { track: 0 });
+    r.silence(350); // abs 1000..1350
+    r.send(C::Record { track: 1 }); // one full loop starting mid-cycle: t 1350..2350
+    assert_eq!(r.core.transport_frame(), 1_350);
+    r.run(3_000, impulse(1_600)); // phase 600 of the shared loop
+    assert_eq!(nonzero_from(&r.out, 0), vec![1_000, 2_000, 2_600, 3_000, 3_600, 4_000]);
+    assert_eq!(r.snap().tracks[1].state, TrackState::Playing);
+}
+
+// ---- metronome mode ----------------------------------------------------------
+
+#[test]
+fn metronome_record_starts_and_ends_on_loop_boundaries() {
+    let mut r = Rig::new(config(0), one_bar_synced());
+    assert_eq!(r.snap().loop_period, Some(2_000.0));
+    r.send(C::Play);
+    r.silence(300);
+    r.send(C::Record { track: 0 });
+    r.silence(1);
+    let s = r.snap();
+    assert_eq!(s.tracks[0].state, TrackState::Armed);
+    assert_eq!((s.tracks[0].record_start, s.tracks[0].record_end), (Some(2_000), Some(4_000)));
+
+    r.run(5_699, |_| 1.0); // to abs 6000; input is 1.0 everywhere
+    assert!(r.out[..4_000].iter().all(|&v| v == 0.0));
+    // Exactly one pass was captured (not the armed period, not more).
+    assert!(r.out[4_000..6_000].iter().all(|&v| v == 1.0));
+    assert_eq!(r.snap().tracks[0].state, TrackState::Playing);
+}
+
+#[test]
+fn count_in_delays_transport_and_recording() {
+    let mut t = one_bar_synced();
+    t.metronome.count_in_bars = 1;
+    let mut r = Rig::new(config(0), t);
+    r.send(C::Record { track: 0 }); // from Stopped: count-in, then record bar 1
+    r.silence(1);
+    let s = r.snap();
+    assert_eq!(s.run, RunState::CountIn);
+    assert_eq!(s.count_in_remaining, 1_999);
+    assert_eq!(s.tracks[0].state, TrackState::Armed);
+
+    r.silence(1_999); // count-in ends at abs 2000
+    assert_eq!(r.snap().run, RunState::Running);
+    assert_eq!(r.core.transport_frame(), 0);
+
+    r.run(2_000, impulse(2_010)); // musical frame 10 of the recorded loop
+    r.silence(2_000);
+    // Count-in clicks have long decayed; the only later output is the recorded impulse.
+    assert_eq!(nonzero_from(&r.out, 3_000), vec![4_010]);
+}
+
+#[test]
+fn fractional_period_has_no_accumulated_drift() {
+    let mut t = one_bar_synced();
+    t.bpm = 113.0; // 2123.893... frames per bar at 1 kHz
+    let period = t.loop_period();
+    assert!(period.fract() > 0.0);
+    let mut r = Rig::new(config(0), t);
+    r.send(C::Play);
+    r.send(C::Record { track: 0 }); // t = 0 is a loop boundary: records cycle 0
+    let total = (300.0 * period) as usize + 10;
+    r.run(total, impulse(0));
+
+    let expected: Vec<usize> = (1u64..)
+        .map(|k| (k as f64 * period).round() as usize)
+        .take_while(|&f| f < r.out.len())
+        .collect();
+    assert!(expected.len() >= 299);
+    assert_eq!(nonzero_from(&r.out, 0), expected);
+    // Loop cycles coincide exactly with the bar grid used by the metronome.
+    let bar = t.frames_per_bar();
+    for (k, &f) in expected.iter().enumerate() {
+        assert_eq!(grid_frame(k as i64 + 1, bar) as usize, f);
+    }
+}
+
+#[test]
+fn metronome_overdub_quantises_to_bars() {
+    let mut r = Rig::new(config(0), one_bar_synced()); // bars every 2000 frames
+    r.send(C::Play);
+    r.send(C::Record { track: 0 });
+    r.silence(2_000);
+    r.silence(700);
+    r.send(C::Overdub { track: 0 });
+    r.silence(1);
+    assert_eq!(r.snap().tracks[0].record_start, Some(4_000));
+    r.silence(2_000);
+    r.send(C::StopRecording { track: 0 }); // at t 4701 -> ends at the next bar, 6000
+    r.silence(1);
+    assert_eq!(r.snap().tracks[0].record_end, Some(6_000));
+    assert_eq!(r.snap().tracks[0].state, TrackState::Overdubbing);
+    r.silence(1_400);
+    assert_eq!(r.snap().tracks[0].state, TrackState::Playing);
+    assert_eq!(r.snap().tracks[0].layers, 2);
+}
+
+#[test]
+fn stop_recording_while_armed_cancels() {
+    let mut r = Rig::new(config(0), one_bar_synced());
+    r.send(C::Play);
+    r.silence(300);
+    r.send(C::Record { track: 0 });
+    r.silence(10);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1);
+    let s = r.snap();
+    assert_eq!(s.tracks[0].state, TrackState::Empty);
+    assert_eq!(s.free_layers, 6);
+}
+
+#[test]
+fn click_is_on_the_grid_and_not_recorded() {
+    let mut t = one_bar_synced();
+    t.metronome.enabled = true;
+    let mut r = Rig::new(config(0), t);
+    r.send(C::Play);
+    r.send(C::Record { track: 0 });
+    r.silence(4_000);
+    for beat in 0..8usize {
+        let f = beat * 500;
+        assert!(r.out[f].abs() > 0.1, "click expected at frame {f}");
+        if f > 0 {
+            assert_eq!(r.out[f - 1], 0.0, "no click energy just before beat at {f}");
+        }
+    }
+    assert!(r.out[0] > r.out[500], "downbeat is accented");
+    assert!(r.out[2_000] > r.out[2_500]);
+
+    // Disable the click (allowed while loops exist); the recorded loop is silent.
+    let mut quiet = r.snap().transport;
+    quiet.metronome.enabled = false;
+    r.send(C::SetTransport { transport: quiet });
+    r.silence(2_100); // let the last click decay, then a full loop
+    assert!(r.out[4_100..].iter().all(|&v| v == 0.0));
+    assert!(r.notices().is_empty());
+}
+
+// ---- overdub, latency, undo ---------------------------------------------------
+
+#[test]
+fn overdub_aligns_with_latency_compensation() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, impulse(200));
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::SetInputLatency { frames: 37 });
+    r.silence(500); // abs 1000..1500
+    r.send(C::Overdub { track: 0 });
+    // The player hears phase 500 at abs 2500; their response arrives 37 frames later.
+    r.run(1_500, impulse(2_537));
+    r.send(C::StopRecording { track: 0 });
+    r.silence(2_000);
+    assert_eq!(nonzero_from(&r.out, 3_000), vec![3_200, 3_500, 4_200, 4_500]);
+}
+
+#[test]
+fn multi_pass_overdub_accumulates_into_one_layer() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, |_| 0.1);
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::Overdub { track: 0 });
+    r.run(2_000, |_| 0.1); // two passes
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1_000);
+    let s = r.snap();
+    assert_eq!(s.tracks[0].layers, 2);
+    let v = r.out[r.out.len() - 500];
+    assert!((v - 0.3).abs() < 1e-6, "base 0.1 + two overdub passes 0.2, got {v}");
+}
+
+#[test]
+fn undo_removes_only_latest_overdub_and_recycles_clean_buffers() {
+    // Pool of 2 forces the final overdub to reuse the buffer released by undo.
+    let mut r = Rig::new(LooperConfig { pool_layers: 2, ..config(0) }, transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, |_| 0.25);
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::Overdub { track: 0 });
+    r.run(1_000, |_| 0.25);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1_000);
+    assert_eq!(r.out[2_500], 0.5);
+    assert_eq!(r.snap().free_layers, 0);
+
+    r.send(C::Undo { track: 0 });
+    r.silence(1_000);
+    assert_eq!(r.out[3_500], 0.25, "base take is untouched");
+    let s = r.snap();
+    assert_eq!(s.tracks[0].layers, 1);
+    assert_eq!(s.free_layers, 1, "released layer returned to the pool");
+
+    r.send(C::Undo { track: 0 });
+    r.silence(1);
+    assert!(r.notices().contains(&rejected(RejectReason::NothingToUndo)));
+
+    // A recycled buffer must be zeroed: a silent overdub adds nothing.
+    r.send(C::Overdub { track: 0 });
+    r.silence(1_000);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1_000);
+    let n = r.out.len();
+    assert!(r.out[n - 1_000..].iter().all(|&v| v == 0.25));
+}
+
+// ---- mixing ---------------------------------------------------------------------
+
+#[test]
+fn mute_volume_and_track_play_stop() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, |_| 0.5);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1_000);
+    assert_eq!(r.out[1_500], 0.5);
+
+    r.send(C::SetGain { track: 0, gain: 0.5 });
+    r.silence(1_000);
+    assert_eq!(r.out[2_500], 0.25);
+
+    r.send(C::SetMute { track: 0, muted: true });
+    r.silence(1_000);
+    assert!(r.out[3_000..4_000].iter().all(|&v| v == 0.0));
+
+    r.send(C::SetMute { track: 0, muted: false });
+    r.send(C::SetTrackPlaying { track: 0, playing: false });
+    r.silence(1_000);
+    assert!(r.out[4_000..5_000].iter().all(|&v| v == 0.0));
+    assert_eq!(r.snap().tracks[0].state, TrackState::Stopped);
+
+    r.send(C::SetTrackPlaying { track: 0, playing: true });
+    r.silence(10);
+    assert_eq!(r.out[5_005], 0.25);
+
+    r.send(C::SetGain { track: 0, gain: 99.0 });
+    r.send(C::SetGain { track: 1, gain: f32::NAN });
+    r.silence(1);
+    assert_eq!(r.snap().tracks[0].gain, 2.0);
+    assert_eq!(r.snap().tracks[1].gain, 1.0);
+}
+
+#[test]
+fn two_tracks_mix_and_mute_independently() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, |_| 0.25);
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::Record { track: 1 });
+    r.run(1_000, |_| 0.5);
+    r.silence(1_000);
+    assert_eq!(r.out[2_500], 0.75);
+    r.send(C::SetMute { track: 0, muted: true });
+    r.silence(10);
+    assert_eq!(*r.out.last().unwrap(), 0.5);
+}
+
+// ---- limits and cleanup ----------------------------------------------------------
+
+#[test]
+fn pool_exhaustion_and_layer_limit_reject_without_allocating() {
+    let mut r = Rig::new(LooperConfig { pool_layers: 2, ..config(0) }, transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(100, |_| 0.1);
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::Overdub { track: 0 });
+    r.silence(50);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(10);
+    r.send(C::Overdub { track: 0 });
+    r.send(C::Record { track: 1 });
+    r.silence(1);
+    let notices = r.notices();
+    assert_eq!(notices.iter().filter(|n| **n == rejected(RejectReason::PoolExhausted)).count(), 2);
+    assert_eq!(r.snap().tracks[0].layers, 2);
+    assert_eq!(r.snap().tracks[1].state, TrackState::Empty);
+
+    let mut r = Rig::new(LooperConfig { max_layers_per_track: 2, ..config(0) }, transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(100, |_| 0.1);
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::Overdub { track: 0 });
+    r.silence(50);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(10);
+    r.send(C::Overdub { track: 0 });
+    r.silence(1);
+    assert!(r.notices().contains(&rejected(RejectReason::LayerLimit)));
+}
+
+#[test]
+fn first_take_stops_at_max_loop_length() {
+    let mut r = Rig::new(LooperConfig { max_loop_seconds: 1.0, ..config(0) }, transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_500, |_| 0.1);
+    let s = r.snap();
+    assert_eq!(s.loop_period, Some(1_000.0));
+    assert_eq!(s.tracks[0].state, TrackState::Playing);
+    assert!(r.notices().contains(&LooperNotice::MaxLengthReached { track: 0 }));
+}
+
+#[test]
+fn metronome_loop_longer_than_buffers_is_rejected() {
+    let mut r = Rig::new(LooperConfig { max_loop_seconds: 1.0, ..config(0) }, transport(1_000, LoopMode::Free));
+    let mut t = one_bar_synced(); // 2000 frames > 1000-frame buffers
+    t.sample_rate = 1_000;
+    r.send(C::SetTransport { transport: t });
+    r.silence(1);
+    assert!(r.notices().contains(&rejected(RejectReason::LoopTooLong)));
+    assert_eq!(r.snap().transport.mode, LoopMode::Free);
+}
+
+#[test]
+fn clear_releases_buffers_and_resets_free_loop() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, |_| 0.1);
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::Overdub { track: 0 });
+    r.silence(500);
+    r.send(C::ClearAll);
+    r.silence(1);
+    let s = r.snap();
+    assert_eq!(s.loop_period, None);
+    assert_eq!(s.free_layers, 6);
+    assert!(s.tracks[..2].iter().all(|t| t.state == TrackState::Empty));
+
+    // The next first take defines a new length.
+    r.send(C::Record { track: 1 });
+    r.run(500, |_| 0.1);
+    r.send(C::StopRecording { track: 1 });
+    r.silence(1);
+    assert_eq!(r.snap().loop_period, Some(500.0));
+}
+
+// ---- transport ------------------------------------------------------------------
+
+#[test]
+fn timing_changes_are_locked_while_loops_exist() {
+    let mut r = Rig::new(config(0), one_bar_synced());
+    r.send(C::Play);
+    r.send(C::Record { track: 0 });
+    r.silence(2_100);
+
+    let mut faster = r.snap().transport;
+    faster.bpm = 100.0;
+    r.send(C::SetTransport { transport: faster });
+    r.silence(1);
+    assert!(r.notices().contains(&rejected(RejectReason::TransportLocked)));
+    assert_eq!(r.snap().transport.bpm, 120.0);
+
+    let mut louder = r.snap().transport;
+    louder.metronome.gain_db = -12.0;
+    r.send(C::SetTransport { transport: louder });
+    r.silence(1);
+    assert_eq!(r.snap().transport.metronome.gain_db, -12.0);
+    assert!(r.notices().is_empty());
+}
+
+#[test]
+fn pause_holds_position_and_stop_rewinds() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, impulse(100));
+    r.send(C::StopRecording { track: 0 });
+    r.silence(50); // t = 1050
+    r.send(C::Pause);
+    r.silence(500);
+    assert_eq!(r.core.transport_frame(), 1_050);
+    assert_eq!(r.snap().run, RunState::Paused);
+    r.send(C::Resume);
+    r.silence(100);
+    // Phase 100 of cycle 1 (t = 1100) is heard 50 frames after resuming.
+    assert_eq!(nonzero_from(&r.out, 1_001), vec![1_600]);
+
+    r.send(C::Stop);
+    r.silence(10);
+    assert_eq!(r.snap().run, RunState::Stopped);
+    assert_eq!(r.core.transport_frame(), 0);
+    let before = r.out.len();
+    r.send(C::Play);
+    r.silence(200);
+    assert_eq!(nonzero_from(&r.out, before), vec![before + 100], "playback restarts at the loop start");
+}
+
+#[test]
+fn musical_position_tracks_the_clock() {
+    let mut t = one_bar_synced();
+    t.metronome.subdivision = 2;
+    let mut r = Rig::new(config(0), t);
+    r.send(C::Play);
+    r.silence(2_000 + 500 + 300); // bar 2, beat 2, second half
+    let p = r.snap().position;
+    assert_eq!((p.bar, p.beat, p.subdivision), (2, 2, 2));
+}
+
+// ---- fades ------------------------------------------------------------------------
+
+#[test]
+fn recording_edges_are_faded_without_moving_boundaries() {
+    let mut r = Rig::new(config(10), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, |_| 1.0);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1_000);
+    assert_eq!(r.snap().loop_period, Some(1_000.0), "fades do not change the loop length");
+    let cycle = &r.out[1_000..2_000];
+    assert!((cycle[0] - 0.1).abs() < 1e-6);
+    assert!((cycle[9] - 1.0).abs() < 1e-6);
+    assert!((cycle[500] - 1.0).abs() < 1e-6);
+    assert!((cycle[990] - 1.0).abs() < 1e-6);
+    assert!((cycle[999] - 0.1).abs() < 1e-6);
+}
+
+// ---- state for the UI ---------------------------------------------------------------
+
+#[test]
+fn looper_state_trims_tracks_and_serialises() {
+    let r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    let state = LooperState::from_snapshot(&r.snap(), &IoCounters::default(), 1234);
+    assert_eq!(state.tracks.len(), 2);
+    let json = serde_json::to_value(&state).unwrap();
+    assert_eq!(json["run"], "stopped");
+    assert_eq!(json["tracks"][0]["state"], "empty");
+    assert_eq!(json["memoryBytes"], 1234);
+    let notice = serde_json::to_value(rejected(RejectReason::PoolExhausted)).unwrap();
+    assert_eq!(notice, serde_json::json!({"kind": "rejected", "reason": "poolExhausted"}));
+}

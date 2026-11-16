@@ -1,11 +1,11 @@
 //! Tauri shell: exposes engine commands to the frontend and forwards engine
 //! events as a single `engine://event` stream. No audio processing happens
-//! here, and no raw samples cross the bridge — only ~30 Hz level readings,
-//! status changes, and errors.
+//! here, and no raw samples cross the bridge: only ~30 Hz level readings and
+//! looper state, status changes, notices, and errors.
 
 use tauri::{Emitter, Manager, RunEvent, State};
 use voiceloop_engine::model::AudioDevice;
-use voiceloop_engine::{Engine, EngineError, EngineStatus};
+use voiceloop_engine::{Engine, EngineError, EngineStatus, LooperCommand};
 
 pub const ENGINE_EVENT: &str = "engine://event";
 
@@ -22,6 +22,13 @@ fn start_input(engine: State<'_, Engine>, device_id: Option<String>) -> Result<E
 #[tauri::command]
 fn stop_input(engine: State<'_, Engine>) -> Result<EngineStatus, EngineError> {
     engine.stop_input()
+}
+
+/// All looper/transport actions go through one command carrying a tagged enum,
+/// e.g. `{ "type": "record", "track": 0 }`. Results arrive as `looper` events.
+#[tauri::command]
+fn looper_command(engine: State<'_, Engine>, command: LooperCommand) -> Result<(), EngineError> {
+    engine.looper(command)
 }
 
 #[tauri::command]
@@ -45,7 +52,8 @@ pub fn run() {
             list_input_devices,
             start_input,
             stop_input,
-            engine_status
+            engine_status,
+            looper_command
         ])
         .build(tauri::generate_context!())
         .expect("error while building VoiceLoop");

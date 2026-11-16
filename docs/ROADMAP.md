@@ -16,14 +16,26 @@ working, installable app.
 - [ ] macOS build and microphone-permission check on real hardware
 - [ ] Installable bundle (`npm run app:build`) signed for macOS
 
-## Milestone 1: Looper
+## Milestone 1A: Native looper engine (code complete, unverified)
 
-- Output stream and click track (metronome) driven by the engine frame clock
-- Time signatures, subdivisions, count-in (UI already present)
-- Round-trip latency calibration (loopback) and compensation
-- Free looping (first take sets length) and synced looping (bar-quantised)
-- Multiple tracks, overdub as layers, undo/redo
-- WAV recording to the project folder; `project.json` save/load
+- [x] Output stream as master clock; input→looper ring with xrun accounting
+- [x] Transport: play/stop/pause/resume, BPM, any meter (3/4, 4/4, 5/4, 7/8 …),
+      subdivisions, loop length in bars + beats, count-in, musical position
+- [x] Metronome click generated in the output callback (accent hook for custom patterns)
+- [x] Free loop mode and Metronome mode on one recording/playback engine
+- [x] Two tracks (configurable up to 8): record, play/stop, overdub layers, mute, level, undo, clear
+- [x] Preallocated layer pool, memory limit, off-thread buffer recycling, edge fades
+- [x] Studio UI wired to looper commands and state
+- [x] 51 deterministic unit tests (synthetic audio)
+- [ ] **Run the tests and the app on macOS** (see `docs/projects/looper-01/README.md`)
+- [ ] Verify on hardware: timing, clicks, overdub alignment, xrun counters
+
+## Milestone 1B: Looper hardening
+
+- Loopback latency calibration (replace the manual latency setting)
+- Redo; per-track loop multiples (×2, ×½)
+- WAV recording via `StorageSink` to the project folder; `project.json` save/load
+- Drift correction with `rubato` instead of skipping frames
 - Opt-in input monitoring
 
 ## Milestone 2: Pitch and rhythm analysis

@@ -1,16 +1,17 @@
 //! Engine control thread.
 //!
 //! ```text
-//!  UI / Tauri commands ──mpsc──▶ control thread ──owns──▶ cpal::Stream (audio callback)
-//!                                     ▲                         │
-//!                                     └──── rtrb<MeterFrame> ◀──┘
-//!                                     │
-//!                                     └──▶ EventSink (≈30 Hz level events, status, errors)
+//!  UI / Tauri commands ──mpsc──▶ control thread ──owns──▶ input stream  (meter + looper feed)
+//!                                     │                  └─▶ output stream (LooperCore: master clock)
+//!                                     ├── rtrb<MeterFrame>, rtrb<LooperSnapshot>, rtrb<LooperNotice> ◀── audio
+//!                                     ├── rtrb<LooperCommand> ──▶ audio
+//!                                     ├── LayerRecycler: zeroes released layers off the audio thread
+//!                                     └──▶ EventSink (~30 Hz level + looper state, status, errors)
 //! ```
 //!
-//! The control thread is never on the realtime path. It owns CPAL streams
-//! (not `Send` on all platforms), handles commands, drains the meter ring,
-//! and throttles meter events to UI rate.
+//! The control thread is never on the realtime path. It owns the CPAL streams
+//! (not `Send` on all platforms), handles commands, drains rings, and
+//! throttles events to UI rate.
 
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -19,13 +20,16 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::capture::{CaptureInfo, InputCapture};
+use crate::capture::{CaptureInfo, InputCapture, LooperFeed};
 use crate::devices;
 use crate::error::EngineError;
+use crate::looper::io::{self as looper_io, LooperPlayback, OutputInfo};
+use crate::looper::{IoCounters, LooperCommand, LooperConfig, LooperNotice, LooperSnapshot, LooperState};
 use crate::meter::{amplitude_to_db, MeterFrame};
 use crate::model::AudioDevice;
+use crate::transport::TransportState;
 
-/// Interval between level events delivered to the sink (~30 Hz).
+/// Interval between level/looper events delivered to the sink (~30 Hz).
 pub const LEVEL_EVENT_INTERVAL: Duration = Duration::from_millis(33);
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -45,9 +49,12 @@ pub struct LevelReading {
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatus {
     pub capturing: bool,
-    /// Input monitoring (input → speakers). Always false until output routing exists.
+    /// Input monitoring (input → speakers). Always false: not implemented.
     pub monitoring: bool,
     pub capture: Option<CaptureInfo>,
+    /// Output stream hosting the looper, when running.
+    pub output: Option<OutputInfo>,
+    pub looper: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -56,15 +63,20 @@ pub enum EngineEvent {
     Level(LevelReading),
     Status(EngineStatus),
     Error(EngineError),
-    /// Non-fatal advisory, e.g. sustained digital silence (likely a denied
-    /// macOS microphone permission, which CoreAudio reports as zeros, not an error).
+    /// Non-fatal advisory.
     Warning(EngineWarning),
+    Looper(LooperState),
+    LooperNotice(LooperNotice),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "message", rename_all = "camelCase")]
 pub enum EngineWarning {
+    /// Sustained exact digital silence: on macOS usually a denied microphone permission,
+    /// which CoreAudio reports as zeros rather than an error.
     SilentInput(String),
+    /// Input runs (metering works) but the looper's output stream could not start.
+    LooperUnavailable(String),
 }
 
 /// Exact-zero input for this long triggers [`EngineWarning::SilentInput`].
@@ -80,6 +92,8 @@ enum Command {
     StartInput(Option<String>, Reply<EngineStatus>),
     StopInput(Reply<EngineStatus>),
     Status(Reply<EngineStatus>),
+    Looper(LooperCommand, Reply<()>),
+    SetLooperConfig(LooperConfig, Reply<()>),
     Shutdown,
 }
 
@@ -124,8 +138,8 @@ impl Engine {
         self.request(Command::ListInputDevices)
     }
 
-    /// Start capturing from `device_id` (or the system default when `None`).
-    /// Restarts capture if already running.
+    /// Start audio: input capture (meter) plus, when possible, the output
+    /// stream hosting the looper. Restarts if already running.
     pub fn start_input(&self, device_id: Option<String>) -> Result<EngineStatus, EngineError> {
         self.request(|r| Command::StartInput(device_id, r))
     }
@@ -138,7 +152,18 @@ impl Engine {
         self.request(Command::Status)
     }
 
-    /// Stop capture, release devices, and join the control thread.
+    /// Send a looper command. `SetTransport` is accepted while audio is stopped
+    /// (it applies when audio starts); other commands need running audio.
+    pub fn looper(&self, command: LooperCommand) -> Result<(), EngineError> {
+        self.request(|r| Command::Looper(command, r))
+    }
+
+    /// Resource limits for the looper; applied the next time audio starts.
+    pub fn set_looper_config(&self, config: LooperConfig) -> Result<(), EngineError> {
+        self.request(|r| Command::SetLooperConfig(config, r))
+    }
+
+    /// Stop audio, release devices and buffers, and join the control thread.
     pub fn shutdown(&self) {
         let _ = self.inner.tx.send(Command::Shutdown);
         if let Some(handle) = self.inner.thread.lock().ok().and_then(|mut t| t.take()) {
@@ -150,6 +175,11 @@ impl Engine {
 struct ControlLoop {
     sink: EventSink,
     capture: Option<InputCapture>,
+    playback: Option<LooperPlayback>,
+    /// Desired transport; also refreshed from looper snapshots.
+    transport: TransportState,
+    looper_config: LooperConfig,
+    latest_snapshot: Option<LooperSnapshot>,
     stream_err_tx: mpsc::Sender<String>,
     stream_err_rx: mpsc::Receiver<String>,
     latest: Option<MeterFrame>,
@@ -168,6 +198,10 @@ impl ControlLoop {
         Self {
             sink,
             capture: None,
+            playback: None,
+            transport: TransportState::default(),
+            looper_config: LooperConfig::default(),
+            latest_snapshot: None,
             stream_err_tx,
             stream_err_rx,
             latest: None,
@@ -185,6 +219,8 @@ impl ControlLoop {
             capturing: self.capture.is_some(),
             monitoring: false,
             capture: self.capture.as_ref().map(|c| c.info.clone()),
+            output: self.playback.as_ref().map(|p| p.info.clone()),
+            looper: self.playback.is_some(),
         }
     }
 
@@ -201,9 +237,15 @@ impl ControlLoop {
                 Err(RecvTimeoutError::Timeout) => {}
             }
             self.drain_stream_errors();
-            self.pump_meter();
+            self.drain_meter();
+            self.drain_looper();
+            if self.capture.is_some() && self.last_emit.elapsed() >= LEVEL_EVENT_INTERVAL {
+                self.last_emit = Instant::now();
+                self.emit_level();
+                self.emit_looper();
+            }
         }
-        self.stop_capture();
+        self.stop_audio();
     }
 
     fn handle(&mut self, cmd: Command) {
@@ -212,25 +254,14 @@ impl ControlLoop {
                 let _ = reply.send(devices::list_input_devices());
             }
             Command::StartInput(device_id, reply) => {
-                self.stop_capture();
-                let result = InputCapture::start(device_id.as_deref(), self.stream_err_tx.clone())
-                    .map(|cap| {
-                        self.capture = Some(cap);
-                        self.latest = None;
-                        self.peak_since_emit = 0.0;
-                        self.dropped = 0;
-                        self.last_end_frame = 0;
-                        self.silent_since = None;
-                        self.silence_warned = false;
-                        self.status()
-                    });
+                let result = self.start_audio(device_id);
                 if let Ok(status) = &result {
                     (self.sink)(EngineEvent::Status(status.clone()));
                 }
                 let _ = reply.send(result);
             }
             Command::StopInput(reply) => {
-                self.stop_capture();
+                self.stop_audio();
                 let status = self.status();
                 (self.sink)(EngineEvent::Status(status.clone()));
                 let _ = reply.send(Ok(status));
@@ -238,14 +269,108 @@ impl ControlLoop {
             Command::Status(reply) => {
                 let _ = reply.send(Ok(self.status()));
             }
+            Command::Looper(command, reply) => {
+                let _ = reply.send(self.send_looper(command));
+            }
+            Command::SetLooperConfig(config, reply) => {
+                let result = config.max_loop_frames(48_000).map(|_| {
+                    self.looper_config = config;
+                });
+                let _ = reply.send(result);
+            }
             Command::Shutdown => unreachable!("handled in run loop"),
         }
     }
 
-    fn stop_capture(&mut self) {
+    fn send_looper(&mut self, command: LooperCommand) -> Result<(), EngineError> {
+        if let LooperCommand::SetTransport { transport } = command {
+            transport.validate().map_err(|e| EngineError::Invalid(e.to_string()))?;
+            if self.playback.is_none() {
+                self.transport = transport;
+                return Ok(());
+            }
+        }
+        match self.playback.as_mut() {
+            Some(p) => p
+                .handles
+                .commands
+                .push(command)
+                .map_err(|_| EngineError::Busy("looper command queue is full".into())),
+            None => Err(EngineError::Invalid("start audio input before using the looper".into())),
+        }
+    }
+
+    fn start_audio(&mut self, device_id: Option<String>) -> Result<EngineStatus, EngineError> {
+        self.stop_audio();
+
+        let counters = Arc::new(IoCounters::default());
+        let mut playback: Option<LooperPlayback> = None;
+        let mut feed: Option<LooperFeed> = None;
+        let mut rate: Option<u32> = None;
+        let mut looper_problem: Option<String> = None;
+
+        match looper_io::default_output() {
+            Ok((device, supported)) => {
+                let sample_rate = supported.sample_rate().0;
+                let capacity = ((sample_rate / 2) as usize).max(4096);
+                let (tx, rx) = rtrb::RingBuffer::<f32>::new(capacity);
+                match LooperPlayback::start(
+                    device,
+                    supported,
+                    &self.looper_config,
+                    self.transport,
+                    rx,
+                    counters.clone(),
+                    self.stream_err_tx.clone(),
+                ) {
+                    Ok(p) => {
+                        playback = Some(p);
+                        feed = Some(LooperFeed { tx, counters: counters.clone() });
+                        rate = Some(sample_rate);
+                    }
+                    Err(e) => looper_problem = Some(e.to_string()),
+                }
+            }
+            Err(e) => looper_problem = Some(e.to_string()),
+        }
+
+        let capture = match InputCapture::start(device_id.as_deref(), rate, feed, self.stream_err_tx.clone()) {
+            Ok(c) => c,
+            Err(e) if playback.is_some() => {
+                // e.g. the input device cannot run at the output rate: keep metering, drop the looper.
+                if let Some(p) = playback.take() {
+                    p.stop();
+                }
+                looper_problem = Some(format!("input cannot run with the output device: {e}"));
+                InputCapture::start(device_id.as_deref(), None, None, self.stream_err_tx.clone())?
+            }
+            Err(e) => return Err(e),
+        };
+
+        self.capture = Some(capture);
+        self.playback = playback;
+        self.latest = None;
+        self.latest_snapshot = None;
+        self.peak_since_emit = 0.0;
+        self.dropped = 0;
+        self.last_end_frame = 0;
+        self.silent_since = None;
+        self.silence_warned = false;
+        if let Some(problem) = looper_problem {
+            (self.sink)(EngineEvent::Warning(EngineWarning::LooperUnavailable(problem)));
+        }
+        Ok(self.status())
+    }
+
+    /// Stop input first (no more pushes into the looper ring), then output.
+    fn stop_audio(&mut self) {
         if let Some(cap) = self.capture.take() {
             cap.stop();
         }
+        if let Some(p) = self.playback.take() {
+            p.stop();
+        }
+        self.latest_snapshot = None;
     }
 
     fn drain_stream_errors(&mut self) {
@@ -254,15 +379,15 @@ impl ControlLoop {
             failed = Some(msg);
         }
         if let Some(msg) = failed {
-            if self.capture.is_some() {
-                self.stop_capture();
+            if self.capture.is_some() || self.playback.is_some() {
+                self.stop_audio();
                 (self.sink)(EngineEvent::Error(EngineError::PermissionOrUnavailable(msg)));
                 (self.sink)(EngineEvent::Status(self.status()));
             }
         }
     }
 
-    fn pump_meter(&mut self) {
+    fn drain_meter(&mut self) {
         let Some(cap) = self.capture.as_mut() else { return };
         while let Ok(frame) = cap.meter_rx.pop() {
             // Windows are fixed-size, so a gap larger than one window means the
@@ -280,9 +405,7 @@ impl ControlLoop {
                 self.silent_since = None;
             }
         }
-        if !self.silence_warned
-            && self.silent_since.is_some_and(|t| t.elapsed() >= SILENCE_WARNING_AFTER)
-        {
+        if !self.silence_warned && self.silent_since.is_some_and(|t| t.elapsed() >= SILENCE_WARNING_AFTER) {
             self.silence_warned = true;
             (self.sink)(EngineEvent::Warning(EngineWarning::SilentInput(
                 "The input is delivering exact digital silence. On macOS this usually means \
@@ -290,21 +413,40 @@ impl ControlLoop {
                     .to_string(),
             )));
         }
-        if self.last_emit.elapsed() >= LEVEL_EVENT_INTERVAL {
-            self.last_emit = Instant::now();
-            if let Some(f) = self.latest {
-                let peak = self.peak_since_emit;
-                self.peak_since_emit = 0.0;
-                (self.sink)(EngineEvent::Level(LevelReading {
-                    rms: f.rms,
-                    peak,
-                    rms_db: amplitude_to_db(f.rms),
-                    peak_db: amplitude_to_db(peak),
-                    frame: f.end_frame,
-                    dropped: self.dropped,
-                }));
-            }
+    }
+
+    fn drain_looper(&mut self) {
+        let Some(p) = self.playback.as_mut() else { return };
+        // Zero released layers here, off the audio thread.
+        p.handles.recycler.service();
+        while let Ok(notice) = p.handles.notices.pop() {
+            (self.sink)(EngineEvent::LooperNotice(notice));
         }
+        while let Ok(snapshot) = p.handles.snapshots.pop() {
+            self.latest_snapshot = Some(snapshot);
+        }
+    }
+
+    fn emit_level(&mut self) {
+        if let Some(f) = self.latest {
+            let peak = self.peak_since_emit;
+            self.peak_since_emit = 0.0;
+            (self.sink)(EngineEvent::Level(LevelReading {
+                rms: f.rms,
+                peak,
+                rms_db: amplitude_to_db(f.rms),
+                peak_db: amplitude_to_db(peak),
+                frame: f.end_frame,
+                dropped: self.dropped,
+            }));
+        }
+    }
+
+    fn emit_looper(&mut self) {
+        let (Some(p), Some(snapshot)) = (self.playback.as_ref(), self.latest_snapshot) else { return };
+        let state = LooperState::from_snapshot(&snapshot, &p.counters, p.memory_bytes);
+        self.transport = snapshot.transport;
+        (self.sink)(EngineEvent::Looper(state));
     }
 }
 
@@ -317,6 +459,7 @@ mod tests {
         let engine = Engine::start(Box::new(|_| {}));
         let status = engine.status().unwrap();
         assert!(!status.capturing);
+        assert!(!status.looper);
         assert!(!status.monitoring, "monitoring must be off by default");
         let status = engine.stop_input().unwrap();
         assert!(!status.capturing);
@@ -332,6 +475,28 @@ mod tests {
             err,
             EngineError::DeviceNotFound(_) | EngineError::Backend(_) | EngineError::NoInputDevice
         ));
+        engine.shutdown();
+    }
+
+    #[test]
+    fn looper_commands_need_audio_but_transport_can_be_preset() {
+        let engine = Engine::start(Box::new(|_| {}));
+        let mut t = TransportState::default();
+        t.bpm = 90.0;
+        assert!(engine.looper(LooperCommand::SetTransport { transport: t }).is_ok());
+        t.bpm = 1.0;
+        assert!(matches!(engine.looper(LooperCommand::SetTransport { transport: t }), Err(EngineError::Invalid(_))));
+        assert!(matches!(engine.looper(LooperCommand::Play), Err(EngineError::Invalid(_))));
+        engine.shutdown();
+    }
+
+    #[test]
+    fn looper_config_limits_are_enforced() {
+        let engine = Engine::start(Box::new(|_| {}));
+        let huge = LooperConfig { pool_layers: 1_000, max_loop_seconds: 600.0, ..LooperConfig::default() };
+        assert!(matches!(engine.set_looper_config(huge), Err(EngineError::ResourceLimit(_))));
+        assert!(engine.set_looper_config(LooperConfig::default()).is_ok());
+        engine.shutdown();
     }
 
     #[test]
@@ -343,5 +508,14 @@ mod tests {
         let ev = EngineEvent::Warning(EngineWarning::SilentInput("x".into()));
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(json, r#"{"type":"warning","payload":{"kind":"silentInput","message":"x"}}"#);
+    }
+
+    #[test]
+    fn looper_command_json_matches_frontend() {
+        let cmd: LooperCommand = serde_json::from_str(r#"{"type":"stopRecording","track":1}"#).unwrap();
+        assert_eq!(cmd, LooperCommand::StopRecording { track: 1 });
+        let cmd: LooperCommand =
+            serde_json::from_str(r#"{"type":"setTransport","transport":{"bpm":100,"mode":"synced"}}"#).unwrap();
+        assert!(matches!(cmd, LooperCommand::SetTransport { transport } if transport.bpm == 100.0));
     }
 }

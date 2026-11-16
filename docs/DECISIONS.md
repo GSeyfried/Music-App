@@ -83,6 +83,49 @@ renames are possible. Revisit when CPAL exposes ids.
 
 Revisit with `ts-rs` or `specta` once the models stabilise (M1).
 
+## D-010 Output callback is the master clock; looper runs inside it (Accepted, M1A)
+
+The looper must hear what it plays, so the clock that matters is the output
+device's. `LooperCore::process` runs in the output callback; `t` advances one
+per output frame. Input reaches it through a mono SPSC ring with priming,
+underrun, and drift accounting. Alternative rejected: a separate "engine
+thread" ticking on a timer (adds jitter and a third clock).
+
+## D-011 Fixed layer pool recycled through rings (Accepted, M1A)
+
+All layer buffers are allocated before the stream starts. The audio thread
+moves `Box<[f32]>` in and out of wait-free rings; the control thread zeroes
+returned buffers. This avoids allocation, freeing, and large memsets on the
+audio thread, at the cost of a fixed memory reservation (≈ 46 MB by default) and
+a hard cap on loop length and layer count. No general garbage collector.
+
+## D-012 One shared master loop; absolute grid maths (Accepted, M1A)
+
+All tracks share `{origin, period}`. Grid and cycle frames are `round(k × step)`,
+computed from the absolute index, so fractional periods never drift.
+Per-track loop multiples (×2, ×½) and polymeter are future work: they become
+per-track `{origin, period}` derived from the same clock.
+
+## D-013 Overdubs are additive layers; undo = pop (Accepted, M1A)
+
+Each overdub is a new zeroed layer that recording adds into (multi-pass
+sound-on-sound accumulates into the same layer). Playback sums layers. The
+base take is never modified after it closes. Cost: playback reads N layers per
+frame (bounded by `max_layers_per_track`).
+
+## D-014 Metronome-mode recording starts at the next loop boundary (Accepted, M1A)
+
+Record on an empty track waits for the next loop cycle start and captures
+exactly one cycle, so every loop is phase-aligned without trimming. Overdubs
+quantise to bars instead, for quicker entry. Tradeoff: up to one loop of wait.
+Revisit with a "record from next bar" option once looping on hardware is verified.
+
+## D-015 Latency compensation is a manual setting for now (Open)
+
+`SetInputLatency` shifts recordings that follow a reference by a fixed number of
+frames. CPAL does not report reliable round-trip latency. Plan: a loopback
+calibration (play a click, detect it in the input) in Milestone 1B.
+
 ## Open tradeoffs
 
 - **Duplex alignment:** separate CPAL input and output streams have independent

@@ -15,6 +15,12 @@ pub enum EngineError {
     UnsupportedFormat(String),
     #[error("audio backend error: {0}")]
     Backend(String),
+    #[error("invalid request: {0}")]
+    Invalid(String),
+    #[error("resource limit: {0}")]
+    ResourceLimit(String),
+    #[error("engine busy: {0}")]
+    Busy(String),
     #[error("the engine control thread has stopped")]
     EngineStopped,
 }

@@ -115,6 +115,32 @@ button.ghost { background: none; }
 .beat-grid .accent { background: var(--accent); border-color: var(--accent); }
 .beat-grid .sub { width: 10px; }
 
+.beat-grid .now { outline: 2px solid var(--text); outline-offset: 1px; }
+
+.hint { margin: 0; font-size: 12px; color: var(--muted); }
+.mode-toggle { display: flex; gap: 4px; margin-left: auto; }
+.run-state { font-size: 12px; color: var(--muted); }
+.run-state.running { color: var(--meter-low); }
+.run-state.countIn { color: var(--meter-high); }
+
+.loop-progress { position: relative; height: 18px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+.loop-progress-fill { position: absolute; inset: 0; transform-origin: left; background: var(--accent); opacity: 0.35; }
+.loop-progress span { position: relative; font-size: 11px; padding: 0 8px; line-height: 18px; }
+
+.tracks { display: flex; flex-direction: column; gap: var(--gap); }
+.track-strip { border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.track-strip.recording, .track-strip.overdubbing { border-color: var(--danger); }
+.track-strip.armed { border-color: var(--meter-high); }
+.track-head { display: flex; align-items: baseline; gap: 10px; }
+.track-state { font-size: 12px; color: var(--muted); }
+.track-state.recording, .track-state.overdubbing { color: var(--danger); }
+.track-state.playing { color: var(--meter-low); }
+.track-state.armed { color: var(--meter-high); }
+.rec-btn { color: var(--danger); }
+button.active { background: var(--text); color: var(--bg); }
+.level { min-width: 140px; }
+.level input[type="range"] { padding: 0; }
+
 .pitch-display { display: flex; align-items: baseline; justify-content: center; gap: 12px; padding: 12px 0; }
 .pitch-display .note { font-size: 56px; font-weight: 600; }
 .pitch-display .cents { color: var(--muted); }

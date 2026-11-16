@@ -27,7 +27,7 @@ cd Music-App
 bash scripts/mac-setup.sh            # checks prereqs, runs npm ci
 
 npm run typecheck                 # TypeScript, seconds
-npm run engine:test               # first Rust compile of the engine (1–3 min) + 12 unit tests
+npm run engine:test               # first Rust compile of the engine (1–3 min) + 51 unit tests
 npm run engine:meter              # headless mic test: lists devices, meters default input for 3 s
 npm run app:dev                   # first Tauri compile (3–10 min), opens the VoiceLoop window
 ```

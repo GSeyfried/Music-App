@@ -42,11 +42,22 @@ export interface MetronomeSettings {
   countInBars: number;
 }
 
+/** free: the first take sets the loop length. synced ("Metronome mode"): length from BPM × meter × loopLength. */
+export type LoopMode = "free" | "synced";
+
+export interface LoopLength {
+  bars: number;
+  beats: number;
+}
+
 export interface TransportState {
   playState: PlayState;
+  /** Beats per minute; a beat is the time-signature denominator note (7/8 counts eighths). */
   bpm: number;
   timeSignature: TimeSignature;
   metronome: MetronomeSettings;
+  mode: LoopMode;
+  loopLength: LoopLength;
   position: FramePos;
   sampleRate: number;
 }
@@ -56,6 +67,8 @@ export const defaultTransport: TransportState = {
   bpm: 120,
   timeSignature: { numerator: 4, denominator: 4 },
   metronome: { enabled: true, subdivision: 1, accentDownbeat: true, gainDb: -6, countInBars: 1 },
+  mode: "free",
+  loopLength: { bars: 2, beats: 0 },
   position: 0,
   sampleRate: 48_000,
 };
@@ -63,8 +76,6 @@ export const defaultTransport: TransportState = {
 // ---- Project / session ---------------------------------------------------
 
 export type TrackKind = "audio" | "midi";
-/** free: first take sets the loop length. synced: loop length snaps to whole bars. */
-export type LoopMode = "free" | "synced";
 
 /** Non-destructive window onto an immutable source recording. */
 export interface AudioClip {
