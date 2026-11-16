@@ -1,0 +1,18 @@
+# Dependencies and build output
+node_modules/
+dist/
+target/
+src-tauri/gen/schemas/
+
+# Reference source trees (evaluation only; restore with `npm run refs:fetch`)
+reference-packages/*/
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.log

@@ -1,0 +1,19 @@
+[package]
+name = "voiceloop-engine"
+description = "Native audio engine for VoiceLoop: devices, capture, metering, transport. Independent of Tauri."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cpal = "0.16"
+rtrb = "0.3"
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[[example]]
+name = "meter"

@@ -1,0 +1,5 @@
+# Used by rustup on the build machine (macOS). Stable channel; rustfmt/clippy for checks.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

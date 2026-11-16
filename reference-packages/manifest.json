@@ -1,0 +1,159 @@
+{
+  "$comment": "Reference source repositories for evaluation only. NOT application dependencies. Restore with: npm run refs:fetch. Record checked-out SHAs with: npm run refs:lock.",
+  "packages": [
+    {
+      "name": "cpal",
+      "dir": "cpal",
+      "url": "https://github.com/RustAudio/cpal",
+      "category": "native-rust-audio",
+      "sha": "40ff3adea81757326debba6b2befb747a6699d50",
+      "license": "Apache-2.0",
+      "capabilities": "Cross-platform audio device enumeration and input/output stream callbacks (CoreAudio, WASAPI, ASIO, ALSA, AAudio, iOS).",
+      "integration": "Direct crates.io dependency of crates/voiceloop-engine (already adopted).",
+      "limitations": "Raw device I/O only: no mixing, resampling, routing, or duplex synchronisation. Input and output are separate streams with independent clocks."
+    },
+    {
+      "name": "midir",
+      "dir": "midir",
+      "url": "https://github.com/Boddlnagg/midir",
+      "category": "native-rust-audio",
+      "sha": "b2cb94548237fdc557758bb78610853d4773a36b",
+      "license": "MIT",
+      "capabilities": "Cross-platform realtime MIDI input/output (CoreMIDI, WinMM/WinRT, ALSA, JACK, Web MIDI).",
+      "integration": "Direct crates.io dependency when MIDI work begins (Milestone 1/4).",
+      "limitations": "Input callbacks run on a backend thread with host timestamps; mapping to the audio clock is our job. No MIDI file parsing."
+    },
+    {
+      "name": "rtrb",
+      "dir": "rtrb",
+      "url": "https://github.com/mgeier/rtrb",
+      "category": "native-rust-audio",
+      "sha": "778c018221b1d97bfb9c3b8bc58fcef7d17f78e1",
+      "license": "MIT OR Apache-2.0",
+      "capabilities": "Wait-free single-producer single-consumer ring buffer suitable for the realtime audio thread.",
+      "integration": "Direct crates.io dependency of crates/voiceloop-engine (already adopted).",
+      "limitations": "SPSC only. Fixed capacity chosen at construction."
+    },
+    {
+      "name": "fundsp",
+      "dir": "fundsp",
+      "url": "https://github.com/SamiPerttu/fundsp",
+      "category": "native-rust-audio",
+      "sha": "559584043aa3369e92d5aad12a5e3b003cfacfd5",
+      "license": "MIT OR Apache-2.0",
+      "capabilities": "Composable audio graph notation, oscillators, filters, envelopes, reverb, delay, dynamics; realtime-safe graph processing.",
+      "integration": "Candidate crates.io dependency for synths/effects in Milestone 4. Evaluate allocation behaviour of graph edits first.",
+      "limitations": "API evolves between versions; heavy generic types increase compile time. No pitch detection or time stretching."
+    },
+    {
+      "name": "rubato",
+      "dir": "rubato",
+      "url": "https://github.com/HEnquist/rubato",
+      "category": "native-rust-audio",
+      "sha": "f8711e2252a419a8f61d5dfe378c9f0da6b2ba7e",
+      "license": "MIT OR Apache-2.0",
+      "capabilities": "Synchronous and asynchronous (sinc / polynomial) sample-rate conversion, realtime-capable with preallocated buffers.",
+      "integration": "Candidate crates.io dependency for device-rate vs project-rate conversion and clock drift correction.",
+      "limitations": "Resampling only; not a pitch shifter or time stretcher."
+    },
+    {
+      "name": "tracktion_engine",
+      "dir": "tracktion_engine",
+      "url": "https://github.com/Tracktion/tracktion_engine",
+      "category": "music-production-engine",
+      "sha": "c6293127cdc0a8488aea2ae0907f4709ee89c228",
+      "license": "GPL-3.0-or-later or commercial Tracktion licence",
+      "capabilities": "Full DAW engine: Edit/Track/Clip model, tempo and time-signature sequence, transport, audio and MIDI recording, loop recording, clip launcher, plugin hosting, rendering.",
+      "integration": "Architectural reference. Direct use would mean a C++/JUCE engine and GPL-3.0 or a paid licence.",
+      "limitations": "Requires JUCE (git submodule, skipped in shallow retrieval). Large C++ codebase; GPL/commercial licensing."
+    },
+    {
+      "name": "juce",
+      "dir": "juce",
+      "url": "https://github.com/juce-framework/JUCE",
+      "category": "music-production-engine",
+      "sha": "d60b7a78030661574a615b586d9325ba7a7fa7dd",
+      "license": "AGPL-3.0 or commercial JUCE 9 EULA (examples ISC)",
+      "capabilities": "C++ application framework: audio device manager, audio/MIDI I/O, DSP module, plugin hosting (VST3/AU/LV2), GUI, iOS/macOS/Windows targets.",
+      "integration": "Architectural reference. Direct use implies replacing the Rust engine with C++ and AGPL or a paid licence.",
+      "limitations": "Large. Licensing obligations for closed distribution."
+    },
+    {
+      "name": "waveform-playlist",
+      "dir": "waveform-playlist",
+      "url": "https://github.com/naomiaro/waveform-playlist",
+      "category": "music-production-engine",
+      "sha": "fa05cb7457ca11e388d09f400970a0ac653da3aa",
+      "license": "MIT",
+      "capabilities": "Browser multitrack waveform display, selection, trimming, fades, recording, mixing and export (Web Audio).",
+      "integration": "UI reference for waveform rendering and editing interactions; audio paths are Web Audio and would not be reused.",
+      "limitations": "Web Audio engine; not suitable as our realtime engine."
+    },
+    {
+      "name": "mloop",
+      "dir": "mloop",
+      "url": "https://github.com/gdamdam/mloop",
+      "category": "music-production-engine",
+      "sha": "106ceb4c68075a3d7df45fca2330d6d394d0b83e",
+      "license": "AGPL-3.0",
+      "capabilities": "Browser live looper: recording modes, overdub, sync, undo.",
+      "integration": "Behavioural reference only (AGPL-3.0). Do not copy or port code.",
+      "limitations": "AGPL-3.0; Web Audio implementation."
+    },
+    {
+      "name": "pitchy",
+      "dir": "pitchy",
+      "url": "https://github.com/ianprime0509/pitchy",
+      "category": "analysis",
+      "sha": "d41851e038d05be4352245a4de414997b507cc53",
+      "license": "0BSD",
+      "capabilities": "McLeod Pitch Method fundamental-frequency detection with clarity (confidence) output.",
+      "integration": "Algorithm reference; MPM is straightforward to implement natively (or use the Rust pitch-detection crate).",
+      "limitations": "JavaScript; single-pitch (monophonic) only."
+    },
+    {
+      "name": "essentia.js",
+      "dir": "essentia.js",
+      "url": "https://github.com/MTG/essentia.js",
+      "category": "analysis",
+      "sha": "819c00e8f034dc709e3d330ed8ac9ed37dfdb767",
+      "license": "AGPL-3.0",
+      "capabilities": "WASM build of Essentia: onset detection, beat tracking, key, pitch (YIN, Melodia), spectral features.",
+      "integration": "Reference only unless AGPL obligations or an Essentia commercial licence are accepted.",
+      "limitations": "AGPL-3.0. WASM in the webview would put analysis on the UI side, against our architecture."
+    },
+    {
+      "name": "signalsmith-stretch",
+      "dir": "signalsmith-stretch",
+      "url": "https://github.com/Signalsmith-Audio/signalsmith-stretch",
+      "category": "analysis",
+      "sha": "88061fd4eda56a2353c5d65c74aa3f4ccf76f9da",
+      "license": "MIT",
+      "capabilities": "High-quality polyphonic time stretching and pitch shifting (header-only C++).",
+      "integration": "Candidate for direct native integration via a small C++ shim + cc/bindgen, or an existing Rust binding crate.",
+      "limitations": "C++ build integration required; depends on signalsmith-linear (separate repo)."
+    },
+    {
+      "name": "rnnoise",
+      "dir": "rnnoise",
+      "url": "https://github.com/xiph/rnnoise",
+      "category": "noise-reduction",
+      "sha": "70f1d256acd4b34a572f999a05c87bf00b67730d",
+      "license": "BSD-3-Clause",
+      "capabilities": "RNN-based speech noise suppression at 48 kHz, 10 ms frames.",
+      "integration": "Optional, user-enabled, offline/clean-up processing only. Pure-Rust port (nnnoiseless) exists.",
+      "limitations": "Speech-trained: damages musical transients and sustained tones. Model weights are downloaded separately (not retrieved)."
+    },
+    {
+      "name": "tone.js",
+      "dir": "tone.js",
+      "url": "https://github.com/Tonejs/Tone.js",
+      "category": "timing-synthesis",
+      "sha": "42e6eec421d35e4280b00317392dc3725e44bf8e",
+      "license": "MIT",
+      "capabilities": "Musical transport (BPM, time signature, loop points), lookahead scheduling, Time notation ('4n', '1m'), synths, effects.",
+      "integration": "Reference for musical time abstractions and transport API design. Not used for realtime audio.",
+      "limitations": "Web Audio based; scheduling depends on the browser audio clock and JS timers."
+    }
+  ]
+}

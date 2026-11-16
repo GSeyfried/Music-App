@@ -7,8 +7,24 @@ Personal project workspace for the Music App. Remote:
 ## First reads
 
 1. `AGENTS.md` (this file)
-2. `docs/README.md`
+2. `README.md`, then `docs/ARCHITECTURE.md` and `docs/DECISIONS.md`
 3. `docs/projects/README.md`, then the folder for whichever project is in scope
+
+## Code boundaries
+
+- `crates/voiceloop-engine` must not depend on Tauri. The Tauri crate (`src-tauri`) stays a thin adapter.
+- Realtime callback code (`capture.rs`, `meter.rs`) must not allocate, lock, block, log, or do I/O.
+  Use preallocated `rtrb` rings.
+- Never send raw audio over the Tauri bridge. Send summaries and events only.
+- `src/engine/bridge.ts` is the only frontend file that imports `@tauri-apps/api`.
+- Domain types are mirrored by hand: change `model.rs`/`transport.rs` and `src/models/domain.ts` together.
+- `reference-packages/*/` is git-ignored reference source. Never import or compile it, and never copy
+  or translate code from GPL/AGPL references (Tracktion, JUCE, mloop, Essentia).
+
+## Checks
+
+On the Mac: `npm run engine:test`, `npm run typecheck`, `cargo build -p voiceloop`, `npm run refs:verify`.
+On the Windows PC: only `npm run typecheck` and `npm run refs:verify`.
 
 ## Workspace boundary
 
@@ -17,6 +33,14 @@ Personal project workspace for the Music App. Remote:
   the user specifically authorizes it for that task. Reading outside files for
   reference is fine.
 - Approval for one outside change does not carry over to the next.
+
+## Build machines
+
+- **macOS (personal Mac) is the build and runtime target.** See `docs/MAC_SETUP.md`.
+- **Windows work PC: no native compilation.** Never run `cargo build/check/test/run`,
+  `tauri dev`, or `tauri build` there, and don't cross-compile. Lightweight checks are fine
+  (`npm run typecheck`, `node --check`, JSON validation, `npm run refs:verify`).
+  Ask before anything that may use substantial CPU, RAM, or disk.
 
 ## Session setup
 

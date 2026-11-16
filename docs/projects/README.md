@@ -15,4 +15,5 @@ Use lowercase-kebab-case folder names (for example `audio-player/`).
 
 | Project | Status |
 | --- | --- |
-| _none yet_ | |
+| [scaffold-01](scaffold-01/README.md): native foundation and reference library | Code complete; awaiting first macOS build |
+| [looper-01](looper-01/PROMPT.md): first functional looper | Proposed (prompt only) |
