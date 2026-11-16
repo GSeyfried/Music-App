@@ -1,0 +1,9 @@
+{
+  "name": "music-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/start-project-session.mjs",
+    "start:check": "node scripts/start-project-session.mjs --check"
+  }
+}
