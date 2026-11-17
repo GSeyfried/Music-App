@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { Alerts, EngineModeBanner, Toasts } from "./components/Alerts";
+import { MidiIndicator } from "./components/HardwarePanels";
 import { InputCluster } from "./components/InputControls";
 import { SettingsSheet } from "./components/SettingsSheet";
 import { ShortcutSheet, useLiveShortcuts } from "./components/Shortcuts";
+import { TrackInspector } from "./components/TrackInspector";
 import { UiProvider, useUi } from "./components/UiContext";
 import { Button } from "./components/ui/controls";
 import { EngineProvider, useEngineState } from "./engine/EngineContext";
@@ -55,6 +57,7 @@ function Shell() {
         </nav>
         <div className="topbar-end">
           <EngineBadge />
+          <MidiIndicator />
           <InputCluster />
           <Button
             variant="ghost"
@@ -79,6 +82,7 @@ function Shell() {
       <Toasts />
       <SettingsSheet />
       <ShortcutSheet />
+      <TrackInspector />
     </div>
   );
 }

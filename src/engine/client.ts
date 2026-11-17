@@ -9,9 +9,13 @@ import {
   type CommandName,
   type CommandResult,
   type EngineEvent,
+  type AudioConfig,
   type EngineTransport,
   type InputRoute,
   type LooperCommand,
+  type LooperConfig,
+  type MonitorConfig,
+  type OutputRoute,
 } from "./protocol";
 
 export type TransportKind = EngineTransport["kind"];
@@ -37,6 +41,17 @@ export interface EngineClient {
   looper(command: LooperCommand): Promise<void>;
   setAnalysisConfig(config: AnalysisConfig): Promise<void>;
   setInputRoute(route: InputRoute): Promise<CommandResult<"set_input_route">>;
+  listAudioDevices(): Promise<CommandResult<"list_audio_devices">>;
+  startAudio(config: Partial<AudioConfig>): Promise<CommandResult<"start_audio">>;
+  setOutputRoute(route: OutputRoute): Promise<CommandResult<"set_output_route">>;
+  setMonitor(monitor: MonitorConfig): Promise<CommandResult<"set_monitor">>;
+  listMidiInputs(): Promise<CommandResult<"list_midi_inputs">>;
+  openMidiInput(portId: string): Promise<CommandResult<"open_midi_input">>;
+  closeMidiInput(portId: string): Promise<CommandResult<"close_midi_input">>;
+  getAudioSettings(): Promise<CommandResult<"get_audio_settings">>;
+  startupWarnings(): Promise<CommandResult<"startup_warnings">>;
+  startLatencyCalibration(apply: boolean): Promise<CommandResult<"start_latency_calibration">>;
+  setLooperConfig(config: Partial<LooperConfig>): Promise<CommandResult<"set_looper_config">>;
 }
 
 export function createEngine(transport: EngineTransport): EngineClient {
@@ -63,5 +78,16 @@ export function createEngine(transport: EngineTransport): EngineClient {
     looper: (command) => call("looper_command", { command }),
     setAnalysisConfig: (config) => call("set_analysis_config", { config }),
     setInputRoute: (route) => call("set_input_route", { route }),
+    listAudioDevices: () => call("list_audio_devices"),
+    startAudio: (config) => call("start_audio", { config }),
+    setOutputRoute: (route) => call("set_output_route", { route }),
+    setMonitor: (monitor) => call("set_monitor", { monitor }),
+    listMidiInputs: () => call("list_midi_inputs"),
+    openMidiInput: (portId) => call("open_midi_input", { portId }),
+    closeMidiInput: (portId) => call("close_midi_input", { portId }),
+    getAudioSettings: () => call("get_audio_settings"),
+    startupWarnings: () => call("startup_warnings"),
+    startLatencyCalibration: (apply) => call("start_latency_calibration", { apply }),
+    setLooperConfig: (config) => call("set_looper_config", { config }),
   };
 }

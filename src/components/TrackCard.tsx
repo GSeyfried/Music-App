@@ -12,6 +12,8 @@ import { setAttr, setText, useFrame } from "../lib/useFrame";
 import { Icon } from "./ui/Icon";
 import { Button, ConfirmButton, Kbd, usePress } from "./ui/controls";
 import { useUi } from "./UiContext";
+import { ContextMenu } from "./ui/ContextMenu";
+import { addTrackState, trackActions } from "../lib/trackActions";
 
 const RING_R = 46;
 const RING_C = 2 * Math.PI * RING_R;
@@ -83,12 +85,25 @@ export function TrackCard({
   track,
   selected,
   onSelect,
+  onMenu,
+  onDetails,
 }: {
   view: LooperView;
   track: number;
   selected: boolean;
   onSelect: (i: number) => void;
+  /** Open quick actions at a viewport point (right-click, Shift+F10, overflow button). */
+  onMenu?: (track: number, x: number, y: number) => void;
+  /** Open the detail inspector (double-click the title, or "Details…"). */
+  onDetails?: (track: number) => void;
 }) {
+  const overflow = useRef<HTMLButtonElement>(null);
+  const openMenuAt = (el: Element | null) => {
+    if (!onMenu || !el) return;
+    const r = el.getBoundingClientRect();
+    onSelect(track);
+    onMenu(track, r.left, r.bottom + 4);
+  };
   const { sendLooper } = useEngineActions();
   const t = view.tracks[track];
   const main = mainAction(view, track);
@@ -111,6 +126,20 @@ export function TrackCard({
       data-state={t.state}
       data-muted={t.muted || silencedBySolo}
       aria-label={`Track ${track + 1}`}
+      onContextMenu={(e) => {
+        if (!onMenu) return;
+        e.preventDefault();
+        onSelect(track);
+        onMenu(track, e.clientX, e.clientY);
+      }}
+      onKeyDown={(e) => {
+        // Keyboard route to the context menu: Shift+F10 or the dedicated menu key.
+        if (onMenu && ((e.shiftKey && e.key === "F10") || e.key === "ContextMenu")) {
+          e.preventDefault();
+          e.stopPropagation();
+          openMenuAt(e.target as Element);
+        }
+      }}
     >
       <header className="track-head">
         <button
@@ -118,7 +147,9 @@ export function TrackCard({
           className="track-title"
           aria-pressed={selected}
           aria-label={`Select track ${track + 1}`}
+          title={onDetails ? "Double-click for details" : undefined}
           onClick={() => onSelect(track)}
+          onDoubleClick={() => onDetails?.(track)}
         >
           <span className="track-dot" />
           Track {track + 1}
@@ -127,6 +158,18 @@ export function TrackCard({
         <span className="chip" data-state={t.state}>
           {trackStateLabel(t)}
         </span>
+        {onMenu && (
+          <button
+            type="button"
+            ref={overflow}
+            className="icon-btn"
+            aria-label={`Track ${track + 1} actions`}
+            aria-haspopup="menu"
+            onClick={() => openMenuAt(overflow.current)}
+          >
+            <Icon name="more" size={20} />
+          </button>
+        )}
       </header>
 
       <div className="pad-wrap">
@@ -222,10 +265,59 @@ export function TrackCard({
   );
 }
 
+function AddTrackCard({ view }: { view: LooperView }) {
+  const { addTrack } = useEngineActions();
+  const busy = useEngineState((s) => s.busy);
+  const st = addTrackState(view);
+  return (
+    <div className="add-track">
+      <Button variant="outline" icon="plus" disabled={!st.enabled || busy} onPress={() => void addTrack()}>
+        {st.label}
+      </Button>
+      <p className="hint">{st.note}</p>
+    </div>
+  );
+}
+
+/** Quick-action menu for one track, fed by the shared track command table. */
+function TrackMenu() {
+  const { menu, openMenu, setOverlay } = useUi();
+  const view = useEngineState((s) => s.looper);
+  const { sendLooper } = useEngineActions();
+  if (!menu || !view || !view.tracks[menu.track]) return null;
+  const actions = trackActions(view, menu.track);
+  const close = () => openMenu(null);
+  return (
+    <ContextMenu
+      label={`Track ${menu.track + 1} actions`}
+      x={menu.x}
+      y={menu.y}
+      items={actions.map((a) => ({
+        id: a.id,
+        label: a.label,
+        enabled: a.enabled,
+        checked: a.checked,
+        destructive: a.destructive,
+        shortcut: a.shortcut,
+        separatorBefore: a.id === "track.details" || a.id === "track.clear",
+      }))}
+      onClose={close}
+      onSelect={(id) => {
+        const a = actions.find((x) => x.id === id);
+        close();
+        if (!a) return;
+        if (a.id === "track.details") setOverlay("inspector");
+        else if (a.command) sendLooper(a.command);
+      }}
+    />
+  );
+}
+
 export function TrackGrid() {
   const view = useEngineState((s) => s.looper);
   const capturing = useEngineState((s) => s.status.capturing);
   const { selectedTrack, selectTrack } = useSelection();
+  const { openMenu, setOverlay } = useUi();
   if (!view) {
     return (
       <div className="empty-state">
@@ -237,8 +329,21 @@ export function TrackGrid() {
   return (
     <div className="track-grid" data-count={view.tracks.length}>
       {view.tracks.map((_, i) => (
-        <TrackCard key={i} view={view} track={i} selected={i === selectedTrack} onSelect={selectTrack} />
+        <TrackCard
+          key={i}
+          view={view}
+          track={i}
+          selected={i === selectedTrack}
+          onSelect={selectTrack}
+          onMenu={(track, x, y) => openMenu({ track, x, y })}
+          onDetails={(track) => {
+            selectTrack(track);
+            setOverlay("inspector");
+          }}
+        />
       ))}
+      <AddTrackCard view={view} />
+      <TrackMenu />
     </div>
   );
 }

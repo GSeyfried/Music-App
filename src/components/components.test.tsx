@@ -102,6 +102,7 @@ describe("TrackCard", () => {
     latencyFrames: 0,
     sampleRate: 48_000,
     freeLayers: 5,
+    maxTracks: null,
   };
 
   function renderCard(track: number) {

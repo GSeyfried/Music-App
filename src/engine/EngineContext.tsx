@@ -8,9 +8,12 @@ import type { EngineClient } from "./client";
 import {
   toEngineError,
   type AnalysisConfig,
+  type AudioConfig,
   type EngineWarningKind,
   type InputRoute,
   type LooperCommand,
+  type MonitorConfig,
+  type OutputRoute,
 } from "./protocol";
 import { EngineStore, mergeConfig, type EngineSnapshot, type LiveData } from "./store";
 
@@ -27,6 +30,22 @@ export interface EngineActions {
   setAnalysisConfig(patch: AnalysisConfig): Promise<void>;
   /** Choose which device input channel(s) the engine records (live, no restart). */
   setInputRoute(route: InputRoute): Promise<void>;
+  /**
+   * Load the device list (with formats), saved audio settings and MIDI ports.
+   * Each part is best-effort: an older engine without the command is skipped quietly.
+   */
+  loadHardware(): Promise<void>;
+  /** Start or restart audio with this config (it also becomes the saved default). */
+  startAudio(config: Partial<AudioConfig>): Promise<void>;
+  setOutputRoute(route: OutputRoute): Promise<void>;
+  setMonitor(monitor: MonitorConfig): Promise<void>;
+  /** Works while stopped too (hardware-io); the saved value is re-read afterwards. */
+  setInputLatency(frames: number): Promise<void>;
+  openMidiInput(portId: string): Promise<void>;
+  closeMidiInput(portId: string): Promise<void>;
+  startCalibration(apply: boolean): Promise<void>;
+  /** Add one track, up to the engine's reported ceiling (no-op when unknown). */
+  addTrack(): Promise<void>;
   dismissError(id: number): void;
   dismissWarning(kind: EngineWarningKind): void;
   dismissNotice(id: number): void;
@@ -35,9 +54,13 @@ export interface EngineActions {
 interface EngineContextValue {
   store: EngineStore;
   actions: EngineActions;
+  client: EngineClient;
 }
 
 const EngineCtx = createContext<EngineContextValue | null>(null);
+
+/** Give up waiting for a `calibration` event after this long (the engine takes ~2.5 s). */
+export const CALIBRATION_TIMEOUT_MS = 10_000;
 
 export function createActions(client: EngineClient, store: EngineStore): EngineActions {
   const run = async (op: () => Promise<void>) => {
@@ -49,6 +72,11 @@ export function createActions(client: EngineClient, store: EngineStore): EngineA
     } finally {
       store.set({ busy: false });
     }
+  };
+  /** Re-read the saved settings (best-effort: older engines lack the command). */
+  const refreshSettings = async () => {
+    const audioSettings = await client.getAudioSettings().catch(() => undefined);
+    if (audioSettings) store.set({ audioSettings });
   };
   const sendLooper = (command: LooperCommand) => {
     client.looper(command).catch((e) => store.pushError(toEngineError(e)));
@@ -84,6 +112,80 @@ export function createActions(client: EngineClient, store: EngineStore): EngineA
         store.set({ analysisConfig: next });
       }),
     setInputRoute: (route) => run(async () => store.applyStatus(await client.setInputRoute(route))),
+    loadHardware: async () => {
+      const quiet = <T,>(p: Promise<T>) => p.then((v) => v, () => undefined);
+      const [deviceList, audioSettings, midiPorts] = await Promise.all([
+        quiet(client.listAudioDevices()),
+        quiet(client.getAudioSettings()),
+        quiet(client.listMidiInputs()),
+      ]);
+      const patch: Partial<EngineSnapshot> = {};
+      if (deviceList) patch.deviceList = deviceList;
+      if (audioSettings) patch.audioSettings = audioSettings;
+      if (midiPorts) patch.midiPorts = midiPorts;
+      store.set(patch);
+    },
+    startAudio: (config) =>
+      run(async () => {
+        store.clearErrors();
+        store.applyStatus(await client.startAudio(config));
+        await refreshSettings();
+      }),
+    setOutputRoute: (route) =>
+      run(async () => {
+        store.applyStatus(await client.setOutputRoute(route));
+        await refreshSettings();
+      }),
+    setMonitor: (monitor) =>
+      run(async () => {
+        store.applyStatus(await client.setMonitor(monitor));
+        await refreshSettings();
+      }),
+    setInputLatency: (frames) =>
+      run(async () => {
+        await client.looper({ type: "setInputLatency", frames: Math.max(0, Math.round(frames)) });
+        await refreshSettings();
+      }),
+    openMidiInput: (portId) =>
+      run(async () => {
+        await client.openMidiInput(portId);
+        store.set({ midiPorts: await client.listMidiInputs() });
+      }),
+    closeMidiInput: (portId) =>
+      run(async () => {
+        await client.closeMidiInput(portId);
+        store.set({ midiPorts: await client.listMidiInputs() });
+      }),
+    startCalibration: async (apply) => {
+      store.set({ calibration: { running: true, outcome: null } });
+      try {
+        await client.startLatencyCalibration(apply);
+      } catch (e) {
+        store.set({ calibration: { running: false, outcome: null } });
+        store.pushError(toEngineError(e));
+        return;
+      }
+      // The result arrives as a `calibration` event about 2.5 s later. Never spin forever.
+      setTimeout(() => {
+        if (!store.getSnapshot().calibration.running) return;
+        store.set({
+          calibration: {
+            running: false,
+            outcome: {
+              result: null,
+              error: { kind: "aborted", message: "No result arrived from the engine." },
+              applied: false,
+            },
+          },
+        });
+      }, CALIBRATION_TIMEOUT_MS);
+    },
+    addTrack: () =>
+      run(async () => {
+        const view = store.getSnapshot().looper;
+        if (!view || view.maxTracks === null || view.tracks.length >= view.maxTracks) return;
+        await client.setLooperConfig({ maxTracks: view.tracks.length + 1 });
+      }),
     dismissError: (id) => store.dismissError(id),
     dismissWarning: (kind) => store.dismissWarning(kind),
     dismissNotice: (id) => store.dismissNotice(id),
@@ -100,7 +202,7 @@ interface ProviderProps {
 export function EngineProvider({ children, client = defaultEngine, store: givenStore }: ProviderProps) {
   const value = useMemo<EngineContextValue>(() => {
     const store = givenStore ?? new EngineStore(client.kind);
-    return { store, actions: createActions(client, store) };
+    return { store, actions: createActions(client, store), client };
   }, [client, givenStore]);
 
   useEffect(() => {
@@ -123,6 +225,12 @@ export function EngineProvider({ children, client = defaultEngine, store: givenS
         new URLSearchParams(window.location.search).get("autostart") === "1";
       // ?autostart=1 (simulator only): start input straight away, for demos and screenshots.
       void actions.refreshDevices().then(() => (autostart ? actions.startInput() : undefined));
+      void actions.loadHardware();
+      // Settings-file problems are raised before the webview listens: fetch them once.
+      client
+        .startupWarnings()
+        .then((ws) => ws.forEach((w) => store.applyEvent({ type: "warning", payload: w })))
+        .catch(() => {});
     }
     return () => {
       disposed = true;
@@ -157,4 +265,9 @@ export function useLive(): LiveData {
 /** The store itself, for event handlers that need the current state at call time. */
 export function useEngineStore(): EngineStore {
   return useCtx().store;
+}
+
+/** The engine client (Practice Lab issues its own commands; see src/practice). */
+export function useEngineClient(): EngineClient {
+  return useCtx().client;
 }

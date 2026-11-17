@@ -30,6 +30,8 @@
   --bad: #fb7185;
   --info: #7cc4ff;
   --sim: #b49cff;
+  /* MIDI is control data, not audio: its own hue and a keyboard/LED form, never a meter. */
+  --midi: #e879f9;
 
   /* Track palette (bold, distinct, readable on --surface) */
   --track-1: #ff7a59;
@@ -1598,4 +1600,294 @@ input[type="range"] {
 .channel-row[data-clip="true"] .meter-db {
   color: var(--bad);
   font-weight: 700;
+}
+
+/* ---- Hardware I/O panels ------------------------------------------------------ */
+
+.inline-warning {
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  border-left: 3px solid var(--caution);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--caution) 9%, var(--surface));
+  font-size: var(--fs-sm);
+}
+
+.format-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--s-3);
+}
+
+.monitor-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+
+.confirm-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--caution);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--caution) 10%, var(--surface));
+}
+
+.confirm-box p {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.confirm-actions {
+  display: flex;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.card-inset {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.calibrating {
+  margin: 0;
+  color: var(--accent);
+  font-weight: 600;
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.calibration-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-1);
+  padding: var(--s-2) var(--s-3);
+  border-left: 3px solid var(--good);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
+}
+
+.calibration-result.tone-caution {
+  border-left-color: var(--caution);
+}
+
+.calibration-result.tone-bad {
+  border-left-color: var(--bad);
+}
+
+.sheet-section-midi h3 {
+  color: var(--midi);
+}
+
+.midi-ports {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s-2);
+}
+
+.midi-ports li {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.midi-port-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.midi-ports .btn-toggle[aria-pressed="true"] {
+  border-color: var(--midi);
+  background: color-mix(in srgb, var(--midi) 18%, var(--surface-2));
+}
+
+/* Square LED (audio meters are bars): a different shape as well as a different hue. */
+.midi-led {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--surface-3);
+  border: 1px solid color-mix(in srgb, var(--midi) 50%, transparent);
+  flex: none;
+}
+
+.midi-led[data-on="true"] {
+  background: var(--midi);
+  box-shadow: 0 0 8px var(--midi);
+}
+
+.midi-activity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid color-mix(in srgb, var(--midi) 40%, var(--border));
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--midi) 5%, var(--surface));
+}
+
+.midi-keys {
+  display: block;
+  width: 100%;
+  height: 44px;
+  border-radius: 4px;
+}
+
+.midi-last {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-sm);
+}
+
+.midi-tag,
+.midi-indicator {
+  font-size: var(--fs-xs);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--midi);
+}
+
+.midi-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid color-mix(in srgb, var(--midi) 50%, transparent);
+}
+
+/* ---- Context menu, inspector, add track, input-off --------------------------- */
+
+.context-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 240px;
+  padding: var(--s-1);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow);
+  animation: rise var(--t-fast) ease-out;
+}
+
+.menu-item {
+  display: grid;
+  grid-template-columns: 1.2em 1fr auto;
+  align-items: center;
+  gap: var(--s-2);
+  width: 100%;
+  min-height: var(--hit);
+  padding: 0 var(--s-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-item:focus-visible,
+.menu-item:not(:disabled):active {
+  background: var(--surface-3);
+  box-shadow: none;
+}
+
+.menu-item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.menu-item.is-destructive {
+  color: var(--bad);
+}
+
+.menu-check {
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.menu-sep {
+  height: 1px;
+  margin: var(--s-1) var(--s-2);
+  background: var(--border);
+}
+
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  min-width: var(--hit);
+  min-height: var(--hit);
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.icon-btn:active {
+  background: var(--surface-2);
+}
+
+.track-head .chip {
+  margin-left: auto;
+}
+
+.add-track {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  min-height: 180px;
+  padding: var(--s-4);
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--r-lg);
+  text-align: center;
+}
+
+.inspector-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--s-2);
+}
+
+.input-off {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--border-strong);
+  border-left: 4px solid var(--caution);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+
+.input-off-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--fs-sm);
+}
+
+.input-off-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-2);
+  flex-wrap: wrap;
 }

@@ -3,6 +3,11 @@
 Owner: frontend agent. Scope: `src/`, `index.html`, `vite.config.ts`,
 `vitest.config.ts`, `tsconfig.json`, frontend dependencies in `package.json`.
 
+User-directed interaction requirements for right-click actions, modal/detail
+access, scalable navigation, hover explanations, double-click, trackpad
+gestures, and rebindable cross-platform controls are in
+[INTERACTION_DESIGN.md](INTERACTION_DESIGN.md).
+
 ## What was built
 
 - **Contract sync.** The UI now speaks the full engine contract in
@@ -22,6 +27,128 @@ Owner: frontend agent. Scope: `src/`, `index.html`, `vite.config.ts`,
 - **Mock engine** behind the same interface, used outside Tauri or with `?mock=1`.
 - **Design system**: CSS tokens, dark theme, touch-first, responsive.
 - **Tests**: vitest + Testing Library + jsdom.
+
+## Round 2: hardware I/O UI, lifecycle fix, interaction start
+
+### Hardware I/O (Settings drawer)
+
+- **Output & format.** Output device list from `list_audio_devices`. Sample
+  rates are those both devices support, or Automatic. Buffer sizes stay within
+  every device's range. There is a missing-device policy (show an error or
+  use the default). Apply calls `start_audio` with the whole config, because
+  the engine defaults any omitted field. On outputs with more than two
+  channels, a live pair picker (`set_output_route`) appears.
+- **Missing saved devices.** If a saved input or output isn't connected, an
+  inline warning says what will happen under the current policy.
+- **Monitoring.** Off by default. Turning it on always shows a "use
+  headphones / feedback" confirmation; turning it off never does. There is a
+  monitor level slider (`set_monitor`).
+- **Latency.** Editable while audio is stopped: the value is read from
+  `get_audio_settings` and labelled "saved". While running, it comes from the
+  live looper.
+- **Loopback calibration.** `start_latency_calibration` with "Measure and
+  apply" or "Measure only". The preconditions mirror the engine's: audio
+  running, transport stopped, monitoring off, one run at a time. The result
+  shows latency, confidence (below 50% suggests re-running with a cable), the
+  polarity hint, and whether it was applied, with "Apply" offered if it
+  wasn't. Failures (`notDetected` / `inconsistent` / `aborted`) get plain
+  text. The UI stops waiting after 10 s.
+- **MIDI.**
+  - The port list has open/close toggles, a per-port activity LED, and Rescan.
+  - A live activity panel shows a held-note keyboard (C2–C7) and the last event.
+  - A top-bar "MIDI" light appears while any port is open.
+  - MIDI is kept visually distinct from audio: its own `--midi` hue, square
+    LEDs and a keyboard instead of meter bars.
+- **Startup warnings.** `startup_warnings` is fetched once after subscribing,
+  so a `settingsProblem` or `deviceFallback` raised before the webview
+  listened is still shown.
+- **Diagnostics** add `output.bridge`: correction ppm, fill/target, and
+  discontinuities.
+- **Simulator coverage.** It implements all of the above, including:
+  - two input and two output devices with formats, rate and buffer
+    validation and clamping (`configAdjusted`);
+  - the missing-device policy (`deviceFallback` / `deviceNotFound`);
+  - monitor validation;
+  - MIDI ports that stream an arpeggio and drum hits, even with audio stopped;
+  - calibration: a cable on the interface gives a tight result; the
+    microphone gives an acoustic, low-confidence one; In 2 of the interface
+    gives `notDetected`; stopping audio aborts;
+  - 1 Hz `audioDiagnostics` with bridge data, and `startup_warnings` via
+    `new MockEngine({ startupWarnings })`.
+
+  Simplification: a rate unsupported by the input is an error in the mock,
+  whereas the engine falls back to metering-only.
+
+### Space key and pointer presses (bug review)
+
+Space is the live play/stop key. Two real defects were found and fixed.
+
+1. **Holding Space could press the focused button.** Auto-repeat keydowns were
+   ignored by `resolveShortcut`, so they weren't `preventDefault`ed. Holding
+   Space with focus on a button (typically "Stop input", which kept focus
+   after "Start input" was clicked) let Chromium/WebKit activate that button.
+   - The handler now cancels Space on every keydown, repeats included.
+   - It also cancels it on keyup, which is where Firefox activates buttons.
+   - The Start/Stop input buttons have distinct React keys, so focus cannot
+     carry over from one to the other.
+2. **`usePress` could swallow the next keyboard press.** It acts on
+   pointer-down and skips the click that follows. If a pointer-down never
+   became a click (finger dragged off), the flag stayed set and ate the next
+   keyboard activation. It now tells keyboard clicks (`detail === 0`), which
+   always act, from pointer clicks.
+
+### Lifecycle bug: pausing returned to the Start screen
+
+Studio and Practice Lab replaced the whole workspace with the first-run Start
+card whenever `capturing` was false. Combined with the Space/focus defect
+above, pressing or holding Space could stop input and drop the user back to
+Start. The fix:
+
+- After input has started once in a session (`UiContext.sessionStarted`), the
+  workspace always stays.
+- If input stops, an inline "Audio input is off" bar offers the device
+  picker and Start in place.
+- Pausing never touches input.
+
+Tests cover pause, Stop input, auto-repeat Space, and focus after Start.
+
+### Add Track
+
+A visible "Add track" card sits at the end of the track grid. The engine
+ceiling is shown honestly:
+
+- **Simulator:** adds tracks through a proposed `set_looper_config` command,
+  up to the proposed `LooperState.maxTracks` (8, the Rust `MAX_TRACKS`). At
+  the limit it says "Engine limit reached: 8 tracks. The goal is 10+".
+- **Native engine today:** neither the command nor the field exists, so the
+  button is visible but disabled and explains why.
+- PENDING (engine): expose `set_looper_config` as a Tauri command, report
+  `maxTracks` in `LooperState`, raise `MAX_TRACKS` to at least 10, and define
+  whether changing the track count keeps existing loops (the mock keeps them).
+
+### Interaction direction (first cheap slice, per INTERACTION_DESIGN.md)
+
+- **Track quick actions.** Three routes open the same accessible menu:
+  right-click on a track card, Shift+F10 or the context-menu key on a focused
+  track, and a visible ⋯ button (which also covers touch).
+  - Order: main action, Playing ✓, Mute ✓, Solo ✓, Undo, Redo, Details…,
+    then Clear track last.
+  - Shortcut hints are shown, and the current state is shown as checkmarks.
+  - Arrow, Home/End, Enter/Space and Escape work. The menu owns the keyboard,
+    so live shortcuts don't fire underneath.
+- **Details.** Double-click a track title, or choose "Details…", to open a
+  track inspector sheet. It shows state, layers and redo, level, mute/solo,
+  loop length and take span, a level slider, and the same actions. A single
+  click only selects the track.
+- **One command table.** `lib/trackActions.ts` has stable ids
+  (`track.main`, `track.mute`, …) and drives the menu and the inspector. It is
+  the seed of the command registry. Moving the keyboard shortcuts onto it is
+  PENDING.
+- **Non-hover alternatives.** Every menu action is also a visible control or a
+  keyboard route. The only tooltip added ("Double-click for details")
+  supplements a visible "Details…" item.
+- PENDING: long-press on touch (the ⋯ button covers touch for now),
+  rebindable bindings and a command palette, and a sub-navigation bar.
 
 ## Hardware I/O adoption (round 1 extra)
 
@@ -51,14 +178,11 @@ From `docs/projects/hardware-io/INTERFACE.md`:
 - **Mock.** The "Simulated interface (2 in)" device meters two channels and
   routes live; a route that doesn't fit falls back to Mix all with a
   `configAdjusted` warning. `setInputLatency` is accepted while stopped.
-- **Not yet in the UI (PENDING).**
-  - Output device and route picker.
-  - Monitoring toggle, which needs a "use headphones" confirmation.
-  - Sample-rate and buffer-size selection via `start_audio`.
-  - Latency editing while stopped, which needs `get_audio_settings` to show
-    the current value.
-  - MIDI port management and any use of MIDI events.
-  - Switching device listing from `list_input_devices` to `list_audio_devices`.
+- **Hardware Settings UI (current working tree).** Output device/route,
+  sample-rate and buffer selection, opt-in monitoring with a headphone warning,
+  latency display/calibration, MIDI port management/activity, and full audio
+  device listing are now present. Automated UI/contract tests exist; external
+  hardware and audible monitoring remain unverified.
 
 ## Architecture
 
@@ -185,6 +309,9 @@ and drives both the handler and the on-screen sheet.
 | `engine/mock.test.ts` | Transport selection; devices and status; pitch-frame honesty invariants; free take → overdub → undo → redo (free layers unchanged); `nothingToUndo` / `nothingToRedo`; transport lock and validation; synced count-in → armed → recording; solo, mute, gain clamp, latency, restart; analysis config validation |
 | `lib/logic.test.ts` | Tuner display (null hz, stale, off, cents formatting and clamping, accuracy, stability), looper enable/disable rules, ring progress, all error / warning / notice text, formatting, shortcut resolution, typing-target detection |
 | hardware-io (in the files above) | Two-channel level and routed-status fixtures built from INTERFACE.md (no Rust JSON was published); new event tags including the array payload; `set_input_route` / `set_monitor` JSON; store handling of `devicesChanged` / `midiPorts` / `midi` / `audioDiagnostics`; mock channel metering, route fallback, latency while stopped; routing helpers |
+| `lib/hardware.test.ts` | Rate/buffer options, missing saved device, monitor confirm rule, latency source, calibration readiness and result/failure text, held-note tracking, MIDI labels |
+| `components/hardware.test.tsx` | Monitoring headphones confirmation (nothing sent until confirmed), latency edit while stopped, MIDI open + live note display + top-bar light, output device/buffer apply and output pairs, calibration flow with a low-confidence result, startup warnings, Space on a focused button, `usePress` pointer/keyboard rules |
+| `components/interaction.test.tsx` | Pause keeps the Studio; Stop input keeps the workspace with an inline restart; auto-repeat Space cancelled; no focus carry-over; Add Track up to the ceiling and the honest disabled state; right-click menu order and action; overflow button, Shift+F10 and Escape; menu keys don't leak; double-click / Details open the inspector |
 | `components/components.test.tsx` | App with the mock: simulated label, start input, record via pad and via `R`, the second free take blocked; shortcut sheet open/close; alerts render and dismiss; no-engine banner; TrackCard enables controls and sends the right commands |
 
 Fixture provenance is noted per constant in `src/test/fixtures.ts`. Several
@@ -237,13 +364,14 @@ All are actively maintained. There are no new runtime dependencies.
 
 ## PENDING
 
-- PENDING: Device, MIDI, practice (reference / attempt / compare), and project
-  commands are not wired yet; they wait on the backend contracts.
-- PENDING: The analysis input clock (`frame`) is not mapped to the looper
-  transport clock, so pitch cannot yet be drawn against bars and beats
-  (audit gap 3).
-- PENDING: Latency is entered by hand, and only while the looper runs. There
-  is no loopback calibration because there is no engine support yet.
+- PENDING: Practice (reference / attempt / compare) and project commands/events
+  have native contracts but are not represented in the TypeScript protocol,
+  store or UI. MIDI port management is wired; MIDI performance mappings,
+  instruments and clip recording/playback are not.
+- PENDING: Rust `PitchUpdate.transportMap` is implemented, but the TypeScript
+  `PitchUpdate` omits it, so pitch cannot yet be drawn against bars and beats.
+- PENDING: Loopback calibration has engine, Tauri and Settings UI support, but
+  it still needs physical cable/device verification.
 - PENDING: `LooperConfig` (track count, pool size) has no Tauri command, so
   the UI shows whatever count the engine sends (2 by default).
 - PENDING: Light theme. The tokens are ready, but only the dark palette is
@@ -272,3 +400,15 @@ What I did:
 
 The real fix is outside the repo: free disk space, or exclude this folder
 from iCloud Desktop & Documents sync. That is the user's call.
+
+## Practice events (other agent's types)
+
+Another agent added `src/practice/types.ts` and hooked `PracticeEvent` into
+the `EngineEvent` union. The store now handles those events generically:
+
+- `practiceState` goes to `snapshot.practiceStatus`.
+- `practiceProgress` goes to `live.practiceProgress`.
+- `practiceTake` goes to `snapshot.practiceTakes` (the last 32).
+
+The tag-list test includes `PRACTICE_EVENT_TYPES`. The practice UI itself is
+not wired yet.

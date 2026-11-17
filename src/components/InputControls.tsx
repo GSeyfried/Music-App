@@ -53,12 +53,15 @@ export function StartStopInput({ size = "md" }: { size?: "md" | "lg" }) {
   const busy = useEngineState((s) => s.busy);
   const kind = useEngineState((s) => s.transportKind);
   const actions = useEngineActions();
+  // Distinct keys: React must not reuse the "Start input" button element as "Stop input",
+  // or keyboard focus would silently move onto Stop after starting.
   return capturing ? (
-    <Button variant="outline" size={size} icon="stop" disabled={busy} onPress={() => void actions.stopInput()}>
+    <Button key="stop-input" variant="outline" size={size} icon="stop" disabled={busy} onPress={() => void actions.stopInput()}>
       Stop input
     </Button>
   ) : (
     <Button
+      key="start-input"
       variant="solid"
       size={size}
       icon="mic"
@@ -106,5 +109,24 @@ export function InputCluster() {
       )}
       <StartStopInput />
     </div>
+  );
+}
+
+/**
+ * Shown when input stops after the session has started (device change, Stop
+ * input, device lost). The workspace stays put; only capture is off.
+ */
+export function InputOffBar() {
+  return (
+    <section className="input-off" role="status" aria-label="Audio input is off">
+      <div className="input-off-text">
+        <strong>Audio input is off</strong>
+        <span>Your workspace, selection and settings are kept. Loops need input running to record or play.</span>
+      </div>
+      <div className="input-off-controls">
+        <DeviceSelect />
+        <StartStopInput />
+      </div>
+    </section>
   );
 }

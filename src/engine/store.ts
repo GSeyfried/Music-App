@@ -10,11 +10,15 @@
 //             read it from a requestAnimationFrame callback (lib/useFrame.ts).
 
 import type { AudioDevice, TransportState } from "../models/domain";
+import type { PracticeProgress, PracticeStatus, PracticeTakeEvent } from "../practice/types";
 import type { TransportKind } from "./client";
 import {
   IDLE_STATUS,
   type AnalysisConfig,
   type AudioDiagnostics,
+  type AudioSettings,
+  type CalibrationOutcome,
+  type DeviceList,
   type EngineError,
   type EngineEvent,
   type EngineStatus,
@@ -79,6 +83,7 @@ export const PITCH_HISTORY = 2048;
 export const NOTE_HISTORY = 256;
 export const ONSET_HISTORY = 512;
 export const MIDI_HISTORY = 512;
+export const PRACTICE_TAKE_HISTORY = 32;
 const MAX_ERRORS = 4;
 const MAX_NOTICES = 3;
 
@@ -92,6 +97,8 @@ export interface LooperView {
   latencyFrames: number;
   sampleRate: number;
   freeLayers: number;
+  /** Track ceiling when the engine reports one (proposed field); null = unknown. */
+  maxTracks: number | null;
 }
 
 export interface ErrorEntry {
@@ -125,6 +132,14 @@ export interface EngineSnapshot {
   midiPorts: MidiPortInfo[];
   /** Increments on every `devicesChanged` event: re-list devices when it moves. */
   devicesChangedSeq: number;
+  /** Inputs and outputs with formats (list_audio_devices); null until loaded. */
+  deviceList: DeviceList | null;
+  /** What is in effect and on disk (get_audio_settings); null until loaded. */
+  audioSettings: AudioSettings | null;
+  calibration: { running: boolean; outcome: CalibrationOutcome | null };
+  /** Practice Lab (src/practice): latest status and recent take events, newest last. */
+  practiceStatus: PracticeStatus | null;
+  practiceTakes: PracticeTakeEvent[];
 }
 
 export interface LiveData {
@@ -146,7 +161,13 @@ export interface LiveData {
   /** Latest 1 Hz hardware diagnostics (hardware-io). */
   audioDiagnostics: AudioDiagnostics | null;
   midi: History<MidiEvent>;
+  /** Total MIDI events ever received (lets readers find what is new in `midi`). */
+  midiTotal: number;
   midiDropped: number;
+  /** performance.now() of the last MIDI batch, per port id. */
+  midiPortAt: Record<string, number>;
+  /** Practice Lab: latest progress (high rate while capturing). */
+  practiceProgress: PracticeProgress | null;
 }
 
 function looperView(s: LooperState): LooperView {
@@ -158,6 +179,7 @@ function looperView(s: LooperState): LooperView {
     latencyFrames: s.latencyFrames,
     sampleRate: s.sampleRate,
     freeLayers: s.freeLayers,
+    maxTracks: s.maxTracks ?? null,
   };
 }
 
@@ -183,7 +205,10 @@ export class EngineStore {
     droppedInputFrames: 0,
     audioDiagnostics: null,
     midi: new History<MidiEvent>(MIDI_HISTORY),
+    midiTotal: 0,
     midiDropped: 0,
+    midiPortAt: {},
+    practiceProgress: null,
   };
 
   constructor(transportKind: TransportKind = "native") {
@@ -201,6 +226,11 @@ export class EngineStore {
       analysisConfig: {},
       midiPorts: [],
       devicesChangedSeq: 0,
+      deviceList: null,
+      audioSettings: null,
+      calibration: { running: false, outcome: null },
+      practiceStatus: null,
+      practiceTakes: [],
     };
   }
 
@@ -290,11 +320,32 @@ export class EngineStore {
         this.set({ midiPorts: event.payload });
         return;
       case "midi":
-        for (const m of event.payload.events) live.midi.push(m);
+        for (const m of event.payload.events) {
+          live.midi.push(m);
+          live.midiTotal += 1;
+          live.midiPortAt[m.portId] = now;
+        }
         live.midiDropped += event.payload.dropped;
+        return;
+      case "calibration":
+        this.set({ calibration: { running: false, outcome: event.payload } });
+        return;
+      case "practiceState":
+        this.set({ practiceStatus: event.payload });
+        return;
+      case "practiceProgress":
+        live.practiceProgress = event.payload;
+        return;
+      case "practiceTake":
+        this.set({ practiceTakes: [...this.snapshot.practiceTakes, event.payload].slice(-PRACTICE_TAKE_HISTORY) });
         return;
       case "audioDiagnostics":
         live.audioDiagnostics = event.payload;
+        return;
+      case "practiceState":
+      case "practiceProgress":
+      case "practiceTake":
+        // Practice Lab state lives in src/practice (PracticeStore subscribes to the client).
         return;
       default: {
         // Adding an EngineEvent member without a case above fails the typecheck here.

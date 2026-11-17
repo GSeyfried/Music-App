@@ -7,6 +7,7 @@ import { formatDb, formatGain } from "./format";
 import { ringProgress } from "./loopProgress";
 import { mainAction, pauseCommand, playStopCommand, trackControls, transportControls } from "./looperControls";
 import { routeForMode, routeLabel, routeUses } from "./routing";
+import { addTrackState, trackActions } from "./trackActions";
 import { isTypingTarget, resolveShortcut, SHORTCUTS } from "./shortcuts";
 import { centsToAngle, formatCents, noteLabel, stabilityLabel, tunerDisplay } from "./tuner";
 
@@ -113,6 +114,7 @@ const view = (tracks: TrackSnapshot[], over: Partial<LooperView> = {}): LooperVi
   latencyFrames: 0,
   sampleRate: 48_000,
   freeLayers: 8,
+  maxTracks: null,
   ...over,
 });
 
@@ -298,5 +300,34 @@ describe("input routing helpers", () => {
     expect(routeForMode("stereoSum", { type: "mono", channel: 3 }, 4)).toEqual({ type: "stereoSum", left: 2, right: 3 });
     expect(routeForMode("mono", { type: "stereoSum", left: 1, right: 2 }, 4)).toEqual({ type: "mono", channel: 1 });
     expect(routeForMode("mixAll", undefined, 2)).toEqual({ type: "mixAll" });
+  });
+});
+
+describe("track command table", () => {
+  it("orders frequent actions first and destructive last, with live state", () => {
+    const v = view([track({ state: "playing", layers: 2, muted: true, redoLayers: 1 })], { loopPeriodFrames: 1000 });
+    const a = trackActions(v, 0);
+    expect(a.map((x) => x.id)).toEqual([
+      "track.main",
+      "track.play",
+      "track.mute",
+      "track.solo",
+      "track.undo",
+      "track.redo",
+      "track.details",
+      "track.clear",
+    ]);
+    expect(a[0]).toMatchObject({ label: "Overdub", command: { type: "overdub", track: 0 } });
+    expect(a.find((x) => x.id === "track.mute")).toMatchObject({ checked: true, command: { type: "setMute", track: 0, muted: false } });
+    expect(a.find((x) => x.id === "track.redo")?.enabled).toBe(true);
+    expect(a.find((x) => x.id === "track.clear")?.destructive).toBe(true);
+    expect(trackActions(v, 5)).toEqual([]);
+  });
+
+  it("add-track availability is honest about the ceiling", () => {
+    expect(addTrackState(view([track(), track()], { maxTracks: null }))).toMatchObject({ enabled: false });
+    expect(addTrackState(view([track(), track()], { maxTracks: 8 }))).toMatchObject({ enabled: true, note: "2 of 8 tracks" });
+    expect(addTrackState(view(Array.from({ length: 8 }, () => track()), { maxTracks: 8 })).note).toMatch(/goal is 10\+/);
+    expect(addTrackState(view(Array.from({ length: 12 }, () => track()), { maxTracks: 12 })).note).not.toMatch(/goal/);
   });
 });

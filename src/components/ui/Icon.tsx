@@ -19,7 +19,10 @@ export type IconName =
   | "close"
   | "lock"
   | "metronome"
-  | "refresh";
+  | "refresh"
+  | "more"
+  | "plus"
+  | "info";
 
 const PATHS: Record<IconName, JSX.Element> = {
   play: <path d="M8 5.5v13l10.5-6.5z" fill="currentColor" stroke="none" />,
@@ -104,6 +107,20 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <path d="M9 3.5h6l3.5 17h-13z" />
       <path d="m12 15 5-8" />
+    </>
+  ),
+  more: (
+    <g fill="currentColor" stroke="none">
+      <circle cx="6" cy="12" r="1.8" />
+      <circle cx="12" cy="12" r="1.8" />
+      <circle cx="18" cy="12" r="1.8" />
+    </g>
+  ),
+  plus: <path d="M12 5v14M5 12h14" />,
+  info: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 11v5M12 8h.01" />
     </>
   ),
   refresh: (

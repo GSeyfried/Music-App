@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { LOOPER_STATE, ONSET_EVENT_JSON, PITCH_EVENT_JSON } from "../test/fixtures";
+import { CALIBRATION_EVENT_JSON, LOOPER_STATE, ONSET_EVENT_JSON, PITCH_EVENT_JSON } from "../test/fixtures";
 import { IDLE_STATUS, type EngineEvent, type EngineStatus, type PitchFrame } from "./protocol";
 import { EngineStore, History, mergeConfig } from "./store";
 
@@ -201,5 +201,24 @@ describe("hardware-io events", () => {
     expect(store.live.audioDiagnostics?.driftPpm).toBe(3);
     store.applyStatus(IDLE_STATUS);
     expect(store.live.audioDiagnostics).toBeNull();
+  });
+});
+
+describe("round-2 events", () => {
+  it("a calibration outcome ends the running state", () => {
+    const store = new EngineStore();
+    store.set({ calibration: { running: true, outcome: null } });
+    const outcome = JSON.parse(CALIBRATION_EVENT_JSON) as EngineEvent;
+    store.applyEvent(outcome);
+    expect(store.getSnapshot().calibration.running).toBe(false);
+    expect(store.getSnapshot().calibration.outcome?.result?.latencyFrames).toBe(566);
+  });
+
+  it("midi counts every event and stamps per-port activity", () => {
+    const store = new EngineStore();
+    const ev = { kind: "noteOn" as const, channel: 0, note: 60, velocity: 1, portId: "p", hostTimeNs: 0, outputFrame: null, transportFrame: null, inputFrame: null };
+    store.applyEvent({ type: "midi", payload: { events: [ev, { ...ev, portId: "q" }], dropped: 0 } }, 42);
+    expect(store.live.midiTotal).toBe(2);
+    expect(store.live.midiPortAt).toEqual({ p: 42, q: 42 });
   });
 });

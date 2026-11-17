@@ -6,6 +6,7 @@ import { useEngineActions, useEngineState, useLive } from "../engine/EngineConte
 import type { AudioDiagnostics, LooperState } from "../engine/protocol";
 import { formatBytes, formatMs } from "../lib/format";
 import { ChannelMeters, InputRoutePicker } from "./ChannelMeters";
+import { LatencySection, MidiSection, MissingDeviceHint, MonitorSection, OutputSection } from "./HardwarePanels";
 import { DeviceSelect, StartStopInput } from "./InputControls";
 import { Button, Segmented, Sheet, Stepper } from "./ui/controls";
 import { useUi } from "./UiContext";
@@ -63,6 +64,15 @@ export function hardwareRows(d: AudioDiagnostics | null): DiagnosticRow[] {
     rows.push({ label: "Output discontinuities", value: String(d.output.discontinuities), bad: d.output.discontinuities > 0 });
   }
   if (d.capture?.blockFrames) rows.push({ label: "Input block", value: `${d.capture.blockFrames} frames` });
+  const b = d.output?.bridge;
+  if (b) {
+    rows.push({ label: "Bridge correction", value: `${b.ratioPpm.toFixed(1)} ppm` });
+    rows.push({
+      label: "Bridge fill",
+      value: `${Math.round(b.meanFillFrames)} frames (target ${b.targetFillFrames === null ? "measuring" : b.targetFillFrames})`,
+    });
+    rows.push({ label: "Bridge discontinuities", value: String(b.discontinuities), bad: b.discontinuities > 0 });
+  }
   rows.push({
     label: "Clock drift",
     value: d.driftPpm === null ? "Measuring…" : `${d.driftPpm.toFixed(1)} ppm${Math.abs(d.driftPpm) > 20 ? " (timing not sample-tight)" : ""}`,
@@ -108,32 +118,6 @@ function Diagnostics() {
   );
 }
 
-function Calibration() {
-  const view = useEngineState((s) => s.looper);
-  const { sendLooper } = useEngineActions();
-  if (!view) return <p className="hint">Start input to set latency compensation.</p>;
-  const sr = view.sampleRate || 48_000;
-  const ms = Math.round((view.latencyFrames / sr) * 1000);
-  return (
-    <>
-      <Stepper
-        label="Input latency (ms)"
-        value={ms}
-        min={0}
-        max={250}
-        step={1}
-        bigStep={1}
-        editable
-        onChange={(v) => sendLooper({ type: "setInputLatency", frames: Math.round((v / 1000) * sr) })}
-      />
-      <p className="hint">
-        Round-trip delay to compensate when recording over existing loops. Automatic loopback calibration is not available
-        yet.
-      </p>
-    </>
-  );
-}
-
 function TunerSettings() {
   const config = useEngineState((s) => s.analysisConfig);
   const busy = useEngineState((s) => s.busy);
@@ -176,18 +160,37 @@ function TunerSettings() {
 
 export function SettingsSheet() {
   const { overlay, setOverlay } = useUi();
+  const { loadHardware } = useEngineActions();
+  const open = overlay === "settings";
+  // Device formats, saved settings and MIDI ports can change while closed: reload on open.
+  useEffect(() => {
+    if (open) void loadHardware();
+  }, [open, loadHardware]);
   return (
-    <Sheet title="Settings & diagnostics" open={overlay === "settings"} onClose={() => setOverlay(null)}>
+    <Sheet title="Settings & diagnostics" open={open} onClose={() => setOverlay(null)}>
       <section className="sheet-section">
         <h3>Input</h3>
         <DeviceSelect />
+        <MissingDeviceHint direction="input" />
         <StartStopInput />
         <InputRoutePicker />
         <ChannelMeters />
       </section>
       <section className="sheet-section">
-        <h3>Latency</h3>
-        <Calibration />
+        <h3>Output & format</h3>
+        <OutputSection />
+      </section>
+      <section className="sheet-section">
+        <h3>Monitoring</h3>
+        <MonitorSection />
+      </section>
+      <section className="sheet-section">
+        <h3>Latency & calibration</h3>
+        <LatencySection />
+      </section>
+      <section className="sheet-section sheet-section-midi">
+        <h3>MIDI input</h3>
+        <MidiSection />
       </section>
       <section className="sheet-section">
         <h3>Tuner</h3>

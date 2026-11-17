@@ -19,9 +19,13 @@ export function ChannelMeters() {
   const fills = useRef<(HTMLDivElement | null)[]>([]);
   const texts = useRef<(HTMLSpanElement | null)[]>([]);
   const rows = useRef<(HTMLDivElement | null)[]>([]);
+  const noChannels = useRef<HTMLParagraphElement>(null);
 
   useFrame((now) => {
-    const ch = live.level && now - live.levelAt < 400 ? live.level.channels : undefined;
+    const fresh = live.level && now - live.levelAt < 400 ? live.level : null;
+    const ch = fresh?.channels;
+    // Live data is not reactive: decide the "no per-channel levels" hint per frame.
+    if (noChannels.current) noChannels.current.hidden = !fresh || !!ch;
     for (let i = 0; i < count; i++) {
       const c = ch?.[i];
       const f = fills.current[i];
@@ -51,9 +55,9 @@ export function ChannelMeters() {
           </span>
         </div>
       ))}
-      {!live.level?.channels && (
-        <p className="hint">This engine build does not report per-channel levels.</p>
-      )}
+      <p className="hint" ref={noChannels} hidden>
+        This engine build does not report per-channel levels.
+      </p>
     </div>
   );
 }

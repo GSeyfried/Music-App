@@ -17,6 +17,7 @@
 //      `Record<Kind, ...>` tables fail the typecheck until text is added).
 
 import type { AudioDevice, TransportState } from "../models/domain";
+import type { PracticeCommands, PracticeEvent, TransportMap } from "../practice/types";
 
 // ---- Status -----------------------------------------------------------------
 
@@ -50,6 +51,18 @@ export interface AudioConfig {
   outputRoute: OutputRoute;
   monitor: MonitorConfig;
 }
+
+/** The engine's defaults for every omitted AudioConfig field. */
+export const DEFAULT_AUDIO_CONFIG: AudioConfig = {
+  inputDevice: null,
+  outputDevice: null,
+  missingDevice: "fail",
+  sampleRate: null,
+  bufferSize: null,
+  inputRoute: { type: "mixAll" },
+  outputRoute: { type: "pair", left: 0, right: 1 },
+  monitor: { enabled: false, gain: 1 },
+};
 
 export interface ConfigRange {
   channels: number;
@@ -119,6 +132,44 @@ export interface OutputInfo {
   reportedLatencyFrames?: number | null;
   discontinuities?: number;
   lostFrames?: number;
+  /** Live in audioDiagnostics; zeros in the first status. */
+  bridge?: BridgeInfo;
+}
+
+export interface BridgeInfo {
+  /** Drift correction: input frames per output frame = 1 + ppm·1e-6. */
+  ratioPpm: number;
+  /** The input→output bridge delay (part of round-trip latency). */
+  meanFillFrames: number;
+  /** null while (re)measuring, ~1 s after start or a discontinuity. */
+  targetFillFrames: number | null;
+  discontinuities: number;
+}
+
+export interface CalibrationResult {
+  /** Value for setInputLatency. */
+  latencyFrames: number;
+  latencyMs: number;
+  sampleRate: number;
+  /** 0..1; below 0.5 suggest re-running with a cable. */
+  confidence: number;
+  detected: number;
+  repeats: number;
+  spreadFrames: number;
+  /** Polarity flip in the chain (hint only). */
+  inverted: boolean;
+}
+
+export type CalibrationFailure =
+  | { kind: "notDetected"; message: string }
+  | { kind: "inconsistent"; message: string }
+  | { kind: "aborted"; message: string };
+
+export interface CalibrationOutcome {
+  result: CalibrationResult | null;
+  error: CalibrationFailure | null;
+  /** Sent as setInputLatency (and saved). */
+  applied: boolean;
 }
 
 export interface AudioDiagnostics {
@@ -292,6 +343,22 @@ export interface LooperState {
   driftDroppedFrames: number;
   /** Input buffered ahead of the looper; grows after underruns. */
   inputCushionFrames: number;
+  /**
+   * PROPOSED (not yet sent by the Rust engine): the most tracks this engine can
+   * run (today `looper::MAX_TRACKS` = 8). Absent = unknown; the UI then cannot add tracks.
+   */
+  maxTracks?: number;
+}
+
+/** Mirrors `looper::LooperConfig` (serde camelCase, every field defaulted). */
+export interface LooperConfig {
+  maxTracks: number;
+  maxLoopSeconds: number;
+  poolLayers: number;
+  maxLayersPerTrack: number;
+  memoryLimitBytes: number;
+  fadeFrames: number;
+  gainSmoothingFrames: number;
 }
 
 export type RejectReason =
@@ -365,6 +432,8 @@ export interface PitchUpdate {
   sampleRate: number;
   /** > 0: analysis fell behind; timestamps have slipped. */
   droppedInputFrames: number;
+  /** Practice Lab: input→transport mapping while the transport runs (absent on older engines). */
+  transportMap?: TransportMap | null;
 }
 
 export interface NoteEvent {
@@ -428,7 +497,10 @@ export type EngineEvent =
   | { type: "devicesChanged"; payload: DevicesChanged }
   | { type: "midiPorts"; payload: MidiPortInfo[] }
   | { type: "midi"; payload: MidiBatch }
-  | { type: "audioDiagnostics"; payload: AudioDiagnostics };
+  | { type: "audioDiagnostics"; payload: AudioDiagnostics }
+  | { type: "calibration"; payload: CalibrationOutcome }
+  // Practice Lab (docs/projects/practice-lab/INTERFACE.md); consumed by src/practice.
+  | PracticeEvent;
 
 export type EngineEventType = EngineEvent["type"];
 
@@ -446,6 +518,10 @@ export const EVENT_TYPES: readonly EngineEventType[] = [
   "midiPorts",
   "midi",
   "audioDiagnostics",
+  "calibration",
+  "practiceState",
+  "practiceProgress",
+  "practiceTake",
 ];
 
 export const ENGINE_EVENT = "engine://event";
@@ -468,7 +544,7 @@ export function parseEngineEvent(raw: unknown): EngineEvent | null {
  * Tauri command table: command name -> argument object and result. Argument
  * keys are camelCase (Tauri maps them to the Rust snake_case parameters).
  */
-export interface EngineCommands {
+export interface EngineCommands extends PracticeCommands {
   list_input_devices: { args: undefined; result: AudioDevice[] };
   start_input: { args: { deviceId: string | null }; result: EngineStatus };
   stop_input: { args: undefined; result: EngineStatus };
@@ -486,6 +562,15 @@ export interface EngineCommands {
   close_midi_input: { args: { portId: string }; result: null };
   get_audio_settings: { args: undefined; result: AudioSettings };
   save_audio_settings: { args: undefined; result: null };
+  /** Warnings raised while loading settings at app start; call once after subscribing. */
+  startup_warnings: { args: undefined; result: EngineWarning[] };
+  /** Result arrives as a `calibration` event ~2.5 s later. */
+  start_latency_calibration: { args: { apply: boolean }; result: null };
+  /**
+   * PROPOSED: `Engine::set_looper_config` exists in Rust but has no Tauri command yet
+   * (persistence INTERFACE.md: "when exposed"). Only the simulator implements it.
+   */
+  set_looper_config: { args: { config: Partial<LooperConfig> }; result: null };
 }
 
 export type CommandName = keyof EngineCommands;

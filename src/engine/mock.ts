@@ -7,8 +7,21 @@
 // crates/voiceloop-engine/src/looper/processor.rs (not a port of its DSP).
 
 import { defaultTransport, type AudioDevice, type TransportState } from "../models/domain";
+import { DEFAULT_AUDIO_CONFIG } from "./protocol";
+import { MockPractice } from "../practice/mockPractice";
 import type {
   AnalysisConfig,
+  AudioConfig,
+  AudioSettings,
+  CalibrationOutcome,
+  DeviceInfo,
+  DeviceList,
+  EngineWarning,
+  MidiEvent,
+  MidiMessage,
+  MidiPortInfo,
+  MonitorConfig,
+  OutputRoute,
   EngineError,
   EngineEvent,
   EngineStatus,
@@ -33,9 +46,82 @@ export interface MockOptions {
   /** Run on a 33 ms timer while input is started. Tests pass false and call tick(). */
   realtime?: boolean;
   seed?: number;
+  /** Returned by `startup_warnings` (e.g. a settingsProblem to exercise the UI). */
+  startupWarnings?: EngineWarning[];
 }
 
+
+const range = (channels: number, minBuf: number, maxBuf: number, format = "f32") => ({
+  channels,
+  minSampleRate: 44_100,
+  maxSampleRate: 96_000,
+  sampleFormat: format,
+  minBufferSize: minBuf,
+  maxBufferSize: maxBuf,
+});
+
+/** The simulated hardware. Ids equal names, like the engine today (D-008). */
+const MOCK_INPUTS: DeviceInfo[] = [
+  {
+    id: "mock-mic",
+    name: "Simulated microphone",
+    host: "Simulated",
+    direction: "input",
+    isDefault: true,
+    defaultFormat: { sampleRate: 48_000, channels: 1, sampleFormat: "f32" },
+    maxChannels: 1,
+    sampleRates: [44_100, 48_000],
+    configs: [range(1, 64, 2048)],
+  },
+  {
+    id: "mock-interface",
+    name: "Simulated interface (2 in)",
+    host: "Simulated",
+    direction: "input",
+    isDefault: false,
+    defaultFormat: { sampleRate: 48_000, channels: 2, sampleFormat: "i16" },
+    maxChannels: 2,
+    sampleRates: [44_100, 48_000, 96_000],
+    configs: [range(2, 32, 4096, "i16")],
+  },
+];
+
+const MOCK_OUTPUTS: DeviceInfo[] = [
+  {
+    id: "mock-speakers",
+    name: "Simulated speakers",
+    host: "Simulated",
+    direction: "output",
+    isDefault: true,
+    defaultFormat: { sampleRate: 48_000, channels: 2, sampleFormat: "f32" },
+    maxChannels: 2,
+    sampleRates: [44_100, 48_000],
+    configs: [range(2, 64, 2048)],
+  },
+  {
+    id: "mock-interface-out",
+    name: "Simulated interface (4 out)",
+    host: "Simulated",
+    direction: "output",
+    isDefault: false,
+    defaultFormat: { sampleRate: 48_000, channels: 4, sampleFormat: "i16" },
+    maxChannels: 4,
+    sampleRates: [44_100, 48_000, 96_000],
+    configs: [range(4, 32, 4096, "i16")],
+  },
+];
+
+const MOCK_MIDI_PORTS = [
+  { id: "mock-keys", name: "Simulated keyboard" },
+  { id: "mock-pads", name: "Simulated pad controller" },
+];
+
+const ARPEGGIO = [60, 64, 67, 72, 67, 64];
+const CALIBRATION_SECONDS = 2.5;
+
 const POOL_LAYERS = 8;
+/** Mirrors looper::MAX_TRACKS in the Rust engine today. */
+export const MOCK_MAX_TRACKS = 8;
 const MAX_LAYERS_PER_TRACK = 6;
 const MAX_LOOP_SECONDS = 30;
 const TICK_MS = 33;
@@ -141,12 +227,25 @@ export class MockEngine implements EngineTransport {
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly realtime: boolean;
   private readonly rand: () => number;
-  private readonly sampleRate: number;
+  private sampleRate: number;
+  private readonly startupWarningList: EngineWarning[];
 
   private capturing = false;
   private deviceId = "mock-mic";
   private analysisEnabled = true;
   private inputRoute: InputRoute = { type: "mixAll" };
+  private outputDeviceId = "mock-speakers";
+  private outputRoute: OutputRoute = { type: "pair", left: 0, right: 1 };
+  private monitor: MonitorConfig = { enabled: false, gain: 1 };
+  private bufferSize: number | null = null;
+  private audioConfig: AudioConfig = DEFAULT_AUDIO_CONFIG;
+  private latencySet = false;
+  private midiOpen = new Set<string>();
+  private hostSeconds = 0;
+  private midiNextAt = 0;
+  private midiStep = 0;
+  private calibrationPending: { remaining: number; apply: boolean } | null = null;
+  private diagnosticsAccum = 0;
   private tuning = 440;
 
   // Input clock and the simulated voice.
@@ -167,11 +266,22 @@ export class MockEngine implements EngineTransport {
   private tracks: MockTrack[];
   private free = POOL_LAYERS;
   private latency = 0;
+  /** Simulated Practice Lab (src/practice/mockPractice.ts). */
+  readonly practice = new MockPractice({
+    capturing: () => this.capturing,
+    sampleRate: () => this.sampleRate,
+    transport: () => this.transport,
+    looperAvailable: () => this.capturing,
+    looperRunning: () => this.run === "running" || this.run === "countIn",
+    play: () => this.looperCommand({ type: "play" }),
+    emit: (e) => this.emit(e),
+  });
 
   constructor(options: MockOptions = {}) {
     this.sampleRate = options.sampleRate ?? 48_000;
     this.realtime = options.realtime ?? true;
     this.rand = mulberry32(options.seed ?? 7);
+    this.startupWarningList = options.startupWarnings ?? [];
     this.transport = { ...defaultTransport, sampleRate: this.sampleRate };
     this.tracks = Array.from({ length: options.tracks ?? 2 }, () => this.emptyTrack());
   }
@@ -199,7 +309,32 @@ export class MockEngine implements EngineTransport {
         return this.setAnalysisConfig(args.config as AnalysisConfig);
       case "set_input_route":
         return this.setInputRoute(args.route as InputRoute);
+      case "list_audio_devices":
+        return { host: "Simulated", inputs: MOCK_INPUTS, outputs: MOCK_OUTPUTS } satisfies DeviceList;
+      case "start_audio":
+        return this.startAudio((args.config ?? {}) as Partial<AudioConfig>);
+      case "set_output_route":
+        return this.setOutputRoute(args.route as OutputRoute);
+      case "set_monitor":
+        return this.setMonitor(args.monitor as MonitorConfig);
+      case "list_midi_inputs":
+        return this.midiPorts();
+      case "open_midi_input":
+        return this.openMidi(String(args.portId));
+      case "close_midi_input":
+        return this.closeMidi(String(args.portId));
+      case "get_audio_settings":
+        return this.audioSettings();
+      case "save_audio_settings":
+        return null;
+      case "startup_warnings":
+        return [...this.startupWarningList];
+      case "start_latency_calibration":
+        return this.startCalibration(Boolean(args.apply));
+      case "set_looper_config":
+        return this.setLooperConfig((args.config ?? {}) as { maxTracks?: number });
       default:
+        if (command.startsWith("practice_")) return this.practice.invoke(command, args);
         throw { kind: "invalid", message: `the simulated engine has no command "${command}"` } satisfies EngineError;
     }
   }
@@ -218,15 +353,293 @@ export class MockEngine implements EngineTransport {
   // ---- Commands ----------------------------------------------------------------
 
   private devices(): AudioDevice[] {
-    const base = { host: "Simulated", direction: "input" as const, defaultSampleRate: this.sampleRate };
-    return [
-      { ...base, id: "mock-mic", name: "Simulated microphone", isDefault: true, defaultChannels: 1, sampleFormat: "f32" },
-      { ...base, id: "mock-interface", name: "Simulated interface (2 in)", isDefault: false, defaultChannels: 2, sampleFormat: "i16" },
-    ];
+    return MOCK_INPUTS.map((d) => ({
+      id: d.id,
+      name: d.name,
+      host: d.host,
+      direction: "input" as const,
+      isDefault: d.isDefault,
+      defaultSampleRate: d.defaultFormat?.sampleRate ?? null,
+      defaultChannels: d.maxChannels,
+      sampleFormat: d.defaultFormat?.sampleFormat ?? null,
+    }));
   }
 
   private inputChannels(): number {
-    return this.devices().find((d) => d.id === this.deviceId)?.defaultChannels ?? 1;
+    return MOCK_INPUTS.find((d) => d.id === this.deviceId)?.maxChannels ?? 1;
+  }
+
+  private outputChannels(): number {
+    return MOCK_OUTPUTS.find((d) => d.id === this.outputDeviceId)?.maxChannels ?? 2;
+  }
+
+  // ---- Hardware I/O -------------------------------------------------------------
+
+  private findDevice(list: DeviceInfo[], want: string | null, policy: AudioConfig["missingDevice"], what: string): DeviceInfo {
+    const fallback = list.find((d) => d.isDefault) ?? list[0];
+    if (!want) return fallback;
+    const found = list.find((d) => d.id === want || d.name === want);
+    if (found) return found;
+    if (policy === "useDefault") {
+      this.emit({
+        type: "warning",
+        payload: { kind: "deviceFallback", message: `${what} "${want}" is not connected; using ${fallback.name}.` },
+      });
+      return fallback;
+    }
+    throw { kind: "deviceNotFound", message: want } satisfies EngineError;
+  }
+
+  private startAudio(partial: Partial<AudioConfig>): EngineStatus {
+    const config: AudioConfig = { ...DEFAULT_AUDIO_CONFIG, ...partial };
+    this.validateMonitor(config.monitor);
+    const input = this.findDevice(MOCK_INPUTS, config.inputDevice, config.missingDevice, "Input");
+    const output = this.findDevice(MOCK_OUTPUTS, config.outputDevice, config.missingDevice, "Output");
+    let rate = config.sampleRate;
+    if (rate === null) {
+      rate = [48_000, 44_100, 96_000].find((r) => input.sampleRates.includes(r) && output.sampleRates.includes(r)) ?? 48_000;
+    } else if (!output.sampleRates.includes(rate) || !input.sampleRates.includes(rate)) {
+      // Simplified: the engine runs metering-only when only the input lacks the rate.
+      throw { kind: "unsupportedFormat", message: `${rate} Hz is not supported by this device pair` } satisfies EngineError;
+    }
+    const adjustments: string[] = [];
+    let buffer = config.bufferSize;
+    if (buffer !== null) {
+      const lo = Math.max(16, input.configs[0]?.minBufferSize ?? 16, output.configs[0]?.minBufferSize ?? 16);
+      const hi = Math.min(4096, input.configs[0]?.maxBufferSize ?? 4096, output.configs[0]?.maxBufferSize ?? 4096);
+      const clamped = Math.min(hi, Math.max(lo, Math.round(buffer)));
+      if (clamped !== buffer) adjustments.push(`buffer ${buffer} → ${clamped} frames`);
+      buffer = clamped;
+    }
+    if (this.capturing) this.stopInput();
+    this.sampleRate = rate;
+    this.transport = { ...this.transport, sampleRate: rate };
+    this.bufferSize = buffer;
+    this.outputDeviceId = output.id;
+    this.monitor = { ...config.monitor };
+    this.audioConfig = config;
+    this.inputRoute = config.inputRoute;
+    this.outputRoute = config.outputRoute;
+    if (!this.routeFits(this.inputRoute, input.maxChannels)) {
+      adjustments.push("input route → Mix all");
+      this.inputRoute = { type: "mixAll" };
+    }
+    if (!this.outputRouteFits(this.outputRoute)) {
+      adjustments.push("output route → 1/2");
+      this.outputRoute = { type: "pair", left: 0, right: 1 };
+    }
+    const status = this.startInput(input.id, false);
+    if (adjustments.length) {
+      this.emit({ type: "warning", payload: { kind: "configAdjusted", message: `Adjusted to fit the device: ${adjustments.join(", ")}.` } });
+    }
+    return status;
+  }
+
+  private routeFits(route: InputRoute, n: number): boolean {
+    return (
+      route.type === "mixAll" ||
+      (route.type === "mono" && route.channel < n) ||
+      (route.type === "stereoSum" && route.left < n && route.right < n)
+    );
+  }
+
+  private outputRouteFits(route: OutputRoute): boolean {
+    const n = this.outputChannels();
+    return route.type === "all" || (route.type === "mono" && route.channel < n) || (route.type === "pair" && route.left < n && route.right < n);
+  }
+
+  private emitStatus(): EngineStatus {
+    const status = this.status();
+    this.emit({ type: "status", payload: status });
+    return status;
+  }
+
+  private setOutputRoute(route: OutputRoute): EngineStatus {
+    const ok = (c: number) => Number.isInteger(c) && c >= 0 && c < 32;
+    if ((route.type === "mono" && !ok(route.channel)) || (route.type === "pair" && !(ok(route.left) && ok(route.right)))) {
+      throw { kind: "invalid", message: "channel out of range" } satisfies EngineError;
+    }
+    const fits = this.outputRouteFits(route);
+    this.outputRoute = fits ? route : { type: "pair", left: 0, right: 1 };
+    this.audioConfig = { ...this.audioConfig, outputRoute: this.outputRoute };
+    if (!fits) {
+      this.emit({ type: "warning", payload: { kind: "configAdjusted", message: `The output has ${this.outputChannels()} channels; using 1/2.` } });
+    }
+    return this.emitStatus();
+  }
+
+  private validateMonitor(m: MonitorConfig): void {
+    if (!m || typeof m.enabled !== "boolean" || !Number.isFinite(m.gain) || m.gain < 0 || m.gain > 2) {
+      throw { kind: "invalid", message: "monitor gain must be between 0 and 2" } satisfies EngineError;
+    }
+  }
+
+  private setMonitor(m: MonitorConfig): EngineStatus {
+    this.validateMonitor(m);
+    this.monitor = { ...m };
+    this.audioConfig = { ...this.audioConfig, monitor: this.monitor };
+    return this.emitStatus();
+  }
+
+  /** Only maxTracks is modelled. Existing tracks and loops are kept (the real engine may not). */
+  private setLooperConfig(config: { maxTracks?: number }): null {
+    const n = config.maxTracks ?? this.tracks.length;
+    if (!Number.isInteger(n) || n < 1 || n > MOCK_MAX_TRACKS) {
+      throw { kind: "invalid", message: `max_tracks must be 1..=${MOCK_MAX_TRACKS}` } satisfies EngineError;
+    }
+    if (n < this.tracks.length && this.tracks.slice(n).some((t) => t.layers > 0 || t.rec)) {
+      throw { kind: "busy", message: "clear the tracks being removed first" } satisfies EngineError;
+    }
+    this.tracks = n > this.tracks.length
+      ? [...this.tracks, ...Array.from({ length: n - this.tracks.length }, () => this.emptyTrack())]
+      : this.tracks.slice(0, n);
+    if (this.capturing) this.emit({ type: "looper", payload: this.looperState() });
+    return null;
+  }
+
+  private midiPorts(): MidiPortInfo[] {
+    return MOCK_MIDI_PORTS.map((p) => ({ ...p, open: this.midiOpen.has(p.id) }));
+  }
+
+  private openMidi(portId: string): MidiPortInfo {
+    const port = MOCK_MIDI_PORTS.find((p) => p.id === portId || p.name === portId);
+    if (!port) throw { kind: "deviceNotFound", message: portId } satisfies EngineError;
+    this.midiOpen.add(port.id);
+    this.emit({ type: "midiPorts", payload: this.midiPorts() });
+    this.ensureTimer();
+    return { ...port, open: true };
+  }
+
+  private closeMidi(portId: string): null {
+    const port = MOCK_MIDI_PORTS.find((p) => p.id === portId || p.name === portId);
+    if (!port || !this.midiOpen.has(port.id)) {
+      throw { kind: "invalid", message: `MIDI port "${portId}" is not open` } satisfies EngineError;
+    }
+    this.midiOpen.delete(port.id);
+    this.emit({ type: "midiPorts", payload: this.midiPorts() });
+    this.stopTimerIfIdle();
+    return null;
+  }
+
+  private audioSettings(): AudioSettings {
+    return {
+      version: 1,
+      audio: { ...this.audioConfig, inputRoute: this.inputRoute, outputRoute: this.outputRoute, monitor: this.monitor },
+      midiInputs: MOCK_MIDI_PORTS.filter((p) => this.midiOpen.has(p.id)).map((p) => p.name),
+      inputLatencyFrames: this.latencySet ? this.latency : null,
+    };
+  }
+
+  private startCalibration(apply: boolean): null {
+    if (!this.capturing) throw { kind: "invalid", message: "start audio (with the looper output) first" } satisfies EngineError;
+    if (this.run !== "stopped") throw { kind: "invalid", message: "stop the transport first" } satisfies EngineError;
+    if (this.monitor.enabled) throw { kind: "invalid", message: "turn monitoring off first" } satisfies EngineError;
+    if (this.calibrationPending) throw { kind: "busy", message: "a calibration is already running" } satisfies EngineError;
+    this.calibrationPending = { remaining: CALIBRATION_SECONDS, apply };
+    return null;
+  }
+
+  private finishCalibration(apply: boolean, aborted: boolean): void {
+    this.calibrationPending = null;
+    let outcome: CalibrationOutcome;
+    if (aborted) {
+      outcome = { result: null, error: { kind: "aborted", message: "Audio stopped during the measurement." }, applied: false };
+    } else if (this.deviceId === "mock-interface" && this.inputRoute.type === "mono" && this.inputRoute.channel === 1) {
+      // The simulated loopback cable is on input 1; input 2 only hears hiss.
+      outcome = { result: null, error: { kind: "notDetected", message: "Nothing above the noise floor on In 2." }, applied: false };
+    } else {
+      // Interface: a cable loop (tight). Microphone: acoustic path through the speakers (loose).
+      const cable = this.deviceId === "mock-interface";
+      const seconds = cable ? 0.0118 : 0.0215;
+      const latencyFrames = Math.round(seconds * this.sampleRate);
+      outcome = {
+        result: {
+          latencyFrames,
+          latencyMs: (latencyFrames / this.sampleRate) * 1000,
+          sampleRate: this.sampleRate,
+          confidence: cable ? 0.96 : 0.42,
+          detected: cable ? 8 : 6,
+          repeats: 8,
+          spreadFrames: cable ? 2 : 41,
+          inverted: cable,
+        },
+        error: null,
+        applied: apply,
+      };
+      if (apply) {
+        this.latency = latencyFrames;
+        this.latencySet = true;
+      }
+    }
+    this.emit({ type: "calibration", payload: outcome });
+    if (!aborted) this.emit({ type: "looper", payload: this.looperState() });
+  }
+
+  private ensureTimer(): void {
+    if (this.realtime && !this.timer && (this.capturing || this.midiOpen.size > 0)) {
+      this.timer = setInterval(() => this.tick(TICK_MS / 1000), TICK_MS);
+    }
+  }
+
+  private stopTimerIfIdle(): void {
+    if (this.timer && !this.capturing && this.midiOpen.size === 0) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  private tickMidi(seconds: number): void {
+    if (this.midiOpen.size === 0) return;
+    const start = this.hostSeconds - seconds;
+    const out: MidiEvent[] = [];
+    const stamp = (portId: string, m: MidiMessage, at: number): MidiEvent => ({
+      ...m,
+      portId,
+      hostTimeNs: Math.round(at * 1e9),
+      outputFrame: this.capturing ? this.inputFrame : null,
+      transportFrame: this.capturing ? this.t : null,
+      inputFrame: this.capturing ? this.inputFrame : null,
+    });
+    if (this.midiNextAt < start) this.midiNextAt = start;
+    while (this.midiNextAt <= this.hostSeconds) {
+      const at = this.midiNextAt;
+      const step = this.midiStep++;
+      if (this.midiOpen.has("mock-keys")) {
+        const prev = ARPEGGIO[(step + ARPEGGIO.length - 1) % ARPEGGIO.length];
+        const note = ARPEGGIO[step % ARPEGGIO.length];
+        if (step > 0) out.push(stamp("mock-keys", { kind: "noteOff", channel: 0, note: prev, velocity: 0 }, at));
+        out.push(stamp("mock-keys", { kind: "noteOn", channel: 0, note, velocity: 70 + Math.round(this.rand() * 40) }, at));
+        if (step % 4 === 0) {
+          out.push(stamp("mock-keys", { kind: "controlChange", channel: 0, controller: 1, value: Math.round(this.rand() * 127) }, at));
+        }
+      }
+      if (this.midiOpen.has("mock-pads") && step % 2 === 0) {
+        out.push(stamp("mock-pads", { kind: "noteOn", channel: 9, note: step % 4 === 0 ? 36 : 38, velocity: 112 }, at));
+        out.push(stamp("mock-pads", { kind: "noteOff", channel: 9, note: step % 4 === 0 ? 36 : 38, velocity: 0 }, at + 0.05));
+      }
+      this.midiNextAt += 0.25;
+    }
+    if (out.length) this.emit({ type: "midi", payload: { events: out, dropped: 0 } });
+  }
+
+  private tickDiagnostics(seconds: number): void {
+    this.diagnosticsAccum += seconds;
+    if (this.diagnosticsAccum < 1) return;
+    this.diagnosticsAccum -= 1;
+    const status = this.status();
+    const warm = this.inputFrame > this.sampleRate;
+    this.emit({
+      type: "audioDiagnostics",
+      payload: {
+        capture: status.capture,
+        output: status.output && {
+          ...status.output,
+          bridge: { ratioPpm: 3.2, meanFillFrames: 256, targetFillFrames: warm ? 256 : null, discontinuities: 0 },
+        },
+        driftPpm: this.inputFrame > 12 * this.sampleRate ? 3.2 : null,
+        driftWindowSeconds: this.inputFrame > 12 * this.sampleRate ? 12 : null,
+      },
+    });
   }
 
   private setInputRoute(route: InputRoute): EngineStatus {
@@ -253,25 +666,48 @@ export class MockEngine implements EngineTransport {
   }
 
   private status(): EngineStatus {
+    const audioConfig = this.audioSettings().audio;
     if (!this.capturing) {
-      return { capturing: false, monitoring: false, capture: null, output: null, looper: false, analysis: false };
+      return { capturing: false, monitoring: false, capture: null, output: null, looper: false, analysis: false, audioConfig };
     }
-    const info = { sampleRate: this.sampleRate, channels: 1, sampleFormat: "f32" };
+    const block = this.bufferSize ?? 512;
+    const counters = { requestedBufferSize: this.bufferSize, blockFrames: block, reportedLatencyFrames: block, discontinuities: 0, lostFrames: 0 };
     return {
       capturing: true,
-      monitoring: false,
-      capture: { ...info, deviceId: this.deviceId, channels: this.inputChannels(), route: this.inputRoute, discontinuities: 0 },
-      output: { ...info, deviceId: "mock-output", channels: 2 },
+      monitoring: this.monitor.enabled,
+      capture: {
+        deviceId: this.deviceId,
+        sampleRate: this.sampleRate,
+        channels: this.inputChannels(),
+        sampleFormat: this.deviceId === "mock-interface" ? "i16" : "f32",
+        route: this.inputRoute,
+        nonFiniteSamples: 0,
+        ...counters,
+      },
+      output: {
+        deviceId: this.outputDeviceId,
+        sampleRate: this.sampleRate,
+        channels: this.outputChannels(),
+        sampleFormat: "f32",
+        route: this.outputRoute,
+        monitor: { ...this.monitor },
+        bridge: { ratioPpm: 0, meanFillFrames: 0, targetFillFrames: null, discontinuities: 0 },
+        ...counters,
+      },
       looper: true,
       analysis: this.analysisEnabled,
+      audioConfig,
     };
   }
 
-  private startInput(deviceId: string | null): EngineStatus {
+  private startInput(deviceId: string | null, remember = true): EngineStatus {
     if (deviceId && !this.devices().some((d) => d.id === deviceId)) {
       throw { kind: "deviceNotFound", message: deviceId } satisfies EngineError;
     }
+    if (this.capturing) this.stopInput();
     this.deviceId = deviceId ?? "mock-mic";
+    if (remember) this.audioConfig = { ...this.audioConfig, inputDevice: deviceId };
+    if (!this.routeFits(this.inputRoute, this.inputChannels())) this.inputRoute = { type: "mixAll" };
     this.capturing = true;
     this.inputFrame = 0;
     this.nextHop = 0;
@@ -279,7 +715,8 @@ export class MockEngine implements EngineTransport {
     this.noteFrames = [];
     this.noteIndex = -1;
     this.resetLooper();
-    if (this.realtime && !this.timer) this.timer = setInterval(() => this.tick(TICK_MS / 1000), TICK_MS);
+    this.diagnosticsAccum = 0;
+    this.ensureTimer();
     const status = this.status();
     this.emit({ type: "status", payload: status });
     this.emit({ type: "looper", payload: this.looperState() });
@@ -287,9 +724,11 @@ export class MockEngine implements EngineTransport {
   }
 
   private stopInput(): EngineStatus {
+    const pending = this.calibrationPending;
     this.capturing = false;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
+    if (pending) this.finishCalibration(pending.apply, true);
+    this.practice.audioStopped();
+    this.stopTimerIfIdle();
     const status = this.status();
     this.emit({ type: "status", payload: status });
     return status;
@@ -415,6 +854,7 @@ export class MockEngine implements EngineTransport {
         this.tracks.forEach((_, i) => this.clear(i));
         return null;
       case "setInputLatency":
+        this.latencySet = true;
         this.latency = Math.max(0, Math.min(Math.round(cmd.frames), (MAX_LOOP_SECONDS * this.sampleRate) / 2));
         return null;
     }
@@ -680,6 +1120,7 @@ export class MockEngine implements EngineTransport {
       inputUnderrunFrames: 0,
       driftDroppedFrames: 0,
       inputCushionFrames: 480 + Math.round(this.rand() * 96),
+      maxTracks: MOCK_MAX_TRACKS,
     };
   }
 
@@ -782,7 +1223,14 @@ export class MockEngine implements EngineTransport {
 
   /** Advance the simulation by `seconds` and emit what the engine would at ~30 Hz. */
   tick(seconds: number): void {
+    this.hostSeconds += seconds;
+    this.tickMidi(seconds);
     if (!this.capturing) return;
+    if (this.calibrationPending) {
+      this.calibrationPending.remaining -= seconds;
+      if (this.calibrationPending.remaining <= 0) this.finishCalibration(this.calibrationPending.apply, false);
+    }
+    this.tickDiagnostics(seconds);
     const frames = Math.round(seconds * this.sampleRate);
     this.inputFrame += frames;
     this.emit({ type: "level", payload: this.level() });
@@ -802,5 +1250,6 @@ export class MockEngine implements EngineTransport {
 
     this.advanceLooper(frames);
     this.emit({ type: "looper", payload: this.looperState() });
+    this.practice.tick(seconds);
   }
 }

@@ -56,3 +56,10 @@ and scope checks to your crate (`cargo test -p <crate>`) where possible.
    results, defects found, recommended next tasks. Distinguish clearly between
    "compiles", "passes automated tests", and "verified on hardware" (you cannot
    claim the last).
+
+## Concurrent user session (2026-11-17)
+
+The user also runs a separate Codex session in this tree. It owns and is rewriting
+`docs/ROADMAP.md`, `docs/README.md`, `docs/projects/README.md`, `PRODUCT_DIRECTION.md`,
+`UNWIRED_FEATURES.md`, and `docs/projects/frontend/INTERACTION_DESIGN.md`. Read them for
+direction; do not edit them.

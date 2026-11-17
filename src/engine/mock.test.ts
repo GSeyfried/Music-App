@@ -154,3 +154,111 @@ describe("MockEngine hardware-io", () => {
     expect(latest().latencyFrames).toBe(480);
   });
 });
+
+describe("MockEngine hardware-io round 2", () => {
+  it("lists inputs and outputs with formats", async () => {
+    const { engine } = await setup();
+    const list = await engine.listAudioDevices();
+    expect(list.inputs.map((d) => d.id)).toContain("mock-interface");
+    expect(list.outputs.find((d) => d.maxChannels === 4)?.sampleRates).toContain(96_000);
+  });
+
+  it("start_audio applies device, rate and buffer, clamping with a warning", async () => {
+    const { engine, events } = await setup();
+    const status = await engine.startAudio({ outputDevice: "mock-interface-out", inputDevice: "mock-interface", sampleRate: 96_000, bufferSize: 8 });
+    expect(status.output?.channels).toBe(4);
+    expect(status.output?.sampleRate).toBe(96_000);
+    expect(status.capture?.blockFrames).toBe(32);
+    expect(events.some((e) => e.type === "warning" && e.payload.kind === "configAdjusted")).toBe(true);
+    expect((await engine.getAudioSettings()).audio.outputDevice).toBe("mock-interface-out");
+  });
+
+  it("refuses a rate the devices cannot run and missing devices per policy", async () => {
+    const { engine, events } = await setup();
+    await expect(engine.startAudio({ sampleRate: 96_000 })).rejects.toMatchObject({ kind: "unsupportedFormat" });
+    await expect(engine.startAudio({ outputDevice: "Gone" })).rejects.toMatchObject({ kind: "deviceNotFound" });
+    const status = await engine.startAudio({ outputDevice: "Gone", missingDevice: "useDefault" });
+    expect(status.output?.deviceId).toBe("mock-speakers");
+    expect(events.some((e) => e.type === "warning" && e.payload.kind === "deviceFallback")).toBe(true);
+  });
+
+  it("validates monitoring and reports it in status", async () => {
+    const { engine } = await setup();
+    await engine.startInput(null);
+    await expect(engine.setMonitor({ enabled: true, gain: 3 })).rejects.toMatchObject({ kind: "invalid" });
+    expect((await engine.setMonitor({ enabled: true, gain: 0.5 })).monitoring).toBe(true);
+    expect((await engine.getAudioSettings()).audio.monitor).toEqual({ enabled: true, gain: 0.5 });
+  });
+
+  it("routes output pairs that fit and falls back otherwise", async () => {
+    const { engine, events } = await setup();
+    await engine.startAudio({ outputDevice: "mock-interface-out" });
+    expect((await engine.setOutputRoute({ type: "pair", left: 2, right: 3 })).output?.route).toEqual({ type: "pair", left: 2, right: 3 });
+    await engine.startAudio({ outputDevice: "mock-speakers" });
+    expect((await engine.setOutputRoute({ type: "mono", channel: 3 })).output?.route).toEqual({ type: "pair", left: 0, right: 1 });
+    expect(events.filter((e) => e.type === "warning" && e.payload.kind === "configAdjusted").length).toBeGreaterThan(0);
+  });
+
+  it("opens MIDI ports, streams notes even without audio, and closes them", async () => {
+    const { mock, engine, events } = await setup();
+    expect((await engine.listMidiInputs()).every((p) => !p.open)).toBe(true);
+    await engine.openMidiInput("Simulated keyboard"); // by name works too
+    expect(events.some((e) => e.type === "midiPorts")).toBe(true);
+    mock.tick(0.6);
+    const batch = events.find((e) => e.type === "midi");
+    expect(batch?.type === "midi" && batch.payload.events[0]).toMatchObject({ kind: "noteOn", portId: "mock-keys", inputFrame: null });
+    expect((await engine.getAudioSettings()).midiInputs).toEqual(["Simulated keyboard"]);
+    await engine.closeMidiInput("mock-keys");
+    await expect(engine.closeMidiInput("mock-keys")).rejects.toMatchObject({ kind: "invalid" });
+    await expect(engine.openMidiInput("nope")).rejects.toMatchObject({ kind: "deviceNotFound" });
+  });
+
+  it("calibration enforces preconditions and reports a result", async () => {
+    const { mock, engine, events, latest } = await setup();
+    await expect(engine.startLatencyCalibration(true)).rejects.toMatchObject({ kind: "invalid" });
+    await engine.startInput("mock-interface");
+    await engine.setMonitor({ enabled: true, gain: 1 });
+    await expect(engine.startLatencyCalibration(true)).rejects.toMatchObject({ kind: "invalid" });
+    await engine.setMonitor({ enabled: false, gain: 1 });
+    await engine.looper({ type: "play" });
+    await expect(engine.startLatencyCalibration(true)).rejects.toMatchObject({ kind: "invalid" });
+    await engine.looper({ type: "stop" });
+    await engine.startLatencyCalibration(true);
+    await expect(engine.startLatencyCalibration(true)).rejects.toMatchObject({ kind: "busy" });
+    for (let i = 0; i < 80; i++) mock.tick(0.033);
+    const outcome = events.find((e) => e.type === "calibration");
+    expect(outcome?.type === "calibration" && outcome.payload).toMatchObject({ applied: true, error: null });
+    expect(latest().latencyFrames).toBe(Math.round(0.0118 * 48_000));
+    expect((await engine.getAudioSettings()).inputLatencyFrames).toBe(Math.round(0.0118 * 48_000));
+  });
+
+  it("calibration fails on the silent channel and aborts when audio stops", async () => {
+    const { mock, engine, events } = await setup();
+    await engine.startInput("mock-interface");
+    await engine.setInputRoute({ type: "mono", channel: 1 });
+    await engine.startLatencyCalibration(false);
+    for (let i = 0; i < 80; i++) mock.tick(0.033);
+    const failed = events.filter((e) => e.type === "calibration").pop();
+    expect(failed?.type === "calibration" && failed.payload.error?.kind).toBe("notDetected");
+    await engine.setInputRoute({ type: "mixAll" });
+    await engine.startLatencyCalibration(false);
+    await engine.stopInput();
+    const aborted = events.filter((e) => e.type === "calibration").pop();
+    expect(aborted?.type === "calibration" && aborted.payload.error?.kind).toBe("aborted");
+  });
+
+  it("emits 1 Hz audio diagnostics with bridge info, and startup warnings", async () => {
+    const mock = new MockEngine({
+      realtime: false,
+      startupWarnings: [{ kind: "settingsProblem", message: "audio-settings.json was unreadable" }],
+    });
+    const engine = createEngine(mock);
+    const events: EngineEvent[] = [];
+    await engine.subscribe((e) => events.push(e));
+    expect(await engine.startupWarnings()).toEqual([{ kind: "settingsProblem", message: "audio-settings.json was unreadable" }]);
+    await engine.startInput(null);
+    for (let i = 0; i < 40; i++) mock.tick(0.033);
+    const diag = events.find((e) => e.type === "audioDiagnostics");
+    expect(diag?.type === "audioDiagnostics" && diag.payload.output?.bridge?.ratioPpm).toBe(3.2);
+  });
+});

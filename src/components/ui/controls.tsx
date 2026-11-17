@@ -29,12 +29,15 @@ export function usePress(onPress: (() => void) | undefined, disabled?: boolean) 
       firedByPointer.current = true;
       onPress?.();
     },
-    onClick: () => {
-      if (firedByPointer.current) {
-        firedByPointer.current = false;
-        return;
-      }
-      onPress?.();
+    onClick: (e: { detail: number }) => {
+      // detail 0 = keyboard / programmatic activation: always act. A pointer click
+      // after a pointer-down that already acted is swallowed. Checking `detail`
+      // means a pointer-down that never became a click (finger dragged off) cannot
+      // leave the flag set and eat the next keyboard press.
+      const keyboard = e.detail === 0;
+      const already = firedByPointer.current;
+      firedByPointer.current = false;
+      if (keyboard || !already) onPress?.();
     },
   };
 }

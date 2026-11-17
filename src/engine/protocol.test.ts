@@ -14,8 +14,10 @@ import {
   STOP_RECORDING_COMMAND_JSON,
   WARNING_EVENT_JSON,
   HW_LEVEL_EVENT_JSON,
+  CALIBRATION_EVENT_JSON,
   HW_STATUS_EVENT_JSON,
 } from "../test/fixtures";
+import { PRACTICE_EVENT_TYPES } from "../practice/types";
 import { createEngine } from "./client";
 import {
   ENGINE_ERROR_KINDS,
@@ -96,6 +98,8 @@ describe("engine events parse from the Rust JSON", () => {
         "midiPorts",
         "midi",
         "audioDiagnostics",
+        "calibration",
+        ...PRACTICE_EVENT_TYPES,
       ].sort(),
     );
   });
@@ -237,5 +241,38 @@ describe("hardware-io contract (docs/projects/hardware-io/INTERFACE.md)", () => 
       `[{"command":"set_input_route","args":{"route":{"type":"stereoSum","left":0,"right":1}}},` +
         `{"command":"set_monitor","args":{"monitor":{"enabled":false,"gain":1}}}]`,
     );
+  });
+});
+
+describe("hardware-io round 2 contract", () => {
+  it("calibration outcome parses", () => {
+    const ev = parseEngineEvent(JSON.parse(CALIBRATION_EVENT_JSON));
+    expect(ev?.type === "calibration" && ev.payload.result?.latencyMs).toBe(11.79);
+  });
+
+  it("commands use the documented names and argument keys", async () => {
+    const calls: string[] = [];
+    const engine = createEngine({
+      kind: "native",
+      invoke: async (command, args) => {
+        calls.push(JSON.stringify({ command, args }));
+        return null;
+      },
+      subscribe: async () => () => {},
+    });
+    await engine.startLatencyCalibration(true);
+    await engine.openMidiInput("port-1");
+    await engine.closeMidiInput("port-1");
+    await engine.startupWarnings();
+    await engine.startAudio({ outputDevice: "Speakers", bufferSize: 256 });
+    await engine.setOutputRoute({ type: "pair", left: 2, right: 3 });
+    expect(calls).toEqual([
+      `{"command":"start_latency_calibration","args":{"apply":true}}`,
+      `{"command":"open_midi_input","args":{"portId":"port-1"}}`,
+      `{"command":"close_midi_input","args":{"portId":"port-1"}}`,
+      `{"command":"startup_warnings"}`,
+      `{"command":"start_audio","args":{"config":{"outputDevice":"Speakers","bufferSize":256}}}`,
+      `{"command":"set_output_route","args":{"route":{"type":"pair","left":2,"right":3}}}`,
+    ]);
   });
 });

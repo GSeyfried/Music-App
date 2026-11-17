@@ -138,3 +138,6 @@ export const LOOPER_STATE: LooperState = {
 export const HW_LEVEL_EVENT_JSON = `{"type":"level","payload":{"rms":0.1,"peak":0.2,"rmsDb":-20.0,"peakDb":-14.0,"channels":[{"rmsDb":-20.0,"peakDb":-14.0,"clipped":false},{"rmsDb":-60.0,"peakDb":-54.0,"clipped":false}],"frame":4800,"dropped":0}}`;
 
 export const HW_STATUS_EVENT_JSON = `{"type":"status","payload":{"capturing":true,"monitoring":false,"capture":{"deviceId":"H4n","sampleRate":44100,"channels":4,"sampleFormat":"i16","route":{"type":"mono","channel":2},"requestedBufferSize":null,"blockFrames":512,"reportedLatencyFrames":512,"discontinuities":0,"lostFrames":0,"nonFiniteSamples":0},"output":null,"looper":false,"analysis":true,"audioConfig":{"inputDevice":"H4n","outputDevice":null,"missingDevice":"fail","sampleRate":null,"bufferSize":null,"inputRoute":{"type":"mono","channel":2},"outputRoute":{"type":"pair","left":0,"right":1},"monitor":{"enabled":false,"gain":1.0}}}}`;
+
+/** hardware-io INTERFACE.md `calibration` event (CalibrationOutcome), built from the documented types. */
+export const CALIBRATION_EVENT_JSON = `{"type":"calibration","payload":{"result":{"latencyFrames":566,"latencyMs":11.79,"sampleRate":48000,"confidence":0.96,"detected":8,"repeats":8,"spreadFrames":2,"inverted":false},"error":null,"applied":true}}`;

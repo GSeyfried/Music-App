@@ -2,7 +2,8 @@
 // workflow is a placeholder until its backend contract lands.
 
 import { useEngineState } from "../engine/EngineContext";
-import { StartCard } from "../components/InputControls";
+import { InputOffBar, StartCard } from "../components/InputControls";
+import { useUi } from "../components/UiContext";
 import { PitchCurve } from "../components/PitchCurve";
 import { Tuner } from "../components/Tuner";
 
@@ -29,9 +30,11 @@ function ComparePlaceholder() {
 
 export function PracticeLab() {
   const capturing = useEngineState((s) => s.status.capturing);
+  const { sessionStarted } = useUi();
   return (
     <div className="practice">
-      {capturing ? (
+      {!capturing && sessionStarted && <InputOffBar />}
+      {capturing || sessionStarted ? (
         <>
           <section className="card practice-tuner" aria-label="Tuner">
             <Tuner size="large" />

@@ -15,6 +15,11 @@ export function useLiveShortcuts(): void {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (isTypingTarget(e.target)) return;
+      // Space belongs to play/stop. Cancel its default on every keydown, auto-repeats
+      // included: holding Space on a focused button (e.g. "Stop input") must not let
+      // the browser activate that button.
+      if (!ui.overlay && !ui.menu && (e.code === "Space" || e.key === " ")) e.preventDefault();
+      if (ui.menu) return; // the open context menu owns the keyboard
       const hit = resolveShortcut(e);
       if (!hit) return;
       const view = store.getSnapshot().looper;
@@ -26,6 +31,7 @@ export function useLiveShortcuts(): void {
         if (ui.overlay) ui.setOverlay(null);
         return;
       }
+      // Shift+F10 / the context-menu key are handled by the focused track card.
       // While a sheet is open, only Escape and the sheet toggles apply.
       if (ui.overlay && hit.id !== "help" && hit.id !== "settings") return;
       e.preventDefault();
@@ -82,8 +88,20 @@ export function useLiveShortcuts(): void {
           return;
       }
     };
+    // Space is the live play/stop key, even when a button has focus. The keydown
+    // handler above already calls preventDefault (Chromium/WebKit start a button's
+    // Space activation from keydown); Firefox activates on keyup, so cancel that too.
+    // Otherwise Space would both toggle play/stop and press the focused button.
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (ui.overlay || ui.menu || isTypingTarget(e.target)) return;
+      if (e.code === "Space" || e.key === " ") e.preventDefault();
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
+    };
   }, [store, actions, ui]);
 }
 
