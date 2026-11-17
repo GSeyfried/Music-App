@@ -268,6 +268,7 @@ while a take is recording.
 
 | Crate | Used by | Licence | Notes |
 | --- | --- | --- | --- |
+| tauri-plugin-dialog 2.8 (+ rfd 0.17 MIT, tauri-plugin-fs internal) | src-tauri | MIT OR Apache-2.0 | round 2; maintained by the Tauri team; desktop + iOS/Android (iOS limits in INTERFACE.md). No `fs` permissions granted. |
 | serde, serde_json | project | MIT/Apache-2.0 | already in the workspace |
 | thiserror | project | MIT/Apache-2.0 | already in the workspace |
 | voiceloop-project | engine | workspace | new path dependency |
@@ -335,11 +336,145 @@ GarageBand and Logic: same files; drag stems to bar 1 (GarageBand ignores
 BWF), import the MIDI file first into an empty project so it sets tempo
 and meter (Logic: *File ▸ Import ▸ MIDI File*, then *Import tempo*).
 
+## Round 2
+
+**Status (2026-11-17):** `cargo test -p voiceloop-project` 42/42,
+`cargo test -p voiceloop-engine` 174/174, `cargo build -p voiceloop`
+builds (dialog plugin included), clippy clean and rustfmt clean in these
+files. Nothing below has been checked on audio hardware or in REAPER.
+
+
+### Loops survive stream restarts (iOS route changes, device changes)
+
+The looper lives inside the output stream's callback, so tearing the stream
+down used to drop every loop (iOS README section 5, risk #1). Now:
+
+1. `LooperHandles::parked` holds the receiving end of a channel. The engine
+   takes it just before stopping the stream.
+2. Dropping the stream drops the `LooperCore` on the control thread (never
+   in an audio callback). Its `Drop` closes open takes the way Stop does
+   (in-flight input is lost with the stream), then **moves** the layer and
+   redo buffers, mixer state, transport, period and latency into a
+   `ParkedLooper` and sends it. Nothing is copied. A core that was in the
+   middle of a restore parks nothing (its content is incomplete, and the
+   restore's source is still held by the glue).
+3. `ProjectGlue::on_looper_stopped` keeps it as a pending load. When the next
+   looper runs, the glue loads it with the normal `Importer` (realtime-safe,
+   same code as Open). Looper commands are refused with `busy` until then,
+   so nothing can record into the empty new looper first.
+4. **Different sample rate:** layers are converted on a worker with the
+   import resampler (32-zero-crossing Kaiser sinc, β = 9). The loop period
+   scales exactly (`p × new/old`, possibly fractional), and layers are padded
+   or cut to `ceil(p')`.
+   *Quality:* tones up to 15 kHz within 2e-3, aliasing more than 60 dB down
+   (tests in `resample.rs`). *Limits:* not bit-exact. Each rate change
+   resamples again, so ping-ponging between rates accumulates small errors.
+   The loop length is preserved to well under one frame. Free-mode periods
+   become fractional, which the looper handles. Latency compensation is
+   restored in frames as it was; re-calibrate after a device change.
+   Conversion time is proportional to content: a few hundred ms for
+   8 × 30 s layers in an optimised build; looper commands wait meanwhile.
+
+Tests: record → park (core dropped) → restore into a fresh looper plays back
+**bit-identically** (free and fractional Metronome loops, redo history,
+gains). A take open at teardown is closed and kept. A looper that is
+loading parks nothing. A glue test covers park → teardown autosave → save
+while audio is stopped → reopen.
+
+### Unsaved changes, quit, and teardown autosave
+
+- `EngineStatus.unsavedChanges`. The looper publishes a content epoch in every
+  snapshot; any change seen outside the glue's own restores marks the
+  project dirty, as do track add/remove, renames, imports and Practice Lab
+  changes (cheap fingerprint). A save clears it unless the looper changed
+  after the save captured its content.
+- A teardown with unsaved work schedules a recovery autosave of the parked
+  loops (run when idle; a restore into a new stream goes first). On exit the
+  control thread waits up to 10 s for a running save/autosave
+  (`finish_blocking`). The timer autosave now only runs when there is unsaved work.
+
+### Track ceiling: 16, add/remove at runtime
+
+`MAX_TRACKS` 8 → 16; `LooperConfig.trackCapacity` (default 16) tracks are
+preallocated at audio start, `maxTracks` (default 2) start active.
+`addTrack` moves a preallocated track into the active list, `removeTrack`
+releases its layers and moves it back. Both are within reserved capacity,
+so there is no allocation and no stream restart.
+*Memory:* a track owns no audio. All audio is in the fixed layer pool, so
+16 tracks cost ~16 × (100 B + 2 × `max_layers_per_track` pointers), plus
+~40 B per track per snapshot (8 snapshots buffered). *Realtime cost:* per
+sample, one gain-slew step per active track; layer reads stay bounded by
+`pool_layers` (≤ 64). `removeTrack` shifts at most 15 small structs.
+The pool, not the track count, is the real limit: 16 tracks with one layer
+each need `poolLayers ≥ 16` (default 8, ≈ 46 MB at 48 kHz/30 s; 16 ≈ 92 MB).
+`LooperState.maxTracks` reports the ceiling (the frontend's name);
+`set_looper_config` merges partial configs and grows tracks live.
+The project format already stored any number of tracks; restore now
+recreates the exact track count (including empty tracks). Projects with more
+tracks than the looper's capacity fail with `doesNotFit`.
+
+### Timing-suspect takes (hardware-io hook)
+
+`LooperCommand::InputDiscontinuity` (internal, not deserialisable) is
+applied by the output callback through `LooperCore::apply_now` when the
+bridge reports a discontinuity (one line in `looper/io.rs`). Tracks
+recording at that moment get `timingSuspect`, cleared by their next take
+or Clear. Test: only takes in progress are flagged; it serialises; the next
+take clears it; JSON cannot inject it.
+
+### Practice Lab library in the package
+
+`practice/library-<fnv1a64>.json` (content-addressed, crash-safe replace,
+kept for the fallback save, garbage-collected like layers, checksum verified
+on load). `project.json` `practice.library` points to it. The glue
+serialises the engine's `PracticeLibrary` on the worker and, after
+open/new, hands it to the control loop, which applies
+`practice::Request::Import { replace: true }`. A damaged library opens the
+project with a warning instead of failing.
+
+### REAPER `.rpp` export
+
+`voiceloop-project::rpp` writes the text format; `exportReaper` renders
+unity-gain stems into `<dir>/Audio/` and `<dir>/<name>.rpp` with `TEMPO`
+(quarter-note BPM, converted like the SMF), `SAMPLERATE`, `LOOP 1`, a time
+selection and a region over one loop, and per track `NAME`, `VOLPAN`
+(linear gain), `MUTESOLO`, and one `ITEM` at 0 whose `SOURCE WAVE` points
+to `Audio/<stem>.wav`. Unit tests check balanced blocks, every field, REAPER
+quoting rules, and relative forward-slash paths.
+
+REAPER was **not launched**: its command line opens the full UI, and an
+unlicensed copy shows an evaluation dialog that needs a click, so there is
+no reliable headless check. Manual procedure:
+
+1. In VoiceLoop: Metronome mode, 7/8 at 240 BPM (eighths), 2 bars; record
+   claps on track 1, a second part on track 2; set track 2 gain to 0.5,
+   mute track 3 after recording something on it. `exportReaper` with
+   `loops: 4` into an empty folder `~/Desktop/vl-rpp`.
+2. Double-click `~/Desktop/vl-rpp/<name>.rpp`.
+3. Expect: tempo 120 (quarter notes) and 7/8 in the transport bar; three
+   tracks named as in VoiceLoop; track 2 volume -6.0 dB; track 3 muted;
+   every item starts at 0:00.000 and has the same length (8 bars of 7/8);
+   the loop/time selection covers exactly bars 1-2 and repeat is on; the
+   region "VoiceLoop loop" spans the same range; no "media offline"
+   messages (relative paths resolve). Play: loops repeat seamlessly at the
+   selection end, and the claps fall on the grid.
+4. Save in REAPER, then reopen to confirm REAPER accepted the file (it adds
+   GUIDs and its own defaults). Record pass/fail and the REAPER version here.
+
+If REAPER reads `TEMPO` per denominator note instead (expected: per quarter
+note), step 3 shows 240 and the grid will be off by 2×. Report it, and the
+fix is one line (`bpm` in `write_reaper`).
+
 ## PENDING
 
-- Manual DAW checks above (REAPER, GarageBand, Logic): not run.
-- UI integration: dialog plugin and capability (see `INTERFACE.md`), "Save
-  before stopping audio/quitting" prompt, recovery prompt at start-up.
+- Manual DAW checks above (REAPER stems/MIDI, REAPER `.rpp`, GarageBand, Logic): not run.
+- UI integration: dialog calls in `bridge.ts` (`@tauri-apps/plugin-dialog`),
+  quit prompt from `unsavedChanges`, recovery prompt at start-up, Add Track
+  via `addTrack`, `timingSuspect` badge, "Restoring loops" state.
+- iOS: folder packages cannot go through the dialog plugin; an in-app
+  project list under Documents is needed (see `INTERFACE.md`). Park/restore
+  needs testing on a device with real route changes.
+- Persist `timingSuspect` per layer in `project.json`.
 - Verify the implemented parked-looper stop/restart restoration through the
   native app, including sample-rate changes and unsaved-work behavior.
 - Lock file against two writers on one package; RF64 for > 4 GiB files.

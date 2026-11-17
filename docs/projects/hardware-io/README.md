@@ -370,7 +370,28 @@ and in `looper/io.rs` (mine, one line once the variant exists): when
   (we stop the streams on `interruptionBegan`, so it should not).
 - PENDING: iOS input selection (`availableInputs` / `setPreferredInput`) and
   `setPreferredInputNumberOfChannels` are in the prototype but not wired to
-  commands yet.
+  commands yet. Round 4 was stopped before any code changed. Planned design:
+  - Add `sessionInput` (port UID) and `inputChannels` to `AudioConfig` so they
+    persist.
+  - `prepare_audio` applies them after activation. It clamps the channel count
+    to `maximumInputNumberOfChannels`, and a missing UID falls back to the
+    system route with a `deviceFallback` warning.
+  - New commands `session_inputs`, `select_session_input(uid?)` and
+    `set_session_input_channels(n?)` return `{supported, available,
+    preferred, preferredChannels, current}`. On desktop they return
+    `supported: false` / `invalid`, because desktop uses `inputDevice`.
+  - On iOS, `availableInputs` needs the PlayAndRecord category set first.
+  - If audio is running, selecting an input restarts it. Route-change restarts
+    are ignored for about 750 ms after a start, so our own change does not
+    restart audio twice.
+- PENDING (round 4, not started): realtime-cost benchmark harness. It would
+  run the full output callback offline: max tracks/layers, bridge, click,
+  limiter, meter and analysis tap. It would report worst-case and p99 time
+  against the deadline at 64/128/256 frames and 44.1/48/96 kHz, with results
+  in `docs/projects/quality/RT_BENCHMARKS.md`. It would also settle RT_AUDIT
+  #1 (denormals: whether to use FTZ/DAZ or flush thresholds) and #2
+  (transcendentals in click/limiter). Any changes to `processor.rs` or
+  `click.rs` would be specified for the persistence agent, not edited.
 - PENDING: whether a USB device's UID changes on another port (H4n test:
   plug into a different port; expect the name fallback and an updated id).
 - PENDING: whether the H4n exposes one CoreAudio device for both directions

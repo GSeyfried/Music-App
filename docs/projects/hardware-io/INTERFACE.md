@@ -25,6 +25,8 @@ Every command rejects with an `EngineError` (`{ kind, message? }`).
 | `start_latency_calibration` | `{ apply: boolean }` | `null` | Loopback calibration (output → cable/speaker → input). Needs audio running with the looper output, transport **stopped**, monitoring **off** (else `invalid`); one at a time (`busy`). Plays 8 short chirps at −12 dBFS (~2 s). Result arrives as a `calibration` event ~2.5 s later. With `apply: true` a successful result is sent as `setInputLatency` (and saved). |
 | `looper_command` | `{ command: { type: "setInputLatency", frames } }` | `null` | **Changed:** now accepted while audio is stopped; the value is remembered, re-applied on every start, and saved. |
 
+PENDING (not implemented yet): `session_inputs`, `select_session_input(uid?)` and `set_session_input_channels(n?)` for iOS input selection and input channel count. See README PENDING for the planned design. Do not call them yet.
+
 Settings are loaded automatically at app start from
 `<app config dir>/audio-settings.json`. An unreadable/invalid/newer file is
 moved to `audio-settings.json.bad`, defaults are used, and a `settingsProblem`

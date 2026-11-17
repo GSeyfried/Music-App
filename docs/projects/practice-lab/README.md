@@ -342,3 +342,24 @@ UI PENDING:
   uncertain pitch is never scored; feedback needs multi-note agreement."
 - Real-voice evaluation set (recorded takes with annotated errors) to replace the
   synthetic-only validation.
+
+### Round 3 (assigned, not started — paused at the token limit)
+
+Nothing below has any code yet. The tree is unchanged from commit 7692a50.
+
+- Guide playback, so the user can hear the reference before an attempt:
+  - (a) A realtime-safe guide-tone synth in `practice/` (preallocated sine or
+    triangle voice with attack/release envelopes) that renders the reference's
+    note events.
+  - (b) Optional replay of the recorded reference audio, stored bounded in memory.
+  - Needs a minimal "auxiliary source" hook in `looper/processor.rs` or
+    `looper/io.rs`. The output callback would sum a preallocated voice before
+    the limiter, with notes fed through an `rtrb` SPSC ring. Coordinate with the
+    persistence agent, who is changing those files.
+  - UI options: play reference, play along with guide, count-in.
+- Generated exercises (intervals, scales, arpeggios in a chosen key, range and
+  tempo) as synthetic references from `voiceloop-analysis::theory`, playable
+  through the guide synth.
+- Latency override and calibration shortcut in Practice Lab. Uses the hardware
+  calibration command from `docs/projects/hardware-io/INTERFACE.md` and
+  `practice_set_config.latencyOverrideMs`.
