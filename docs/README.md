@@ -7,6 +7,7 @@
 | `DECISIONS.md` | Architectural decisions and open tradeoffs |
 | `ROADMAP.md` | Milestones 0–5 |
 | `REFERENCE_PACKAGE_ASSESSMENT.md` | Evaluation of the reference repositories, looper comparison, licensing |
+| `assessments/` | Dated architecture, implementation, and verification audits |
 | `projects/` | One sub-folder per project we build out: its scope, decisions, and notes |
 
 Add new top-level doc folders or files here as the project grows, and list them in this table.
