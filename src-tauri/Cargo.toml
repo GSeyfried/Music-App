@@ -10,11 +10,17 @@ publish.workspace = true
 name = "voiceloop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# Native open/save dialogs (MIT OR Apache-2.0; desktop + iOS/Android). See docs/projects/persistence/INTERFACE.md.
+tauri-plugin-dialog = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 voiceloop-engine = { path = "../crates/voiceloop-engine" }

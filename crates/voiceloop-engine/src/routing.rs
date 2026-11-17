@@ -114,10 +114,16 @@ pub enum MissingDevicePolicy {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AudioConfig {
-    /// Input device id (its name); `None` = system default input.
+    /// Input device: stable id (`DeviceInfo.id`) or, for older settings, a
+    /// name; `None` = system default input.
     pub input_device: Option<String>,
-    /// Output device id (its name); `None` = system default output.
+    /// Output device id (or name); `None` = system default output.
     pub output_device: Option<String>,
+    /// Name of the input device when it was chosen. Filled in by the engine;
+    /// used if the id is no longer present (a USB device's macOS UID can
+    /// change with the port it is plugged into).
+    pub input_device_name: Option<String>,
+    pub output_device_name: Option<String>,
     pub missing_device: MissingDevicePolicy,
     /// Requested sample rate; `None` = negotiate (see `devices::negotiate_rate`).
     pub sample_rate: Option<u32>,
@@ -358,6 +364,7 @@ mod tests {
             json,
             serde_json::json!({
                 "inputDevice": null, "outputDevice": null, "missingDevice": "fail",
+                "inputDeviceName": null, "outputDeviceName": null,
                 "sampleRate": null, "bufferSize": null,
                 "inputRoute": {"type": "mixAll"},
                 "outputRoute": {"type": "pair", "left": 0, "right": 1},

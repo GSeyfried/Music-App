@@ -36,10 +36,10 @@ Tauri commands/events: see [INTERFACE.md](INTERFACE.md); all added to `src-tauri
   is still mono, so routes reduce to one signal *explicitly* (`mixAll` is just
   the default, not an assumption).
 - **CPAL concentration.** CPAL calls live only in `devices.rs`, `capture.rs`,
-  `looper/io.rs` (the planned CPAL 0.18 upgrade touches only those).
+  and `looper/io.rs`. The CPAL 0.18.2 migration remains contained there.
   `stream_error_code` lives in `devices.rs`.
-- **Error callbacks** may run on the realtime thread (CPAL 0.16 CoreAudio calls
-  them from inside the render callback for timestamp failures). They now store
+- **Error callbacks** may run on a realtime CoreAudio thread for some failures.
+  They now store
   a code with one CAS. A `BackendSpecific` payload string is deliberately
   `mem::forget`-ed (a few bytes, once per failure) rather than freed on the
   audio thread; the control thread stops the stream within one tick.
@@ -76,13 +76,76 @@ jitter, ~1–2 ms).
 
 | Crate | Version | Licence | Maintenance | Why |
 | --- | --- | --- | --- | --- |
-| `midir` | 0.11.1 (2026-10-10) | MIT | Active (0.11.0 Apr 2026, 0.11.1 Oct 2026) | MIDI I/O. Backends: CoreMIDI (macOS **and iOS**, via `coremidi` 0.9, MIT), WinMM, ALSA. Keep ≥ 0.11.1 (0.10 conflicts with the planned CPAL 0.18). |
+| `midir` | 0.11.1 (2026-10-10) | MIT | Active (0.11.0 Apr 2026, 0.11.1 Oct 2026) | MIDI I/O. Backends: CoreMIDI (macOS **and iOS**, via `coremidi` 0.9, MIT), WinMM, ALSA. Keep ≥ 0.11.1 for compatibility with the adopted CPAL 0.18 line. |
 | `serde_json` | workspace | MIT/Apache-2.0 | — | Settings file (now a normal dependency). |
-| `rubato` | 5.1.0 | MIT OR Apache-2.0 | Active | **Evaluated, not added** (drift design below). |
+| `cpal` | **0.18.2** (2026-08-16) | Apache-2.0 | Active | Upgraded from 0.16 in round 3 (see below). |
+| `objc2`, `block2`, `objc2-foundation`, `objc2-avf-audio` | 0.6 / 0.6 / 0.3 / 0.3 | MIT / Zlib / Apache-2.0 | Active (objc2 project) | iOS only (`platform/ios.rs`); already in the tree through CPAL. |
+| `rubato` | 5.1.0 | MIT OR Apache-2.0 | Active | **Evaluated, not added** (own windowed-sinc reader instead). |
 
 iOS: `midir` selects CoreMIDI on `target_os = "ios"` (verified in its
 manifest). Nothing in this area is macOS-only; the only cfg is the macOS
 virtual-port test.
+
+## CPAL 0.18.2 upgrade and device identity (round 3)
+
+- **API changes applied:** `Device::name()` → `description().name()`; the
+  per-operation errors → one `From<cpal::Error>` mapping on `ErrorKind`
+  (`DeviceNotAvailable`/`PermissionDenied` → `permissionOrUnavailable`,
+  `DeviceBusy` → `busy`, `UnsupportedConfig` → `unsupportedFormat`,
+  `ResourceExhausted` → `resourceLimit`); `SampleRate` is `u32`;
+  `build_*_stream` takes `StreamConfig` by value; `StreamInstant::checked_duration_since`.
+- **Stream error kinds** (error callbacks still store a code only):
+  `Xrun` (now reported by CoreAudio) → counted as a discontinuity, not fatal;
+  `RealtimeDenied` → flag, not fatal; `DeviceChanged`/`StreamInvalidated` →
+  **restart** the streams (loops parked and restored); `DeviceNotAvailable` →
+  `deviceLost`; others → `backend`.
+- **D-008 revisited: CPAL 0.18 has stable device ids.** `DeviceTrait::id()`
+  returns a `DeviceId` that round-trips through text (`"coreaudio:<UID>"`)
+  and `host.device_by_id()`. On macOS it is the CoreAudio device UID: stable
+  across reboots and app restarts, but for USB devices it embeds the USB
+  location, so it can change when the device moves to another port.
+  Decision (proposed D-008 update): `DeviceInfo.id`, `CaptureInfo.deviceId`,
+  `OutputInfo.deviceId` and saved `inputDevice`/`outputDevice` are the id;
+  the engine also saves `inputDeviceName`/`outputDeviceName`, and lookup is
+  id → name (the saved name, or a legacy name in `inputDevice`) → policy.
+  After a name match the saved id is updated. Devices left at "system
+  default" stay `null`. On iOS CPAL has one device with id `coreaudio:default`;
+  port selection belongs to the session (`SessionPort.uid`).
+- **Cost note:** on CoreAudio `description()` probes stream configurations
+  (creates an AudioUnit), so names are looked up once per id and cached;
+  hot-plug polling compares ids only.
+- **Default-device changes** (macOS equivalent of an iOS route change): if
+  audio was opened on "system default" and the default input/output changes,
+  the streams are restarted (`audioRestarted` warning).
+- **midir 0.11.1 coexists** with CPAL 0.18.2 on macOS and iOS (one
+  `coremidi`/`objc2` tree; both build and the virtual-port MIDI test passes).
+- **Verified:** 172 engine tests; `meter --list` and a 15 s live run on
+  CPAL 0.18 (built-in devices, 256-frame buffers: 0 bridge discontinuities;
+  one xrun each at start-up as reported by CoreAudio).
+
+## Platform module (round 3)
+
+`crates/voiceloop-engine/src/platform/`: `mod.rs` (types, interface),
+`ios.rs` (AVAudioSession, from the iOS prototype), `desktop.rs` (no-ops).
+
+| Function | iOS | macOS |
+| --- | --- | --- |
+| `prepare_audio(SessionRequest)` before every start | PlayAndRecord, Measurement mode, DefaultToSpeaker + A2DP, preferred rate and IO buffer, activate; returns `SessionInfo` (sent as `audioSessionInfo`) | `None` |
+| CPAL buffer size | `BufferSize::Default` (session owns it) | requested `Fixed` size |
+| `release_audio` on `stop_input` | `setActive(false)` | no-op |
+| `mic_permission` / `request_mic_permission` | `AVAudioApplication` | `unknown` (answered at once) |
+| `observe` | interruption, route change, media-services reset → `SessionEvent` on a channel → control loop | nothing (hardware poller covers devices and defaults) |
+
+Control-loop handling (`Hardware::poll_session`): interruption began →
+stop audio (loops parked); ended with `shouldResume` → start again with the
+same config; route change for a device reason (new/old device, override,
+route configuration change; *not* category change, which our own
+`prepare_audio` causes) or media-services reset → `restart_audio`. The
+restart path is `stop_audio` + `start_audio(current config)`; the
+persistence agent's park/restore (`handles.parked` → `project.on_looper_stopped`)
+keeps the loops. Checks: `cargo check` and `cargo clippy` for
+`aarch64-apple-ios` (clean in platform files), `cargo check` for
+`aarch64-apple-ios-sim`. **Never run on a device or simulator.**
 
 ## Hardware test procedure
 
@@ -148,7 +211,7 @@ The output callback is the master clock; input reaches it through a ring and
 | H4n in + H4n out | One (H4n crystal) | CoreAudio runs both directions from one clock: no drift. Only callback phase differs (constant). |
 | H4n in + Mac speakers out | Two | Independent crystals, typically 10–100 ppm apart. |
 | macOS Aggregate Device (Audio MIDI Setup) with drift correction on the non-clock member | One logical clock | CoreAudio resamples the non-master member; to CPAL it is one device with summed channels (e.g. 2 Mac + 4 H4n inputs). Works with routes (`mono{channel: 3}` picks an H4n input). Adds CoreAudio's SRC latency to that member and is a user-side setup step. |
-| Same physical device opened at different nominal rates | — | CPAL 0.16 sets the nominal rate only when opening an **input** (`set_sample_rate`); the output AudioUnit converts. The engine opens both at one negotiated rate, so this does not arise. |
+| Same physical device opened at different nominal rates | — | The engine opens input and output at one negotiated nominal rate, so this configuration is intentionally avoided. |
 
 **Current drift handling (`looper/bridge.rs`) and why it is wrong (audit #1).**
 If the input is faster, the backlog grows from the cushion (480 frames at
@@ -262,15 +325,18 @@ and in `looper/io.rs` (mine, one line once the variant exists): when
 
 ## Limitations
 
-- Device identity is the name (D-008). Two identical interfaces collide.
-- Hot-plug is polled (2 s), not notified. CPAL 0.16 exposes no device-list
+- Device identity: CPAL 0.18 `DeviceId` (CoreAudio UID). Two identical USB
+  interfaces now have distinct ids; the name fallback (used when a saved id is
+  gone) picks the first device with that name.
+- Hot-plug is polled (2 s), not notified. The current cross-platform CPAL API exposes no portable device-list
   callbacks; its `DeviceIsAlive` listener covers only non-default devices.
   In a process without a main CFRunLoop (the headless example), CoreAudio may
   not refresh its device list; the Tauri app has one. Setting
   `kAudioHardwarePropertyRunLoop` to NULL (HAL uses its own thread) would fix
   headless use; not done (needs FFI via `objc2-core-audio`).
-- Reported stream latency is CPAL's one-buffer assumption, not CoreAudio's
-  real device + safety-offset latency. Use calibration.
+- Reported stream latency: CPAL 0.18 timestamps include device latency on
+  CoreAudio (live run: input 369, output 435 frames at 256-frame buffers), but
+  not the converter/safety offsets of every device. Use calibration.
 - Monitoring is only available when the looper's output stream runs (input
   and output at a shared rate).
 - `stereoSum` folds to mono; true stereo needs the looper changes in
@@ -298,6 +364,15 @@ and in `looper/io.rs` (mine, one line once the variant exists): when
 - PENDING: H4n Pro results for every step above (channel counts, rates,
   buffer range, drift vs Mac speakers, unplug behaviour, 4-channel mode).
 - PENDING: real keyboard MIDI timing and scan-latency measurement.
+- PENDING: iOS on device: interruption (phone call, Siri), headphone and
+  USB interface route changes mid-loop, media-services reset; whether CPAL
+  0.18.2's own auto-resume after an interruption conflicts with our restart
+  (we stop the streams on `interruptionBegan`, so it should not).
+- PENDING: iOS input selection (`availableInputs` / `setPreferredInput`) and
+  `setPreferredInputNumberOfChannels` are in the prototype but not wired to
+  commands yet.
+- PENDING: whether a USB device's UID changes on another port (H4n test:
+  plug into a different port; expect the name fallback and an updated id).
 - PENDING: whether the H4n exposes one CoreAudio device for both directions
   (expected) and whether CPAL's input `set_sample_rate` disturbs a running
   H4n output stream at a different rate (the engine avoids this by

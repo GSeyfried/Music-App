@@ -20,6 +20,25 @@ Items marked *(verify)* need a device.
    from the latest engine snapshot plus elapsed time, so they stay correct at
    30, 60, or 120 Hz.
 
+### Cross-platform power interactions
+
+The user wants right-click quick actions, double-click detail views, rich hover
+explanations, trackpad gestures, and rebindable hotkeys/gestures. These are
+first-class desktop features, with touch-native equivalents rather than exact
+copies on iPhone and iPad. See
+[`../frontend/INTERACTION_DESIGN.md`](../frontend/INTERACTION_DESIGN.md) for the
+shared command and navigation model.
+
+- Right-click maps to long-press and an always-discoverable overflow button.
+- Double-click maps to an explicit Details/Edit action; double-tap is optional
+  only where it cannot conflict with zoom, selection, or accessibility.
+- Hover explanations also appear on focus and through an info/help action; the
+  existing no-hover-only rule still applies.
+- iPad pointer and trackpad input should retain context menus, hover, scrolling,
+  and targeted pinch zoom. Touch remains fully functional without them.
+- User bindings may differ between macOS, iPad, and iPhone profiles while
+  invoking the same stable command IDs.
+
 ## 2. Sizes and layout
 
 | Element | Minimum | Recommended |

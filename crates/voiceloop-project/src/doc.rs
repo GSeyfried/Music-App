@@ -258,12 +258,16 @@ impl TrackDoc {
     }
 }
 
-/// Reserved for Practice Lab (references, attempts, scores). Stored verbatim
-/// until that feature defines its schema; any audio they name must use
-/// package-relative paths under `audio/`.
+/// Practice Lab data. The engine's `PracticeLibrary` (references, attempts,
+/// analysed takes) is stored as its own JSON file named by content hash
+/// (`library`), so a large library does not bloat `project.json` and gets the
+/// same crash-safe replacement as audio. `references`/`attempts` are reserved.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PracticeDoc {
+    /// Package-relative path, e.g. `practice/library-0123456789abcdef.json`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub library: Option<String>,
     pub references: Vec<Value>,
     pub attempts: Vec<Value>,
     #[serde(flatten)]
@@ -343,7 +347,11 @@ impl ProjectDoc {
 
     /// Every audio file the project references.
     pub fn referenced_files(&self) -> impl Iterator<Item = &str> {
-        self.tracks.iter().flat_map(|t| t.layers.iter().chain(t.redo_layers.iter())).map(|l| l.file.as_str())
+        self.tracks
+            .iter()
+            .flat_map(|t| t.layers.iter().chain(t.redo_layers.iter()))
+            .map(|l| l.file.as_str())
+            .chain(self.practice.library.as_deref())
     }
 
     /// Check the rules a loader relies on. Typed errors name the problem.
@@ -367,6 +375,9 @@ impl ProjectDoc {
             if !(l.period_frames.is_finite() && l.period_frames >= 1.0 && l.period_frames < (1u64 << 40) as f64) {
                 return inv(format!("loop period {} frames", l.period_frames));
             }
+        }
+        if let Some(lib) = &self.practice.library {
+            check_relative_path(lib)?;
         }
         let mut ids = std::collections::HashSet::new();
         for (ti, track) in self.tracks.iter().enumerate() {

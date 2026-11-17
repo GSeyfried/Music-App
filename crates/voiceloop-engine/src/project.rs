@@ -32,13 +32,16 @@ use voiceloop_project::recovery;
 pub use voiceloop_project::recovery::RecoveryInfo;
 use voiceloop_project::render::{self, RenderJob, RenderTrack, StemKind};
 use voiceloop_project::wav::{self, Acid, BitDepth};
-use voiceloop_project::{resample, smf, ProjectError};
+use voiceloop_project::{resample, rpp, smf, ProjectError};
 
 use crate::engine::EngineEvent;
 use crate::error::EngineError;
 use crate::looper::io::LooperPlayback;
-use crate::looper::transfer::{Captured, Exporter, Importer, LayerSlot, Poll, RestorePlan, TrackPlan, TransferError};
+use crate::looper::transfer::{
+    Captured, Exporter, Importer, LayerSlot, ParkedLooper, Poll, RestorePlan, TrackPlan, TransferError,
+};
 use crate::looper::{soft_limit, MAX_TRACKS};
+use crate::practice::PracticeLibrary;
 use crate::routing::AudioConfig;
 use crate::transport::{LoopLength, MetronomeSettings, TimeSignature, TransportState};
 
@@ -150,6 +153,13 @@ pub enum ProjectRequest {
         path: String,
         track: u8,
     },
+    /// REAPER project: unity-gain stems in `<dir>/Audio/` plus `<dir>/<name>.rpp`
+    /// with tempo, meter, loop region, track volume, mute and solo.
+    ExportReaper {
+        dir: String,
+        #[serde(default)]
+        options: RenderOptions,
+    },
     /// Where and how often to autosave for crash recovery (`dir: null` turns it off).
     SetRecovery {
         dir: Option<String>,
@@ -180,6 +190,8 @@ pub struct ProjectInfo {
     pub midi_clips: Vec<Vec<MidiClip>>,
     /// A loaded project is waiting for audio to start before it can play.
     pub pending_load: bool,
+    /// Loops or project data changed since the last save (or open/new).
+    pub unsaved_changes: bool,
     pub recovery_dir: Option<String>,
 }
 
@@ -201,6 +213,9 @@ pub enum OpKind {
     ExportStems,
     ImportAudio,
     ExportMidi,
+    ExportReaper,
+    /// Loops parked when the audio stream stopped, restored into the new stream.
+    Restore,
     ImportMidi,
     Autosave,
 }
@@ -239,14 +254,45 @@ fn file_error(kind: &str, message: impl Into<String>) -> FileError {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum OpResult {
-    Saved { path: String },
-    Opened { path: String, warnings: Vec<String>, loaded_into_looper: bool },
+    Saved {
+        path: String,
+    },
+    Opened {
+        path: String,
+        warnings: Vec<String>,
+        loaded_into_looper: bool,
+    },
     Created,
-    Exported { files: Vec<String>, frames: u64 },
-    AudioImported { track: u8, frames: u64, trimmed_frames: u64, padded_frames: u64, resampled_from: Option<u32> },
-    MidiExported { path: String, notes: usize },
-    MidiImported { track: u8, clip: MidiClip, bpm: f64, time_signature: TimeSignatureDoc },
-    Autosaved { saved_at: String },
+    Exported {
+        files: Vec<String>,
+        frames: u64,
+    },
+    AudioImported {
+        track: u8,
+        frames: u64,
+        trimmed_frames: u64,
+        padded_frames: u64,
+        resampled_from: Option<u32>,
+    },
+    MidiExported {
+        path: String,
+        notes: usize,
+    },
+    MidiImported {
+        track: u8,
+        clip: MidiClip,
+        bpm: f64,
+        time_signature: TimeSignatureDoc,
+    },
+    Autosaved {
+        saved_at: String,
+    },
+    /// The looper content from before an audio restart is back (`loadedIntoLooper`
+    /// false: audio is stopped, it is kept and loads when audio starts).
+    Restored {
+        resampled_from: Option<u32>,
+        loaded_into_looper: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -269,6 +315,21 @@ pub enum ProjectEvent {
         op: OpKind,
         error: FileError,
     },
+}
+
+/// `current` with the fields present in `patch` (camelCase JSON) replaced.
+pub fn patch_looper_config(
+    current: crate::looper::LooperConfig,
+    patch: serde_json::Value,
+) -> Result<crate::looper::LooperConfig, EngineError> {
+    let serde_json::Value::Object(patch) = patch else {
+        return Err(EngineError::Invalid("looper config must be a JSON object".into()));
+    };
+    let mut value = serde_json::to_value(current).map_err(|e| EngineError::Invalid(e.to_string()))?;
+    if let serde_json::Value::Object(map) = &mut value {
+        map.extend(patch);
+    }
+    serde_json::from_value(value).map_err(|e| EngineError::Invalid(format!("looper config: {e}")))
 }
 
 // ---- recovery helpers usable from any thread --------------------------------------
@@ -345,10 +406,12 @@ fn doc_from_captured(base: &ProjectDoc, cap: Captured, config: Option<&AudioConf
         .map(|p| LoopDoc { period_frames: p, extra: base.loop_.as_ref().map(|l| l.extra.clone()).unwrap_or_default() });
     doc.input_latency_frames = inv.latency;
     doc.devices = device_hints(&base.devices, config);
+    // The looper's tracks are the truth: names follow add/remove (see `track_command`).
     while doc.tracks.len() < cap.tracks.len() {
         let n = doc.tracks.len();
         doc.tracks.push(TrackDoc::new(n));
     }
+    doc.tracks.truncate(cap.tracks.len().max(1));
     let mut audio = Vec::with_capacity(cap.tracks.len());
     for (t, tr) in cap.tracks.into_iter().enumerate() {
         let d = &mut doc.tracks[t];
@@ -422,6 +485,7 @@ fn loadable(doc: &ProjectDoc, audio: &[TrackAudio], period: Option<f64>, rate: u
         transport: transport_state(&doc.transport, rate),
         period,
         latency: doc.input_latency_frames,
+        track_count: doc.tracks.len().clamp(1, MAX_TRACKS) as u8,
         tracks,
     };
     Ok(Loadable { plan, layers })
@@ -472,10 +536,24 @@ fn fit_layer(mut samples: Vec<f32>, period: f64, fit: FitMode) -> Result<(Vec<f3
 
 enum Work {
     Saved(ProjectDoc, PathBuf),
-    Opened { opened: Opened, audio: Vec<TrackAudio>, period: Option<f64>, rate: u32 },
+    Opened {
+        opened: Opened,
+        audio: Vec<TrackAudio>,
+        rate: u32,
+        parked: bool,
+        resampled_from: Option<u32>,
+        /// The project's Practice Lab library (open only; `None` for parked content).
+        practice: Option<PracticeLibrary>,
+    },
     Files(Vec<PathBuf>, u64),
-    Audio { samples: Vec<f32>, resampled_from: Option<u32> },
-    Midi { path: PathBuf, notes: usize },
+    Audio {
+        samples: Vec<f32>,
+        resampled_from: Option<u32>,
+    },
+    Midi {
+        path: PathBuf,
+        notes: usize,
+    },
     MidiFile(smf::SmfFile),
     Autosaved(RecoveryInfo),
 }
@@ -514,6 +592,7 @@ fn spawn_worker(
 /// What happens after layers are copied out of the looper.
 enum AfterExport {
     Save { path: PathBuf },
+    Reaper { dir: PathBuf, options: RenderOptions },
     Autosave { dir: PathBuf },
     Mixdown { path: PathBuf, options: RenderOptions },
     Stems { dir: PathBuf, options: RenderOptions, per_layer: bool },
@@ -521,17 +600,26 @@ enum AfterExport {
 }
 
 enum AfterWork {
-    Saved,
+    /// `epoch`: the looper content epoch the save captured (None: not from the looper).
+    Saved {
+        epoch: Option<u64>,
+    },
     Opened,
     Exported,
-    AudioLoaded { track: u8, fit: FitMode },
+    AudioLoaded {
+        track: u8,
+        fit: FitMode,
+    },
     MidiExported,
-    MidiLoaded { track: u8, rate: u32 },
+    MidiLoaded {
+        track: u8,
+        rate: u32,
+    },
     Autosaved,
 }
 
 enum AfterImport {
-    Opened { doc: Box<ProjectDoc>, path: PathBuf, warnings: Vec<String> },
+    Opened { pending: Box<PendingLoad> },
     Created { doc: Box<ProjectDoc> },
     LayerAdded { track: u8, report: FitReport, resampled_from: Option<u32> },
 }
@@ -549,12 +637,21 @@ struct Op {
     last_progress: Instant,
 }
 
-/// A project opened while audio was stopped, loaded when the looper starts.
+/// Content waiting for a running looper: a project opened while audio was
+/// stopped, or the loops parked when the output stream was torn down.
+#[derive(Clone)]
 struct PendingLoad {
     doc: ProjectDoc,
     path: Option<PathBuf>,
     audio: Vec<TrackAudio>,
     warnings: Vec<String>,
+    /// From a stream teardown (restore), not from a file (open).
+    parked: bool,
+    /// Load automatically when audio runs. Cleared after a failed load so it
+    /// is not retried in a loop; it is still saved by save/autosave.
+    auto: bool,
+    /// Rate the audio was at before any conversion (reported to the UI).
+    resampled_from: Option<u32>,
 }
 
 pub struct ProjectGlue {
@@ -566,6 +663,19 @@ pub struct ProjectGlue {
     recovery_dir: Option<PathBuf>,
     autosave_every: Option<Duration>,
     last_autosave: Instant,
+    /// Unsaved work exists (loops changed, metadata edited, MIDI imported).
+    dirty: bool,
+    /// Last looper content epoch seen in a snapshot (`None`: re-baseline).
+    observed_epoch: Option<u64>,
+    /// Ignore epoch changes until then (a restore just finished).
+    rebaseline_until: Option<Instant>,
+    /// A stream teardown happened with unsaved work: autosave when idle.
+    autosave_due: bool,
+    /// Latest Practice Lab library (refreshed when its fingerprint changes).
+    practice: Option<Arc<PracticeLibrary>>,
+    practice_fp: Option<(usize, u64, u64)>,
+    /// A library to load into Practice Lab (after open / new); taken by the engine.
+    practice_import: Option<PracticeLibrary>,
 }
 
 impl Default for ProjectGlue {
@@ -595,7 +705,129 @@ impl ProjectGlue {
             recovery_dir: None,
             autosave_every: None,
             last_autosave: Instant::now(),
+            dirty: false,
+            observed_epoch: None,
+            rebaseline_until: None,
+            autosave_due: false,
+            practice: None,
+            practice_fp: None,
+            practice_import: None,
         }
+    }
+
+    /// Track the Practice Lab library: cheap fingerprint every call, a copy
+    /// only when it changed (that change is unsaved work).
+    fn sync_practice(&mut self, lib: &PracticeLibrary) {
+        let fp = (
+            lib.references.len(),
+            lib.references.iter().map(|r| r.next_attempt_number as u64 + r.name.len() as u64).sum(),
+            lib.references.iter().map(|r| r.attempts.len() as u64).sum(),
+        );
+        if self.practice_fp != Some(fp) {
+            if self.practice_fp.is_some() && self.practice_import.is_none() {
+                self.dirty = true;
+            }
+            self.practice_fp = Some(fp);
+            self.practice = (!lib.references.is_empty()).then(|| Arc::new(lib.clone()));
+        }
+    }
+
+    /// A library the engine must load into Practice Lab (`practice_import_library`
+    /// with `replace: true`), after a project was opened or created.
+    pub fn take_practice_import(&mut self) -> Option<PracticeLibrary> {
+        let lib = self.practice_import.take();
+        if lib.is_some() {
+            self.practice_fp = None; // re-baseline on the next poll: loading is not an edit
+        }
+        lib
+    }
+
+    /// Keep track names aligned with the looper: call after `addTrack` /
+    /// `removeTrack` was queued. (A command the looper rejects leaves names
+    /// one step off until the next save or restore re-reads the track count.)
+    pub fn track_command(&mut self, command: &crate::looper::LooperCommand) {
+        use crate::looper::LooperCommand as C;
+        match *command {
+            C::AddTrack if self.doc.tracks.len() < MAX_TRACKS => {
+                let n = self.doc.tracks.len();
+                self.doc.tracks.push(TrackDoc::new(n));
+                self.dirty = true;
+            }
+            C::RemoveTrack { track } if (track as usize) < self.doc.tracks.len() && self.doc.tracks.len() > 1 => {
+                self.doc.tracks.remove(track as usize);
+                self.dirty = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Unsaved work exists (shown in `EngineStatus.unsavedChanges`).
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.dirty
+    }
+
+    /// Loops from before an audio restart are being (or about to be)
+    /// restored: looper commands must wait, or they would act on an empty looper.
+    pub fn restoring(&self) -> bool {
+        self.pending.as_ref().is_some_and(|p| p.parked && p.auto)
+            || self.op.as_ref().is_some_and(|o| o.kind == OpKind::Restore)
+    }
+
+    /// The output stream was torn down. `parked` is the receiver taken from
+    /// `LooperHandles::parked` before the stream stopped; the looper's
+    /// content arrives on it as the stream drops. It is kept as a pending
+    /// load (restored into the next stream, resampled if needed) and is what
+    /// `save` writes while audio is stopped. Never blocks: the content is
+    /// sent synchronously while the stream is dropped on this thread.
+    pub fn on_looper_stopped(&mut self, parked: Option<mpsc::Receiver<ParkedLooper>>, config: &AudioConfig) {
+        self.observed_epoch = None;
+        let Some(p) = parked.and_then(|rx| rx.try_recv().ok()) else { return };
+        if !p.has_content() {
+            return; // nothing to keep; a project waiting to load stays pending
+        }
+        let (doc, audio) = doc_from_captured(&self.doc, p.into_captured(), Some(config));
+        self.doc = doc.clone();
+        self.pending = Some(PendingLoad {
+            doc,
+            path: self.path.clone(),
+            audio,
+            warnings: Vec::new(),
+            parked: true,
+            auto: true,
+            resampled_from: None,
+        });
+        if self.dirty {
+            self.autosave_due = true;
+        }
+    }
+
+    /// Run the current operation (and a due recovery autosave) to completion,
+    /// blocking up to `timeout`. For shutdown, after audio has stopped.
+    pub fn finish_blocking(&mut self, practice: &PracticeLibrary, config: &AudioConfig, sink: Sink, timeout: Duration) {
+        self.autosave_every = None; // no new timer-driven saves
+        let start = Instant::now();
+        loop {
+            self.poll(None, None, practice, config, sink);
+            if self.op.is_none() || start.elapsed() > timeout {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn observe(&mut self, epoch: Option<u64>) {
+        let importing = matches!(self.op, Some(Op { stage: Stage::Import(..), .. }));
+        let settling = self.rebaseline_until.is_some_and(|t| Instant::now() < t);
+        if importing || settling {
+            self.observed_epoch = None;
+            return;
+        }
+        if let (Some(a), Some(b)) = (self.observed_epoch, epoch) {
+            if a != b {
+                self.dirty = true;
+            }
+        }
+        self.observed_epoch = epoch;
     }
 
     /// True while an operation needs frequent polling.
@@ -612,6 +844,7 @@ impl ProjectGlue {
             track_names: self.doc.tracks.iter().map(|t| t.name.clone()).collect(),
             midi_clips: self.doc.tracks.iter().map(|t| t.midi_clips.clone()).collect(),
             pending_load: self.pending.is_some(),
+            unsaved_changes: self.dirty,
             recovery_dir: self.recovery_dir.as_ref().map(|p| p.to_string_lossy().into_owned()),
         }
     }
@@ -628,7 +861,9 @@ impl ProjectGlue {
         &mut self,
         req: ProjectRequest,
         playback: Option<&mut LooperPlayback>,
+        practice: &PracticeLibrary,
     ) -> Result<ProjectReply, EngineError> {
+        self.sync_practice(practice);
         let quick = matches!(
             req,
             ProjectRequest::SetRecovery { .. } | ProjectRequest::SetMetadata { .. } | ProjectRequest::Info
@@ -641,6 +876,7 @@ impl ProjectGlue {
         let op_id = match req {
             ProjectRequest::Info => None,
             ProjectRequest::SetMetadata { name, track_names } => {
+                self.dirty = true;
                 if let Some(n) = name {
                     self.doc.name = n;
                 }
@@ -662,6 +898,7 @@ impl ProjectGlue {
                 None
             }
             ProjectRequest::New { name } => {
+                self.practice_import = Some(PracticeLibrary::default()); // a new project starts with an empty library
                 let mut doc =
                     ProjectDoc::new(&name, rate.unwrap_or(self.doc.sample_rate), self.doc.tracks.len().max(2));
                 doc.transport = self.doc.transport.clone();
@@ -673,6 +910,7 @@ impl ProjectGlue {
                 } else {
                     self.doc = doc;
                     self.path = None;
+                    self.dirty = false;
                     None
                 }
             }
@@ -691,12 +929,28 @@ impl ProjectGlue {
                 let path = PathBuf::from(path);
                 let target = rate;
                 let rx = spawn_worker(move |progress| {
-                    let opened = package::open_package(&path)?;
-                    let mut audio = package::load_audio(&opened.path, &opened.doc, &mut |p| progress(p * 0.8))?;
+                    let mut opened = package::open_package(&path)?;
+                    let audio = package::load_audio(&opened.path, &opened.doc, &mut |p| progress(p * 0.8))?;
+                    let practice = match package::load_practice(&opened.path, &opened.doc) {
+                        Ok(Some(bytes)) => match serde_json::from_slice::<PracticeLibrary>(&bytes) {
+                            Ok(lib) => Some(lib),
+                            Err(e) => {
+                                opened.warnings.push(format!("The Practice Lab library could not be read ({e})."));
+                                None
+                            }
+                        },
+                        Ok(None) => Some(PracticeLibrary::default()),
+                        Err(e) => {
+                            opened.warnings.push(format!("The Practice Lab library is damaged ({e})."));
+                            None
+                        }
+                    };
                     let rate = target.unwrap_or(opened.doc.sample_rate);
-                    let period = convert_rate(&opened.doc, &mut audio, rate);
-                    progress(1.0);
-                    Ok(Work::Opened { opened, audio, period, rate })
+                    let mut work = converted(opened, audio, rate, false, progress);
+                    if let Work::Opened { practice: p, .. } = &mut work {
+                        *p = practice;
+                    }
+                    Ok(work)
                 });
                 Some(self.start(OpKind::Open, Stage::Work(rx, AfterWork::Opened)))
             }
@@ -704,6 +958,11 @@ impl ProjectGlue {
                 self.need_looper(looper)?;
                 let after = AfterExport::Mixdown { path: PathBuf::from(path), options };
                 Some(self.start(OpKind::ExportMixdown, Stage::Export(Exporter::new(), after)))
+            }
+            ProjectRequest::ExportReaper { dir, options } => {
+                self.need_looper(looper)?;
+                let after = AfterExport::Reaper { dir: PathBuf::from(dir), options };
+                Some(self.start(OpKind::ExportReaper, Stage::Export(Exporter::new(), after)))
             }
             ProjectRequest::ExportStems { dir, options, per_layer } => {
                 self.need_looper(looper)?;
@@ -807,8 +1066,8 @@ impl ProjectGlue {
             Some(p) => (p.doc.clone(), p.audio.clone()),
             None => (self.doc.clone(), Vec::new()),
         };
-        let rx = spawn_save(path, doc, audio);
-        self.start(OpKind::Save, Stage::Work(rx, AfterWork::Saved))
+        let rx = spawn_save(path, doc, audio, self.practice.clone());
+        self.start(OpKind::Save, Stage::Work(rx, AfterWork::Saved { epoch: None }))
     }
 
     fn begin_autosave(&mut self, dir: PathBuf, looper: bool) -> u64 {
@@ -820,25 +1079,37 @@ impl ProjectGlue {
             Some(p) => (p.doc.clone(), p.audio.clone()),
             None => (self.doc.clone(), Vec::new()),
         };
-        let original = self.path.clone();
-        let rx = spawn_worker(move |progress| {
-            Ok(Work::Autosaved(recovery::autosave(&dir, &doc, &audio, original.as_deref(), progress)?))
-        });
+        let rx = spawn_autosave(dir, doc, audio, self.practice.clone(), self.path.clone());
         self.start(OpKind::Autosave, Stage::Work(rx, AfterWork::Autosaved))
     }
 
     /// Drive the current operation. Call every loop iteration (and at least
     /// every [`ACTIVE_POLL`] while [`Self::is_active`]).
-    pub fn poll(&mut self, playback: Option<&mut LooperPlayback>, config: &AudioConfig, sink: Sink) {
+    /// `epoch` is the content epoch of the latest looper snapshot (unsaved-work tracking).
+    pub fn poll(
+        &mut self,
+        playback: Option<&mut LooperPlayback>,
+        epoch: Option<u64>,
+        practice: &PracticeLibrary,
+        config: &AudioConfig,
+        sink: Sink,
+    ) {
         let rate = rate_of(playback.as_deref());
+        self.observe(epoch);
+        self.sync_practice(practice);
         if self.op.is_none() {
-            // A project opened while audio was stopped: load it now.
-            if let (Some(_), Some(rate)) = (&self.pending, rate) {
+            let auto_pending = self.pending.as_ref().is_some_and(|p| p.auto);
+            if let (true, Some(rate)) = (auto_pending, rate) {
+                // A project opened while audio was stopped, or loops parked by a stream restart.
                 if let Some(p) = self.pending.take() {
                     self.load_pending(p, rate);
                 }
+            } else if let (true, Some(dir)) = (self.autosave_due, self.recovery_dir.clone()) {
+                // The stream went away with unsaved work: secure it for recovery.
+                self.autosave_due = false;
+                self.begin_autosave(dir, playback.is_some());
             } else if let (Some(dir), Some(every)) = (self.recovery_dir.clone(), self.autosave_every) {
-                if self.last_autosave.elapsed() >= every {
+                if self.last_autosave.elapsed() >= every && self.dirty {
                     self.begin_autosave(dir, playback.is_some());
                 }
             }
@@ -894,6 +1165,15 @@ impl ProjectGlue {
             return;
         };
         let (id, kind) = (op.id, op.kind);
+        if let Err(e) = &outcome {
+            // Never lose content that was on its way into the looper.
+            if let Stage::Import(_, AfterImport::Opened { pending }) = op.stage {
+                let mut p = *pending;
+                p.auto = e.kind == "audioStopped";
+                self.pending = Some(p);
+                op.stage = Stage::Work(mpsc::channel().1, AfterWork::Exported);
+            }
+        }
         let next = outcome.and_then(|step| self.advance(op.stage, step, rate, config));
         match next {
             Ok(Next::Continue(stage)) => self.op = Some(Op { id, kind, stage, last_progress: op.last_progress }),
@@ -918,20 +1198,13 @@ impl ProjectGlue {
     }
 
     fn load_pending(&mut self, p: PendingLoad, rate: u32) {
-        let warnings = p.warnings.clone();
-        let path = p.path.clone();
+        let kind = if p.parked { OpKind::Restore } else { OpKind::Open };
         let rx = spawn_worker(move |progress| {
-            let mut audio = p.audio;
-            let period = convert_rate(&p.doc, &mut audio, rate);
-            progress(1.0);
-            let opened = Opened { path: path.clone().unwrap_or_default(), doc: p.doc, warnings };
-            Ok(Work::Opened { opened, audio, period, rate })
+            let parked = p.parked;
+            let opened = Opened { path: p.path.unwrap_or_default(), doc: p.doc, warnings: p.warnings };
+            Ok(converted(opened, p.audio, rate, parked, progress))
         });
-        // An unsaved pending project (recovery or new) keeps `path: None`.
-        if p.path.is_none() {
-            self.path = None;
-        }
-        self.start(OpKind::Open, Stage::Work(rx, AfterWork::Opened));
+        self.start(kind, Stage::Work(rx, AfterWork::Opened));
     }
 
     fn advance(
@@ -945,24 +1218,37 @@ impl ProjectGlue {
             (Stage::Export(_, after), Step::Captured(cap)) => self.after_export(after, cap, config),
             (Stage::Work(_, after), Step::Worked(work)) => self.after_work(after, work, rate),
             (Stage::Import(_, after), Step::Imported) => Ok(Next::Finished(match after {
-                AfterImport::Opened { doc, path, warnings } => {
-                    let saved = !path.as_os_str().is_empty();
-                    self.doc = *doc;
-                    self.path = saved.then(|| path.clone());
-                    OpResult::Opened { path: path.to_string_lossy().into_owned(), warnings, loaded_into_looper: true }
+                AfterImport::Opened { pending } => {
+                    let p = *pending;
+                    self.doc = p.doc;
+                    self.rebaseline_until = Some(Instant::now() + Duration::from_millis(100));
+                    if p.parked {
+                        OpResult::Restored { resampled_from: p.resampled_from, loaded_into_looper: true }
+                    } else {
+                        self.path = p.path.clone();
+                        self.dirty = false;
+                        let path = p.path.unwrap_or_default().to_string_lossy().into_owned();
+                        OpResult::Opened { path, warnings: p.warnings, loaded_into_looper: true }
+                    }
                 }
                 AfterImport::Created { doc } => {
                     self.doc = *doc;
                     self.path = None;
+                    self.dirty = false;
+                    self.rebaseline_until = Some(Instant::now() + Duration::from_millis(100));
                     OpResult::Created
                 }
-                AfterImport::LayerAdded { track, report, resampled_from } => OpResult::AudioImported {
-                    track,
-                    frames: report.frames,
-                    trimmed_frames: report.trimmed,
-                    padded_frames: report.padded,
-                    resampled_from,
-                },
+                AfterImport::LayerAdded { track, report, resampled_from } => {
+                    self.dirty = true;
+                    self.rebaseline_until = Some(Instant::now() + Duration::from_millis(100));
+                    OpResult::AudioImported {
+                        track,
+                        frames: report.frames,
+                        trimmed_frames: report.trimmed,
+                        padded_frames: report.padded,
+                        resampled_from,
+                    }
+                }
             })),
             _ => Err(file_error("io", "internal: unexpected operation step")),
         }
@@ -972,15 +1258,23 @@ impl ProjectGlue {
         let inv = cap.inventory;
         match after {
             AfterExport::Save { path } => {
+                let epoch = Some(inv.epoch);
                 let (doc, audio) = doc_from_captured(&self.doc, cap, Some(config));
-                Ok(Next::Continue(Stage::Work(spawn_save(path, doc, audio), AfterWork::Saved)))
+                let rx = spawn_save(path, doc, audio, self.practice.clone());
+                Ok(Next::Continue(Stage::Work(rx, AfterWork::Saved { epoch })))
+            }
+            AfterExport::Reaper { dir, options } => {
+                let period = inv.period.ok_or_else(|| file_error("invalid", "there is no loop to export yet"))?;
+                let (doc, audio) = doc_from_captured(&self.doc, cap, Some(config));
+                let rx = spawn_worker(move |progress| {
+                    let files = write_reaper(&dir, &doc, &audio, period, options, progress)?;
+                    Ok(Work::Files(files, render::length_frames(period, options.loops)))
+                });
+                Ok(Next::Continue(Stage::Work(rx, AfterWork::Exported)))
             }
             AfterExport::Autosave { dir } => {
                 let (doc, audio) = doc_from_captured(&self.doc, cap, Some(config));
-                let original = self.path.clone();
-                let rx = spawn_worker(move |progress| {
-                    Ok(Work::Autosaved(recovery::autosave(&dir, &doc, &audio, original.as_deref(), progress)?))
-                });
+                let rx = spawn_autosave(dir, doc, audio, self.practice.clone(), self.path.clone());
                 Ok(Next::Continue(Stage::Work(rx, AfterWork::Autosaved)))
             }
             AfterExport::Mixdown { .. } | AfterExport::Stems { .. } => {
@@ -1078,7 +1372,12 @@ impl ProjectGlue {
 
     fn after_work(&mut self, after: AfterWork, work: Work, rate: Option<u32>) -> Result<Next, FileError> {
         match (after, work) {
-            (AfterWork::Saved, Work::Saved(doc, path)) => {
+            (AfterWork::Saved { epoch }, Work::Saved(doc, path)) => {
+                // Clean unless the looper changed after the content was captured.
+                self.dirty = match (epoch, self.observed_epoch) {
+                    (Some(saved), Some(now)) => saved != now,
+                    _ => false,
+                };
                 self.doc = doc;
                 self.path = Some(path.clone());
                 if let Some(p) = self.pending.as_mut() {
@@ -1087,30 +1386,48 @@ impl ProjectGlue {
                 }
                 Ok(Next::Finished(OpResult::Saved { path: path.to_string_lossy().into_owned() }))
             }
-            (AfterWork::Opened, Work::Opened { opened, audio, period, rate: loaded_rate }) => {
+            (
+                AfterWork::Opened,
+                Work::Opened { opened, audio, rate: loaded_rate, parked, resampled_from, practice },
+            ) => {
                 let Opened { path, doc, warnings } = opened;
+                if !parked {
+                    // Practice Lab does not need audio: load its library now.
+                    self.practice_import = practice;
+                }
+                let saved = !path.as_os_str().is_empty();
+                let pending = PendingLoad {
+                    doc,
+                    path: saved.then(|| path.clone()),
+                    audio,
+                    warnings: warnings.clone(),
+                    parked,
+                    auto: true,
+                    resampled_from,
+                };
                 match rate {
                     Some(r) if r == loaded_rate => {
-                        let load = loadable(&doc, &audio, period, r)?;
+                        let period = pending.doc.loop_.as_ref().map(|l| l.period_frames);
+                        let load = loadable(&pending.doc, &pending.audio, period, r)?;
                         let importer = Importer::new(load.plan, load.layers);
-                        let after = AfterImport::Opened { doc: Box::new(doc), path, warnings };
-                        Ok(Next::Continue(Stage::Import(importer, after)))
+                        Ok(Next::Continue(Stage::Import(importer, AfterImport::Opened { pending: Box::new(pending) })))
                     }
                     _ => {
                         // Audio is stopped (or restarted at another rate): load when it runs.
-                        let saved = !path.as_os_str().is_empty();
-                        self.doc = doc.clone();
-                        self.path = saved.then(|| path.clone());
-                        self.pending = Some(PendingLoad {
-                            doc,
-                            path: saved.then(|| path.clone()),
-                            audio,
-                            warnings: warnings.clone(),
-                        });
-                        Ok(Next::Finished(OpResult::Opened {
-                            path: path.to_string_lossy().into_owned(),
-                            warnings,
-                            loaded_into_looper: false,
+                        self.doc = pending.doc.clone();
+                        if !parked {
+                            self.path = pending.path.clone();
+                            self.dirty = false;
+                        }
+                        self.pending = Some(pending);
+                        Ok(Next::Finished(if parked {
+                            OpResult::Restored { resampled_from, loaded_into_looper: false }
+                        } else {
+                            OpResult::Opened {
+                                path: path.to_string_lossy().into_owned(),
+                                warnings,
+                                loaded_into_looper: false,
+                            }
                         }))
                     }
                 }
@@ -1130,6 +1447,7 @@ impl ProjectGlue {
                 let clip = midi_clip(&file, rate);
                 if let Some(t) = self.doc.tracks.get_mut(track as usize) {
                     t.midi_clips.push(clip.clone());
+                    self.dirty = true;
                 }
                 let (n, d) = file.initial_time_signature();
                 Ok(Next::Finished(OpResult::MidiImported {
@@ -1147,6 +1465,90 @@ impl ProjectGlue {
     }
 }
 
+/// Bring opened or parked content to the looper's rate (runs on a worker).
+/// The document is updated to match: new sample rate and scaled loop period.
+fn converted(
+    opened: Opened,
+    mut audio: Vec<TrackAudio>,
+    rate: u32,
+    parked: bool,
+    progress: &mut dyn FnMut(f32),
+) -> Work {
+    let Opened { path, mut doc, warnings } = opened;
+    let from = doc.sample_rate;
+    let period = convert_rate(&doc, &mut audio, rate);
+    if let (Some(p), Some(l)) = (period, doc.loop_.as_mut()) {
+        l.period_frames = p;
+    }
+    doc.sample_rate = rate;
+    progress(1.0);
+    let resampled_from = (from != rate).then_some(from);
+    Work::Opened { opened: Opened { path, doc, warnings }, audio, rate, parked, resampled_from, practice: None }
+}
+
+/// Unity-gain stems in `<dir>/Audio/` and a `.rpp` that mixes them with the
+/// project's gains, mute and solo.
+fn write_reaper(
+    dir: &Path,
+    doc: &ProjectDoc,
+    audio: &[TrackAudio],
+    period: f64,
+    options: RenderOptions,
+    progress: &mut dyn FnMut(f32),
+) -> Result<Vec<PathBuf>, ProjectError> {
+    let tracks: Vec<RenderTrack> = doc
+        .tracks
+        .iter()
+        .zip(audio.iter())
+        .map(|(d, a)| RenderTrack {
+            name: d.name.clone(),
+            layers: a.layers.iter().map(|l| &l[..]).collect(),
+            gain: 1.0,
+            muted: false,
+            solo: false,
+            playing: true,
+        })
+        .collect();
+    let loops = options.loops.max(1);
+    let job = RenderJob {
+        tracks,
+        period,
+        sample_rate: doc.sample_rate,
+        loops,
+        depth: options.depth,
+        tempo: None,
+        project_name: doc.name.clone(),
+    };
+    let stems = render::write_stems(&dir.join("Audio"), &doc.name, &job, StemKind::Tracks, progress)?;
+    // write_stems skips tracks without layers, in track order.
+    let with_audio = doc.tracks.iter().zip(audio.iter()).filter(|(_, a)| !a.layers.is_empty());
+    let rpp_tracks = with_audio
+        .zip(stems.iter())
+        .map(|((d, _), file)| rpp::RppTrack {
+            name: d.name.clone(),
+            file: format!("Audio/{}", file.file_name().unwrap_or_default().to_string_lossy()),
+            volume: d.gain,
+            muted: d.muted || !d.playing,
+            solo: d.solo,
+        })
+        .collect();
+    let t = &doc.transport;
+    let rate = doc.sample_rate as f64;
+    let project = rpp::RppProject {
+        sample_rate: doc.sample_rate,
+        bpm: t.bpm * 4.0 / t.time_signature.denominator.max(1) as f64,
+        time_signature: (t.time_signature.numerator, t.time_signature.denominator),
+        length_seconds: render::length_frames(period, loops) as f64 / rate,
+        loop_seconds: render::length_frames(period, 1) as f64 / rate,
+        tracks: rpp_tracks,
+    };
+    let rpp_path = dir.join(format!("{}.rpp", render::sanitize(&doc.name)));
+    rpp::write_rpp(&rpp_path, &project)?;
+    let mut files = vec![rpp_path];
+    files.extend(stems);
+    Ok(files)
+}
+
 #[allow(clippy::large_enum_variant)]
 enum Step {
     Captured(Captured),
@@ -1154,6 +1556,7 @@ enum Step {
     Imported,
 }
 
+#[allow(clippy::large_enum_variant)] // one value per operation step
 enum Next {
     Continue(Stage),
     Finished(OpResult),
@@ -1163,10 +1566,37 @@ fn to_engine(e: FileError) -> EngineError {
     EngineError::Invalid(e.message)
 }
 
-fn spawn_save(path: PathBuf, doc: ProjectDoc, audio: Vec<TrackAudio>) -> mpsc::Receiver<WorkerMsg> {
+fn practice_bytes(practice: &Option<Arc<PracticeLibrary>>) -> Result<Option<Vec<u8>>, FileError> {
+    practice
+        .as_ref()
+        .map(|lib| serde_json::to_vec(&**lib).map_err(|e| file_error("invalid", format!("practice library: {e}"))))
+        .transpose()
+}
+
+fn spawn_save(
+    path: PathBuf,
+    doc: ProjectDoc,
+    audio: Vec<TrackAudio>,
+    practice: Option<Arc<PracticeLibrary>>,
+) -> mpsc::Receiver<WorkerMsg> {
     spawn_worker(move |progress| {
-        let saved = package::save_package(&path, &doc, &audio, progress)?;
+        let practice = practice_bytes(&practice)?;
+        let saved = package::save_package(&path, &doc, &audio, practice.as_deref(), progress)?;
         Ok(Work::Saved(saved, path))
+    })
+}
+
+fn spawn_autosave(
+    dir: PathBuf,
+    doc: ProjectDoc,
+    audio: Vec<TrackAudio>,
+    practice: Option<Arc<PracticeLibrary>>,
+    original: Option<PathBuf>,
+) -> mpsc::Receiver<WorkerMsg> {
+    spawn_worker(move |progress| {
+        let practice = practice_bytes(&practice)?;
+        let info = recovery::autosave(&dir, &doc, &audio, practice.as_deref(), original.as_deref(), progress)?;
+        Ok(Work::Autosaved(info))
     })
 }
 
@@ -1212,6 +1642,96 @@ pub fn midi_clip(file: &smf::SmfFile, rate: u32) -> MidiClip {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::looper::{LooperCommand, LooperConfig, LooperCore};
+    use std::cell::RefCell;
+
+    fn test_dir(name: &str) -> PathBuf {
+        let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-tmp/voiceloop-engine").join(name);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Run the glue (audio stopped) until the current operation finishes.
+    fn settle(glue: &mut ProjectGlue, events: &RefCell<Vec<ProjectEvent>>) {
+        let sink = |e: EngineEvent| {
+            if let EngineEvent::Project(p) = e {
+                events.borrow_mut().push(p);
+            }
+        };
+        for _ in 0..2_000 {
+            glue.poll(None, None, &PracticeLibrary::default(), &AudioConfig::default(), &sink);
+            if !glue.is_active() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("operation did not finish");
+    }
+
+    #[test]
+    fn loops_parked_at_teardown_are_saved_and_restored_while_audio_is_stopped() {
+        // A looper with one recorded loop, then its stream is torn down.
+        let cfg = LooperConfig { max_loop_seconds: 1.0, ..Default::default() };
+        let (mut core, mut h) = LooperCore::new(&cfg, TransportState::default(), 8_000).unwrap();
+        h.commands.push(LooperCommand::Record { track: 0 }).unwrap();
+        let input: Vec<f32> = (0..4_000).map(|i| (i as f32 * 0.01).sin() * 0.3).collect();
+        core.process(&input, &mut vec![0.0; 4_000]);
+        h.commands.push(LooperCommand::StopRecording { track: 0 }).unwrap();
+        core.process(&[0.0; 64], &mut [0.0; 64]);
+        let rx = h.parked.take();
+        drop(core);
+
+        let mut glue = ProjectGlue::new();
+        glue.dirty = true; // the recording above was observed as unsaved work
+        glue.recovery_dir = Some(test_dir("park-recovery"));
+        glue.on_looper_stopped(rx, &AudioConfig::default());
+        let info = glue.info();
+        assert!(info.pending_load && info.unsaved_changes);
+        assert!(glue.restoring(), "looper commands wait until the loops are back");
+
+        // Audio stopped: the teardown autosave runs first and secures the loops.
+        let events = RefCell::new(Vec::new());
+        settle(&mut glue, &events);
+        assert!(matches!(events.borrow().last(), Some(ProjectEvent::Done { op: OpKind::Autosave, .. })));
+        assert!(recovery::find(glue.recovery_dir.as_ref().unwrap()).unwrap().is_some());
+
+        // Save while audio is stopped writes the parked loops.
+        let dir = test_dir("park-save").join("Jam");
+        let lib = PracticeLibrary::default();
+        let reply = glue.request(ProjectRequest::SaveAs { path: dir.to_string_lossy().into() }, None, &lib).unwrap();
+        assert!(reply.op_id.is_some());
+        settle(&mut glue, &events);
+        assert!(matches!(events.borrow().last(), Some(ProjectEvent::Done { op: OpKind::Save, .. })));
+        assert!(!glue.has_unsaved_changes());
+        let opened = package::open_package(&package::package_path(&dir)).unwrap();
+        let audio = package::load_audio(&opened.path, &opened.doc, &mut |_| {}).unwrap();
+        let period = opened.doc.loop_.as_ref().unwrap().period_frames;
+        assert_eq!(period, 4_000.0);
+        assert_eq!(audio[0].layers[0].len(), 4_000);
+        assert_eq!(audio[0].layers[0][1_000], input[1_000], "samples are the recorded ones");
+
+        // Opening it again hands Practice Lab its (empty) library.
+        let mut fresh = ProjectGlue::new();
+        fresh.request(ProjectRequest::Open { path: opened.path.to_string_lossy().into() }, None, &lib).unwrap();
+        settle(&mut fresh, &events);
+        assert!(matches!(
+            events.borrow().last(),
+            Some(ProjectEvent::Done { result: OpResult::Opened { loaded_into_looper: false, .. }, .. })
+        ));
+        assert!(fresh.take_practice_import().is_some());
+        assert!(fresh.info().pending_load && !fresh.has_unsaved_changes());
+    }
+
+    #[test]
+    fn looper_config_patches_keep_unspecified_fields() {
+        let current = LooperConfig { max_loop_seconds: 12.0, pool_layers: 9, ..Default::default() };
+        let c = patch_looper_config(current, serde_json::json!({"maxTracks": 5})).unwrap();
+        assert_eq!((c.max_tracks, c.max_loop_seconds, c.pool_layers), (5, 12.0, 9));
+        assert!(patch_looper_config(current, serde_json::json!([1])).is_err());
+        assert!(patch_looper_config(current, serde_json::json!({"maxTracks": "x"})).is_err());
+    }
 
     #[test]
     fn fit_rules() {

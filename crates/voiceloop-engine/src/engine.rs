@@ -26,13 +26,16 @@ use crate::analysis::{AnalysisConfig, AnalysisOutput, AnalysisWorker};
 use crate::capture::{CaptureInfo, InputCapture};
 use crate::devices;
 use crate::error::EngineError;
-use crate::hardware::{self, AudioDiagnostics, CalibrationOutcome, DevicesChanged, Hardware};
+use crate::hardware::{
+    self, AudioDiagnostics, CalibrationOutcome, DevicesChanged, Hardware, HardwareAction, SessionAction,
+};
 use crate::looper::io::{LooperPlayback, OutputInfo};
 use crate::looper::{LooperCommand, LooperConfig, LooperNotice, LooperSnapshot, LooperState};
 use crate::meter::{amplitude_to_db, MeterFrame};
 use crate::midi_in::{MidiBatch, MidiPortInfo};
 use crate::practice::{self, Practice, PracticeIo, PracticeProgress, PracticeStatus, PracticeTakeEvent, TransportMap};
 use crate::model::AudioDevice;
+use crate::platform::{self, MicPermission, SessionEvent, SessionInfo, SessionRequest};
 use crate::project::{ProjectEvent, ProjectGlue, ProjectReply, ProjectRequest};
 use crate::routing::{AudioConfig, InputRoute, MonitorConfig, OutputRoute};
 use crate::settings::AudioSettings;
@@ -71,6 +74,10 @@ pub struct EngineStatus {
     pub analysis: bool,
     /// The configuration `startInput` uses (devices, routes, rate, buffer, monitor).
     pub audio_config: AudioConfig,
+    /// Loops or project data changed since the last save (see `project.rs`).
+    pub unsaved_changes: bool,
+    /// Microphone permission as the platform reports it (`unknown` on macOS).
+    pub mic_permission: MicPermission,
 }
 
 /// Pitch frames produced since the previous update (about three per event at
@@ -114,6 +121,11 @@ pub enum EngineEvent {
     AudioDiagnostics(AudioDiagnostics),
     /// A loopback latency calibration finished (or failed).
     Calibration(CalibrationOutcome),
+    /// Platform audio-session notification (iOS: interruption, route change,
+    /// media-services reset, permission answer).
+    AudioSession(SessionEvent),
+    /// The values the platform audio session granted (iOS; sent on each start).
+    AudioSessionInfo(SessionInfo),
     /// Save / open / export / import progress and results (see `project.rs`).
     Project(ProjectEvent),
     /// Practice Lab state changed (see `practice/`).
@@ -142,6 +154,8 @@ pub enum EngineWarning {
     MidiPortLost(String),
     /// The settings file could not be read or written.
     SettingsProblem(String),
+    /// Audio was restarted automatically (device/route change); loops were kept.
+    AudioRestarted(String),
 }
 
 /// Exact-zero input for this long triggers [`EngineWarning::SilentInput`].
@@ -159,6 +173,7 @@ enum Command {
     Status(Reply<EngineStatus>),
     Looper(LooperCommand, Reply<()>),
     SetLooperConfig(LooperConfig, Reply<()>),
+    PatchLooperConfig(serde_json::Value, Reply<LooperConfig>),
     SetAnalysisConfig(AnalysisConfig, Reply<()>),
     ListAudioDevices(Reply<devices::DeviceList>),
     StartAudio(AudioConfig, Reply<EngineStatus>),
@@ -173,6 +188,7 @@ enum Command {
     SaveAudioSettings(Reply<()>),
     StartLatencyCalibration(bool, Reply<()>),
     StartupWarnings(Reply<Vec<EngineWarning>>),
+    RequestMicPermission(Reply<MicPermission>),
     Project(ProjectRequest, Reply<ProjectReply>),
     Practice(practice::Request, Reply<practice::Response>),
     Shutdown,
@@ -242,6 +258,13 @@ impl Engine {
     /// Resource limits for the looper; applied the next time audio starts.
     pub fn set_looper_config(&self, config: LooperConfig) -> Result<(), EngineError> {
         self.request(|r| Command::SetLooperConfig(config, r))
+    }
+
+    /// Change some looper limits (camelCase JSON; omitted fields keep their
+    /// current value). A higher `maxTracks` adds tracks at once while audio
+    /// runs; other changes apply the next time audio starts. Returns the result.
+    pub fn patch_looper_config(&self, patch: serde_json::Value) -> Result<LooperConfig, EngineError> {
+        self.request(|r| Command::PatchLooperConfig(patch, r))
     }
 
     /// Pitch / note / onset analysis settings. Applies immediately when audio
@@ -314,6 +337,12 @@ impl Engine {
     }
 
     /// Warnings raised while loading the settings file at startup.
+    /// Ask for microphone permission (iOS prompt). Returns the current state;
+    /// the answer arrives as an `audioSession` event of kind `micPermission`.
+    pub fn request_mic_permission(&self) -> Result<MicPermission, EngineError> {
+        self.request(Command::RequestMicPermission)
+    }
+
     pub fn startup_warnings(&self) -> Result<Vec<EngineWarning>, EngineError> {
         self.request(Command::StartupWarnings)
     }
@@ -403,6 +432,8 @@ impl ControlLoop {
             looper: self.playback.is_some(),
             analysis: self.analysis.is_some(),
             audio_config: self.hw.config.clone(),
+            unsaved_changes: self.project.has_unsaved_changes(),
+            mic_permission: platform::mic_permission(),
         }
     }
 
@@ -424,7 +455,17 @@ impl ControlLoop {
             self.poll_hardware();
             self.drain_meter();
             self.drain_looper();
-            self.project.poll(self.playback.as_mut(), &self.hw.config, &*self.sink);
+            let epoch = self.latest_snapshot.map(|s| s.epoch);
+            self.project.poll(self.playback.as_mut(), epoch, self.practice.library(), &self.hw.config, &*self.sink);
+            if let Some(library) = self.project.take_practice_import() {
+                // A project was opened or created: its Practice Lab library replaces the current one.
+                let io = practice_io!(self);
+                let request = practice::Request::Import { library, replace: true };
+                if let Err(e) = self.practice.handle(request, &io) {
+                    (self.sink)(EngineEvent::Error(e));
+                }
+                self.flush_practice();
+            }
             self.drain_analysis();
             self.tick_practice();
             if self.capture.is_some() && self.last_emit.elapsed() >= LEVEL_EVENT_INTERVAL {
@@ -437,6 +478,8 @@ impl ControlLoop {
             }
         }
         self.stop_audio();
+        // Let a recovery autosave of the parked loops (or a save in progress) finish before exit.
+        self.project.finish_blocking(self.practice.library(), &self.hw.config, &*self.sink, Duration::from_secs(10));
     }
 
     fn handle(&mut self, cmd: Command) {
@@ -454,6 +497,7 @@ impl ControlLoop {
             }
             Command::StopInput(reply) => {
                 self.stop_audio();
+                platform::release_audio();
                 let status = self.status();
                 (self.sink)(EngineEvent::Status(status.clone()));
                 let _ = reply.send(Ok(status));
@@ -467,6 +511,21 @@ impl ControlLoop {
             Command::SetLooperConfig(config, reply) => {
                 let result = config.max_loop_frames(48_000).map(|_| {
                     self.looper_config = config;
+                });
+                let _ = reply.send(result);
+            }
+            Command::PatchLooperConfig(patch, reply) => {
+                let result = crate::project::patch_looper_config(self.looper_config, patch).and_then(|config| {
+                    config.max_loop_frames(48_000)?;
+                    self.looper_config = config;
+                    // More tracks take effect at once (preallocated); everything else at the next start.
+                    let running = self.latest_snapshot.filter(|_| self.playback.is_some()).map(|s| s.track_count);
+                    if let Some(active) = running {
+                        for _ in (active as usize)..config.max_tracks.min(config.track_capacity) {
+                            self.send_looper(LooperCommand::AddTrack)?;
+                        }
+                    }
+                    Ok(config)
                 });
                 let _ = reply.send(result);
             }
@@ -561,6 +620,9 @@ impl ControlLoop {
                 let idle = self.latest_snapshot.is_none_or(|s| s.run == crate::looper::RunState::Stopped);
                 let _ = reply.send(self.hw.start_calibration(self.playback.as_mut(), idle, apply));
             }
+            Command::RequestMicPermission(reply) => {
+                let _ = reply.send(Ok(self.hw.request_mic_permission()));
+            }
             Command::StartupWarnings(reply) => {
                 let _ = reply.send(Ok(self.hw.startup_warnings()));
             }
@@ -572,7 +634,7 @@ impl ControlLoop {
                 let _ = reply.send(result);
             }
             Command::Project(request, reply) => {
-                let _ = reply.send(self.project.request(request, self.playback.as_mut()));
+                let _ = reply.send(self.project.request(request, self.playback.as_mut(), self.practice.library()));
             }
             Command::Practice(request, reply) => {
                 let io = practice_io!(self);
@@ -585,6 +647,9 @@ impl ControlLoop {
     }
 
     fn send_looper(&mut self, command: LooperCommand) -> Result<(), EngineError> {
+        if self.project.restoring() && !matches!(command, LooperCommand::SetInputLatency { .. }) {
+            return Err(EngineError::Busy("restoring the loops after an audio restart".into()));
+        }
         if let LooperCommand::SetInputLatency { frames } = command {
             // Remembered for the next start and persisted with the hardware settings.
             self.hw.input_latency = Some(frames);
@@ -600,21 +665,31 @@ impl ControlLoop {
                 return Ok(());
             }
         }
-        match self.playback.as_mut() {
+        let result = match self.playback.as_mut() {
             Some(p) => {
                 p.handles.commands.push(command).map_err(|_| EngineError::Busy("looper command queue is full".into()))
             }
             None => Err(EngineError::Invalid("start audio input before using the looper".into())),
+        };
+        if result.is_ok() {
+            self.project.track_command(&command); // track names follow addTrack / removeTrack
         }
+        result
     }
 
     fn start_audio(&mut self, config: AudioConfig) -> Result<EngineStatus, EngineError> {
         config.monitor.validate()?;
         self.stop_audio();
 
+        // The platform session (iOS) must be configured before any device query.
+        let session = SessionRequest::for_start(config.sample_rate, config.buffer_size);
+        if let Some(info) = platform::prepare_audio(&session)? {
+            (self.sink)(EngineEvent::AudioSessionInfo(info));
+        }
         // Devices, rate, buffer size, routes, and the stream pair: see `hardware::open_audio`.
         let opened = hardware::open_audio(&config, &self.looper_config, self.transport)?;
-        let hardware::Opened { capture, playback, analysis_rx, analysis_dropped, looper_problem, warnings } = opened;
+        let hardware::Opened { capture, playback, analysis_rx, analysis_dropped, looper_problem, warnings, resolved } =
+            opened;
 
         // Analysis is optional: if its thread cannot start, audio still runs.
         match AnalysisWorker::start(self.analysis_config, capture.info.sample_rate, analysis_rx, analysis_dropped) {
@@ -643,7 +718,7 @@ impl ControlLoop {
         if let (Some(frames), Some(p)) = (self.hw.input_latency, self.playback.as_mut()) {
             let _ = p.handles.commands.push(LooperCommand::SetInputLatency { frames });
         }
-        self.hw.config = config;
+        self.hw.config = resolved;
         self.hw.autosave(&*self.sink);
         Ok(self.status())
     }
@@ -653,8 +728,11 @@ impl ControlLoop {
         if let Some(cap) = self.capture.take() {
             cap.stop();
         }
-        if let Some(p) = self.playback.take() {
+        if let Some(mut p) = self.playback.take() {
+            // The looper parks its content as the stream drops; it is restored into the next stream.
+            let parked = p.handles.parked.take();
             p.stop();
+            self.project.on_looper_stopped(parked, &self.hw.config);
         }
         if let Some(worker) = self.analysis.take() {
             worker.stop();
@@ -686,22 +764,64 @@ impl ControlLoop {
     /// Stream error callbacks only store a code (they may run on the realtime
     /// thread); the message is built here.
     fn drain_stream_errors(&mut self) {
-        if let Some(error) = Hardware::stream_failure(self.capture.as_ref(), self.playback.as_ref()) {
-            self.stop_audio();
-            (self.sink)(EngineEvent::Error(error));
-            (self.sink)(EngineEvent::Status(self.status()));
+        if let Some(action) = Hardware::stream_failure(self.capture.as_ref(), self.playback.as_ref()) {
+            self.apply_hardware_action(action);
+        }
+    }
+
+    fn apply_hardware_action(&mut self, action: HardwareAction) {
+        if self.capture.is_none() && self.playback.is_none() {
+            return;
+        }
+        match action {
+            HardwareAction::Lost(error) => {
+                self.stop_audio();
+                (self.sink)(EngineEvent::Error(error));
+                (self.sink)(EngineEvent::Status(self.status()));
+            }
+            HardwareAction::Restart(reason) => self.restart_audio(reason),
+        }
+    }
+
+    /// Rebuild the streams with the current config. The looper parks its
+    /// content when its stream stops and restores it into the new one
+    /// (`stop_audio` → `project.on_looper_stopped`), so loops survive.
+    fn restart_audio(&mut self, reason: String) {
+        let config = self.hw.config.clone();
+        self.stop_audio();
+        match self.start_audio(config) {
+            Ok(status) => {
+                (self.sink)(EngineEvent::Warning(EngineWarning::AudioRestarted(reason)));
+                (self.sink)(EngineEvent::Status(status));
+            }
+            Err(e) => {
+                (self.sink)(EngineEvent::Error(e));
+                (self.sink)(EngineEvent::Status(self.status()));
+            }
         }
     }
 
     /// Hot-plug polling, MIDI delivery, drift estimation, diagnostics.
     fn poll_hardware(&mut self) {
         let sink = &*self.sink;
-        if let Some(lost) = self.hw.poll_hotplug(self.capture.as_ref(), self.playback.as_ref(), sink) {
-            if self.capture.is_some() || self.playback.is_some() {
+        if let Some(action) = self.hw.poll_hotplug(self.capture.as_ref(), self.playback.as_ref(), sink) {
+            self.apply_hardware_action(action);
+        }
+        let running = self.capture.is_some();
+        match self.hw.poll_session(running, &*self.sink) {
+            Some(SessionAction::Stop) => {
                 self.stop_audio();
-                (self.sink)(EngineEvent::Error(lost));
                 (self.sink)(EngineEvent::Status(self.status()));
             }
+            Some(SessionAction::Start) => {
+                let result = self.start_audio(self.hw.config.clone());
+                match result {
+                    Ok(status) => (self.sink)(EngineEvent::Status(status)),
+                    Err(e) => (self.sink)(EngineEvent::Error(e)),
+                }
+            }
+            Some(SessionAction::Restart(reason)) => self.restart_audio(reason),
+            None => {}
         }
         let sink = &*self.sink;
         self.hw.drain_midi(self.capture.as_ref(), self.playback.as_ref(), sink);

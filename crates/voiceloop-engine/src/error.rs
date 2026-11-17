@@ -34,35 +34,19 @@ pub enum EngineError {
     EngineStopped,
 }
 
-impl From<cpal::DevicesError> for EngineError {
-    fn from(e: cpal::DevicesError) -> Self {
-        EngineError::Backend(e.to_string())
-    }
-}
+impl From<cpal::Error> for EngineError {
+    fn from(e: cpal::Error) -> Self {
+        use cpal::ErrorKind;
 
-impl From<cpal::DefaultStreamConfigError> for EngineError {
-    fn from(e: cpal::DefaultStreamConfigError) -> Self {
-        match e {
-            cpal::DefaultStreamConfigError::DeviceNotAvailable => EngineError::PermissionOrUnavailable(e.to_string()),
-            other => EngineError::Backend(other.to_string()),
-        }
-    }
-}
-
-impl From<cpal::BuildStreamError> for EngineError {
-    fn from(e: cpal::BuildStreamError) -> Self {
-        match e {
-            cpal::BuildStreamError::DeviceNotAvailable => EngineError::PermissionOrUnavailable(e.to_string()),
-            other => EngineError::Backend(other.to_string()),
-        }
-    }
-}
-
-impl From<cpal::PlayStreamError> for EngineError {
-    fn from(e: cpal::PlayStreamError) -> Self {
-        match e {
-            cpal::PlayStreamError::DeviceNotAvailable => EngineError::PermissionOrUnavailable(e.to_string()),
-            other => EngineError::Backend(other.to_string()),
+        let message = e.to_string();
+        match e.kind() {
+            ErrorKind::DeviceNotAvailable | ErrorKind::PermissionDenied => {
+                EngineError::PermissionOrUnavailable(message)
+            }
+            ErrorKind::DeviceBusy => EngineError::Busy(message),
+            ErrorKind::UnsupportedConfig | ErrorKind::UnsupportedOperation => EngineError::UnsupportedFormat(message),
+            ErrorKind::ResourceExhausted => EngineError::ResourceLimit(message),
+            _ => EngineError::Backend(message),
         }
     }
 }

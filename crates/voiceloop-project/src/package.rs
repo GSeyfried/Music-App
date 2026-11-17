@@ -28,6 +28,7 @@ pub const PACKAGE_EXTENSION: &str = "voiceloop";
 pub const PROJECT_FILE: &str = "project.json";
 pub const PREVIOUS_FILE: &str = "project.previous.json";
 pub const AUDIO_DIR: &str = "audio";
+pub const PRACTICE_DIR: &str = "practice";
 
 /// Mono layer samples (shared, never copied for saving).
 pub type Samples = Arc<[f32]>;
@@ -119,7 +120,16 @@ fn write_layer(dir: &Path, samples: &[f32], sample_rate: u32, description: &str)
 /// Save `doc` with `audio` into the package folder `dir` (created if needed).
 /// Layer entries in the returned document are rebuilt from `audio`; their ids
 /// and unknown fields are kept where the content is unchanged.
-pub fn save_package(dir: &Path, doc: &ProjectDoc, audio: &[TrackAudio], progress: Progress) -> Result<ProjectDoc> {
+///
+/// `practice` is the serialised Practice Lab library (opaque JSON); `None`
+/// means the project has none (any previous library reference is dropped).
+pub fn save_package(
+    dir: &Path,
+    doc: &ProjectDoc,
+    audio: &[TrackAudio],
+    practice: Option<&[u8]>,
+    progress: Progress,
+) -> Result<ProjectDoc> {
     if audio.len() > doc.tracks.len() {
         return Err(ProjectError::Invalid("audio for more tracks than the project has".into()));
     }
@@ -170,6 +180,10 @@ pub fn save_package(dir: &Path, doc: &ProjectDoc, audio: &[TrackAudio], progress
         track.layers.clear();
         track.redo_layers.clear();
     }
+    out.practice.library = match practice {
+        Some(bytes) => Some(write_practice(dir, bytes)?),
+        None => None,
+    };
     let bytes = doc::to_json(&out)?;
 
     // Keep the current save as the fallback, then replace it atomically.
@@ -202,13 +216,15 @@ fn collect_garbage(dir: &Path, current: &ProjectDoc, previous: Option<&ProjectDo
     if let Some(p) = previous {
         keep.extend(p.referenced_files().map(str::to_owned));
     }
-    let Ok(entries) = fs::read_dir(dir.join(AUDIO_DIR)) else { return };
-    for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        let rel = format!("{AUDIO_DIR}/{name}");
-        let ours = name.starts_with("layer-") || name.contains(util::TEMP_MARKER);
-        if ours && !keep.contains(&rel) {
-            let _ = fs::remove_file(e.path());
+    for (sub, prefix) in [(AUDIO_DIR, "layer-"), (PRACTICE_DIR, "library-")] {
+        let Ok(entries) = fs::read_dir(dir.join(sub)) else { continue };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let rel = format!("{sub}/{name}");
+            let ours = name.starts_with(prefix) || name.contains(util::TEMP_MARKER);
+            if ours && !keep.contains(&rel) {
+                let _ = fs::remove_file(e.path());
+            }
         }
     }
     // Leftover temp files of project.json from an interrupted save.
@@ -283,6 +299,35 @@ fn load_layer(dir: &Path, doc: &ProjectDoc, layer: &LayerDoc) -> Result<Samples>
     Ok(mono.into())
 }
 
+fn practice_hash(bytes: &[u8]) -> String {
+    format!("{:016x}", util::fnv1a(bytes.len() as u64, bytes))
+}
+
+/// Content-addressed write of the practice library; returns its package path.
+fn write_practice(dir: &Path, bytes: &[u8]) -> Result<String> {
+    let rel = format!("{PRACTICE_DIR}/library-{}.json", practice_hash(bytes));
+    let path = dir.join(&rel);
+    if fs::metadata(&path).map(|m| m.len() == bytes.len() as u64).unwrap_or(false) {
+        return Ok(rel);
+    }
+    fs::create_dir_all(dir.join(PRACTICE_DIR)).map_err(|e| ProjectError::io("create", dir, e))?;
+    util::atomic_write(&path, bytes)?;
+    Ok(rel)
+}
+
+/// The project's Practice Lab library bytes, verified against the hash in
+/// its name (`corrupt` if they differ). `None` if the project has none.
+pub fn load_practice(dir: &Path, doc: &ProjectDoc) -> Result<Option<Vec<u8>>> {
+    let Some(rel) = &doc.practice.library else { return Ok(None) };
+    let path = dir.join(rel);
+    let bytes = fs::read(&path).map_err(|e| ProjectError::io("read", &path, e))?;
+    let expected = rel.rsplit("library-").next().unwrap_or("").trim_end_matches(".json");
+    if practice_hash(&bytes) != expected {
+        return Err(ProjectError::corrupt(&path, "practice library does not match its checksum"));
+    }
+    Ok(Some(bytes))
+}
+
 /// Load and verify every layer of `doc` (frame count and checksum).
 pub fn load_audio(dir: &Path, doc: &ProjectDoc, progress: Progress) -> Result<Vec<TrackAudio>> {
     let total = doc.referenced_files().count().max(1);
@@ -339,7 +384,7 @@ mod tests {
         assert!(dir.ends_with("My Song.voiceloop"));
         let (d, audio) = project();
         let mut steps = Vec::new();
-        let saved = save_package(&dir, &d, &audio, &mut |p| steps.push(p)).unwrap();
+        let saved = save_package(&dir, &d, &audio, None, &mut |p| steps.push(p)).unwrap();
         assert_eq!(steps.last(), Some(&1.0));
         assert_eq!(files(&dir).len(), 4);
 
@@ -362,19 +407,19 @@ mod tests {
     fn resave_reuses_unchanged_files_and_collects_garbage() {
         let dir = crate::test_dir("pkg-resave").join("s.voiceloop");
         let (d, mut audio) = project();
-        let first = save_package(&dir, &d, &audio, &mut |_| {}).unwrap();
+        let first = save_package(&dir, &d, &audio, None, &mut |_| {}).unwrap();
         let mtime = |f: &str| fs::metadata(dir.join(f)).unwrap().modified().unwrap();
         let base = first.tracks[0].layers[0].file.clone();
         let t0 = mtime(&base);
 
         audio[1].layers[0] = layer(4_800, 9.0); // change one layer
-        let second = save_package(&dir, &first, &audio, &mut |_| {}).unwrap();
+        let second = save_package(&dir, &first, &audio, None, &mut |_| {}).unwrap();
         assert_eq!(mtime(&base), t0, "unchanged layer not rewritten");
         assert_eq!(second.tracks[0].layers[0].id, first.tracks[0].layers[0].id, "id kept");
         assert_ne!(second.tracks[1].layers[0].file, first.tracks[1].layers[0].file);
         assert_eq!(files(&dir).len(), 5, "the previous save's file is kept for the fallback");
 
-        let third = save_package(&dir, &second, &audio, &mut |_| {}).unwrap();
+        let third = save_package(&dir, &second, &audio, None, &mut |_| {}).unwrap();
         assert_eq!(files(&dir).len(), 4, "files of older saves are removed");
         assert_eq!(third.tracks[1].layers[0].file, second.tracks[1].layers[0].file);
     }
@@ -383,10 +428,10 @@ mod tests {
     fn damaged_project_json_falls_back_to_the_previous_save() {
         let dir = crate::test_dir("pkg-fallback").join("s.voiceloop");
         let (d, audio) = project();
-        let first = save_package(&dir, &d, &audio, &mut |_| {}).unwrap();
+        let first = save_package(&dir, &d, &audio, None, &mut |_| {}).unwrap();
         let mut renamed = first.clone();
         renamed.name = "Second".into();
-        save_package(&dir, &renamed, &audio, &mut |_| {}).unwrap();
+        save_package(&dir, &renamed, &audio, None, &mut |_| {}).unwrap();
         // Simulate a torn write of project.json.
         let bytes = fs::read(dir.join(PROJECT_FILE)).unwrap();
         fs::write(dir.join(PROJECT_FILE), &bytes[..bytes.len() / 3]).unwrap();
@@ -402,7 +447,7 @@ mod tests {
     fn damaged_or_missing_audio_is_detected() {
         let dir = crate::test_dir("pkg-audio").join("s.voiceloop");
         let (d, audio) = project();
-        let saved = save_package(&dir, &d, &audio, &mut |_| {}).unwrap();
+        let saved = save_package(&dir, &d, &audio, None, &mut |_| {}).unwrap();
         let f = dir.join(&saved.tracks[0].layers[1].file);
         let mut bytes = fs::read(&f).unwrap();
         let n = bytes.len();
@@ -421,7 +466,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("notes.txt"), "mine").unwrap();
         let (d, audio) = project();
-        assert!(matches!(save_package(&dir, &d, &audio, &mut |_| {}), Err(ProjectError::Invalid(_))));
+        assert!(matches!(save_package(&dir, &d, &audio, None, &mut |_| {}), Err(ProjectError::Invalid(_))));
         assert_eq!(fs::read_to_string(dir.join("notes.txt")).unwrap(), "mine");
     }
 
@@ -429,7 +474,7 @@ mod tests {
     fn interrupted_save_leaves_the_old_save_intact() {
         let dir = crate::test_dir("pkg-interrupt").join("s.voiceloop");
         let (d, audio) = project();
-        let saved = save_package(&dir, &d, &audio, &mut |_| {}).unwrap();
+        let saved = save_package(&dir, &d, &audio, None, &mut |_| {}).unwrap();
         // A crash mid-save leaves temp files and new audio not yet referenced.
         fs::write(dir.join(format!("{PROJECT_FILE}{}1-1", util::TEMP_MARKER)), b"{partial").unwrap();
         fs::write(dir.join(AUDIO_DIR).join("layer-ffffffffffffffff.wav"), b"RIFF").unwrap();
@@ -437,8 +482,44 @@ mod tests {
         assert_eq!(opened.doc, saved);
         assert_eq!(load_audio(&dir, &opened.doc, &mut |_| {}).unwrap(), audio);
         // The next save cleans up.
-        save_package(&dir, &opened.doc, &audio, &mut |_| {}).unwrap();
+        save_package(&dir, &opened.doc, &audio, None, &mut |_| {}).unwrap();
         assert_eq!(files(&dir).len(), 4);
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 3, "audio/, project.json, project.previous.json");
+    }
+}
+
+#[cfg(test)]
+mod practice_tests {
+    use super::*;
+    use crate::doc::LoopDoc;
+
+    #[test]
+    fn practice_library_round_trips_and_is_verified() {
+        let dir = crate::test_dir("pkg-practice").join("p.voiceloop");
+        let mut d = ProjectDoc::new("Song", 48_000, 1);
+        d.loop_ = Some(LoopDoc { period_frames: 10.0, extra: Default::default() });
+        let audio = vec![TrackAudio { layers: vec![vec![0.5f32; 10].into()], redo: vec![] }];
+        let lib = br#"{"formatVersion":1,"references":[{"id":"r1"}]}"#;
+        let saved = save_package(&dir, &d, &audio, Some(lib), &mut |_| {}).unwrap();
+        let rel = saved.practice.library.clone().unwrap();
+        assert!(rel.starts_with("practice/library-") && rel.ends_with(".json"));
+        let opened = open_package(&dir).unwrap();
+        assert_eq!(load_practice(&dir, &opened.doc).unwrap().as_deref(), Some(&lib[..]));
+
+        // A changed library gets a new file; the old one survives one save (fallback), then goes.
+        let lib2 = br#"{"formatVersion":1,"references":[]}"#;
+        let second = save_package(&dir, &saved, &audio, Some(lib2), &mut |_| {}).unwrap();
+        assert_ne!(second.practice.library, saved.practice.library);
+        assert!(dir.join(&rel).exists());
+        save_package(&dir, &second, &audio, Some(lib2), &mut |_| {}).unwrap();
+        assert!(!dir.join(&rel).exists());
+
+        // Tampering is detected; a missing file makes the save fall back.
+        let rel2 = second.practice.library.clone().unwrap();
+        fs::write(dir.join(&rel2), b"{}").unwrap();
+        assert!(matches!(load_practice(&dir, &second), Err(ProjectError::Corrupt { .. })));
+        let none = save_package(&dir, &second, &audio, None, &mut |_| {}).unwrap();
+        assert_eq!(none.practice.library, None);
+        assert_eq!(load_practice(&dir, &none).unwrap(), None);
     }
 }

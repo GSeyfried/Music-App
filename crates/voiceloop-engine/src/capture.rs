@@ -37,7 +37,9 @@ pub const METER_RING_CAPACITY: usize = 256;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureInfo {
+    /// Stable device id (`DeviceId` text), as accepted by `inputDevice`/`outputDevice`.
     pub device_id: String,
+    pub device_name: String,
     pub sample_rate: u32,
     /// Channels the device delivers (all are metered; the route picks what the engine uses).
     pub channels: u16,
@@ -108,7 +110,7 @@ impl InputCapture {
         config.buffer_size = buffer;
         let (route, _) = route.resolve(config.channels);
 
-        let window = (config.sample_rate.0 / METER_WINDOWS_PER_SECOND).max(1);
+        let window = (config.sample_rate / METER_WINDOWS_PER_SECOND).max(1);
         let (producer, consumer) = rtrb::RingBuffer::<MeterFrame>::new(METER_RING_CAPACITY);
         let stats = stats.unwrap_or_default();
         let cell = Arc::new(RouteCell::input(route));
@@ -137,8 +139,9 @@ impl InputCapture {
             meter_rx: consumer,
             meter_window: window as u64,
             info: CaptureInfo {
-                device_id: devices::name_of(&device),
-                sample_rate: config.sample_rate.0,
+                device_id: devices::id_of(&device),
+                device_name: devices::name_of(&device),
+                sample_rate: config.sample_rate,
                 channels: config.channels,
                 sample_format: sample_format.to_string(),
                 route,
@@ -209,7 +212,7 @@ where
 {
     let Parts { window, mut producer, taps, stats, route } = parts;
     let channels = (config.channels as usize).max(1);
-    let sample_rate = config.sample_rate.0;
+    let sample_rate = config.sample_rate;
     let mut meter = MeterAccumulator::new(config.channels, window);
     let InputTaps { mut looper, mut analysis } = taps;
     // Allocated here, before the callback exists.
@@ -220,16 +223,16 @@ where
     let err_stats = stats.clone();
 
     let stream = device.build_input_stream(
-        config,
+        *config,
         move |data: &[T], info: &cpal::InputCallbackInfo| {
             // REALTIME: no allocation, locks, logging, or blocking below.
             let frames = data.len() / channels;
             let ts = info.timestamp();
             let origin = *origin.get_or_insert(ts.callback);
-            let latency_ns = ts.callback.duration_since(&ts.capture).map(|d| d.as_nanos() as u64);
+            let latency_ns = ts.callback.checked_duration_since(ts.capture).map(|d| d.as_nanos() as u64);
             let anchor = Anchor { host_ns: clock::host_now_ns(), frame: total_frames, ..Anchor::default() };
             stats.on_block(anchor, frames, latency_ns);
-            if let Some(cb) = ts.callback.duration_since(&origin) {
+            if let Some(cb) = ts.callback.checked_duration_since(origin) {
                 if let Some(lost) = xrun.observe(cb.as_nanos() as u64, frames, sample_rate) {
                     stats.on_discontinuity(lost);
                 }
@@ -277,7 +280,7 @@ where
         move |err| {
             // May run on the realtime thread (CPAL 0.16 CoreAudio reports
             // timestamp failures from inside the callback): store a code only.
-            err_stats.on_error(devices::stream_error_code(err));
+            err_stats.on_stream_error(devices::stream_error_code(err));
         },
         None,
     )?;

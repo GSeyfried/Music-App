@@ -14,15 +14,23 @@ throughout:
 - **documented**: a primary source (Apple, Tauri, or CPAL source/changelog) says so.
 - **unverified**: plausible but not demonstrated; needs a device.
 
+**Current-worktree delta:** the recommended CPAL 0.18.2 upgrade and
+park/restore support for preserving loops across stream restarts are now
+implemented and pass host-side checks. Sections that compare CPAL 0.16 with
+0.18.2 preserve the investigation that led to the upgrade; they are not a
+claim that the current dependency is still 0.16. The AVAudioSession platform
+layer, Tauri iOS build, interruption/route behavior and physical-device audio
+remain unimplemented or unverified.
+
 ## 1. Summary
 
 | Question | Answer |
 | --- | --- |
-| Can the engine target iOS? | **Yes, at the type-check level.** `voiceloop-analysis` and `voiceloop-engine` (CPAL 0.16, including the new `clock.rs`/`routing.rs`), with their tests, pass `cargo check` for `aarch64-apple-ios` and `aarch64-apple-ios-sim` (re-checked 2026-11-17 at HEAD `54dd2c9` plus the working tree; 0 warnings). Linking needs the iOS SDK. |
+| Can the engine target iOS? | **Yes, at the earlier type-check level.** `voiceloop-analysis` and `voiceloop-engine` passed `cargo check` for `aarch64-apple-ios` and `aarch64-apple-ios-sim`. The current CPAL 0.18.2 working tree needs the same check rerun once the iOS SDK/tooling environment is available. Linking needs the iOS SDK. |
 | Can the Tauri shell target iOS? | **Not checkable without Xcode.** Build scripts (`objc2-exception-helper`, `swift-rs`) run `xcrun --sdk iphoneos/iphonesimulator`, which fails with Command Line Tools only. Tauri 2 documents iOS as supported. |
-| Will CPAL 0.16 work as-is on iOS? | **No, not for a looper.** Its iOS backend never configures or activates `AVAudioSession`, ignores interruptions and route changes, rejects `BufferSize::Fixed`, and exposes one fake device ("Default Device"). Without a `playAndRecord` session, input does not work on recent iOS ([cpal#842](https://github.com/RustAudio/cpal/issues/842)). |
-| What fixes it? | (1) Upgrade to **CPAL 0.18.2**: it handles interruptions (auto-resume), reports route changes and device loss, applies `BufferSize::Fixed` through `AVAudioSession`, and reports latency. (2) Add our own **thin AVAudioSession layer in Rust (objc2-avf-audio)** for category/mode, preferred rate and buffer, activation, input selection, and permission. A prototype of (2) **compiles** for iOS (§5). |
-| Biggest architectural gap | Looper state is owned by the output stream's callback and is dropped when the stream stops. On iOS, streams must restart on route changes (headphones, USB interface, media-services reset), so **loops would be lost on every headphone plug-in**. This affects macOS device changes too. |
+| Is the CPAL base current? | **Partly.** CPAL 0.18.2 is now adopted. It improves interruption, route/device-loss, fixed-buffer and latency support, but it still does not replace VoiceLoop's required AVAudioSession policy layer. |
+| What remains? | Add the **thin AVAudioSession layer in Rust (objc2-avf-audio)** for category/mode, preferred rate and buffer, activation, input selection, permission and app lifecycle. A prototype compiles for iOS (§5), but it is not integrated. |
+| Biggest architectural gap | Physical-device proof: interruption/route recovery, background/screen-lock behavior, Bluetooth/automotive routes, latency and offline save/reopen. Looper park/restore now addresses the earlier state-loss design gap but still needs app/device verification. |
 | Can the user test on their iPad/iPhone today? | No. Xcode must be installed first, and the Mac has **~13-14 GB free**, which is not enough for Xcode plus the iOS platform. See [BUILD_AND_INSTALL.md](BUILD_AND_INSTALL.md). |
 
 ## 2. Compile-level proof (precise results)
@@ -379,9 +387,12 @@ s.setActive_error(true)?;
 // then read back s.sampleRate(), s.IOBufferDuration(), s.inputLatency(), s.outputLatency(), s.currentRoute()
 ```
 
-It is not committed into the engine because the engine files belong to other
-agents, `lib.rs` is mid-edit, and the CPAL upgrade should land first. It
-is ready to drop into `platform/ios.rs`.
+**Status (hardware-io round 3):** landed as
+`crates/voiceloop-engine/src/platform/{mod.rs,ios.rs,desktop.rs}` on CPAL
+0.18.2, with interruption, route-change, and media-services-reset observers
+and the permission request; route changes and resets use the engine's
+stream-restart path (loops parked and restored). See
+`docs/projects/hardware-io/README.md` (Platform module).
 
 ### Changes the current engine needs to be iOS-ready (owners: engine/hardware-io agents)
 
@@ -393,7 +404,7 @@ is ready to drop into `platform/ios.rs`.
    new stream takes it. Alternatively, own the core in an `Arc` with a
    park/unpark handshake. Sample-rate changes must reject or resample. This is
    required on macOS too (USB interface unplug, AirPods connect).
-2. **Upgrade CPAL 0.16 → 0.18.2** (cross-platform). Breaking changes that touch our code:
+2. **Upgrade CPAL 0.16 → 0.18.2** (cross-platform). **Done (hardware-io round 3).** Breaking changes that touch our code:
    `DeviceTrait::name()` removed (use `Display` or `description()`; D-008 can move to the new
    **stable `DeviceId`** and `device_by_id`). Per-operation errors are merged into `cpal::Error`
    with an `ErrorKind`, so `error.rs`'s `From` impls and `clock::stream_error_code`

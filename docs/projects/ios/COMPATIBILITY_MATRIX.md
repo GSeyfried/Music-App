@@ -17,7 +17,7 @@ verification is still in progress by other agents.
 | Feature | macOS | iPadOS | iPhone | Notes |
 | --- | --- | --- | --- | --- |
 | `voiceloop-analysis` compiles | supported | supported (compiles) | supported (compiles) | `cargo check` passes for `aarch64-apple-ios` and `-sim`. |
-| `voiceloop-engine` compiles | supported | supported (compiles) | supported (compiles) | Passes with CPAL 0.16, tests included (re-checked 2026-11-17). Linking needs the iOS SDK (Xcode). |
+| `voiceloop-engine` compiles | supported | supported (compiles) | supported (compiles) | CPAL 0.18.2 + midir 0.11.1 + `platform/ios.rs`: `cargo check` and `cargo clippy` pass for `aarch64-apple-ios`, `cargo check` for `-sim` (2026-11-17, hardware-io round 3). Linking needs the iOS SDK (Xcode). |
 | Tauri shell builds | supported | supported (work) | supported (work) | Needs full Xcode. Build scripts call `xcrun --sdk iphoneos`. |
 | Simulator run | n/a | unverified | unverified | Simulator audio goes through the Mac's hardware and is **not** evidence for device audio. |
 | Install on own device | n/a | supported (work) | supported (work) | Free Apple ID: 7-day profiles, 3 apps per device. Developer Mode required. |
@@ -33,17 +33,17 @@ verification is still in progress by other agents.
 | Output (looper, click) | supported | supported (work) | supported (work) | iPhone: `defaultToSpeaker` or audio goes to the earpiece. |
 | Separate input and output streams (D-010) | supported | unverified | unverified | Same hardware clock on iOS, so drift ≈ 0. CPAL's iOS example uses this pattern. |
 | True duplex single I/O unit | n/a | platform-limited | platform-limited | Not expressible in CPAL. Fallback: our own RemoteIO backend. |
-| Device enumeration | supported (CPAL names) | supported (work) | supported (work) | CPAL exposes a single "default" device. Use `AVAudioSession.availableInputs`. |
+| Device enumeration | supported (CPAL 0.18 stable `DeviceId` = CoreAudio UID, name fallback) | supported (work) | supported (work) | CPAL exposes a single "default" device. `platform::SessionInfo` lists route ports; `availableInputs` selection is not wired yet. |
 | Input selection (built-in vs USB vs headset) | supported | supported (work) | supported (work) | `setPreferredInput(port)`. |
 | Output device selection | supported | platform-limited | platform-limited | iOS routes output itself (the user picks via Control Center / AirPlay). Apps can only override to the speaker. |
 | Sample rate control | supported (device) | supported (work) | supported (work) | `setPreferredSampleRate` is a request; external devices may force 44.1 kHz. |
-| Buffer size control | platform-limited (CPAL default) | supported (work) | supported (work) | `setPreferredIOBufferDuration`. Avoid CPAL `Fixed` (minimum 256 in 0.18). |
+| Buffer size control | supported (CPAL `Fixed`, clamped to the device range) | supported (work) | supported (work) | Engine requests it through `setPreferredIOBufferDuration` (`platform::prepare_audio`) and passes `BufferSize::Default` to CPAL on iOS. Granted value in the `audioSessionInfo` event. |
 | Small buffers (64-128 frames) | unverified | unverified | unverified | Apple: ≥ 5 ms guaranteed, lower "depending on hardware". |
-| Reported latency | platform-limited | supported (work) | supported (work) | `inputLatency`/`outputLatency` and CPAL 0.18 timestamps. Still calibrate (D-015). |
-| Interruptions (calls, Siri, alarms) | n/a | supported (work) | supported (work) | CPAL 0.18.2 auto-resumes. We must stop takes and pause the transport. |
-| Route changes (headphones, USB) | supported (work) | supported (work) | supported (work) | Engine must restart streams **without losing loops** (README §5, item 1). |
-| Media services reset | n/a | supported (work) | supported (work) | Reconfigure the session and restart. Test via Settings › Developer › Reset Media Services. |
-| Mic permission prompt and status | supported | supported (work) | supported (work) | `NSMicrophoneUsageDescription` present (Info.plist / Info.ios.plist). Denied means silence, not an error. |
+| Reported latency | supported (CPAL 0.18 includes device latency) | supported (work) | supported (work) | `inputLatency`/`outputLatency` in `audioSessionInfo`; CPAL 0.18 timestamps. Still calibrate (`start_latency_calibration`). |
+| Interruptions (calls, Siri, alarms) | n/a | supported (written, unverified) | supported (written, unverified) | `platform/ios.rs` observes `AVAudioSessionInterruptionNotification`: began stops the streams (loops parked); ended with shouldResume restarts them. `audioSession` events. |
+| Route changes (headphones, USB) | supported (written): default-device change and CPAL `DeviceChanged` restart the streams | supported (written, unverified) | supported (written, unverified) | `AVAudioSessionRouteChangeNotification` (new/old device, override, configuration change) triggers `restart_audio`, which parks and restores the loops. |
+| Media services reset | n/a | supported (written, unverified) | supported (written, unverified) | Observed; restarts audio, which re-runs `prepare_audio`. Test via Settings › Developer › Reset Media Services. |
+| Mic permission prompt and status | supported (status `unknown`; denial shows as `silentInput`) | supported (written, unverified) | supported (written, unverified) | `EngineStatus.micPermission`; `request_mic_permission` command answers with an `audioSession` `micPermission` event (`AVAudioApplication`). |
 | Raw input (no AGC or voice processing) | supported | supported (work) | supported (work) | `measurement` mode. Playback is quieter. |
 | Bluetooth headphones (output) | supported | platform-limited | platform-limited | A2DP output only, high latency. Warn in the looper. |
 | Bluetooth mic (HFP) | supported | platform-limited | platform-limited | Narrowband; disabled by default. iOS 26 high-quality BT recording is default-mode only and not available in the EU. |

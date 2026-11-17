@@ -340,10 +340,11 @@ and meter (Logic: *File ▸ Import ▸ MIDI File*, then *Import tempo*).
 - Manual DAW checks above (REAPER, GarageBand, Logic): not run.
 - UI integration: dialog plugin and capability (see `INTERFACE.md`), "Save
   before stopping audio/quitting" prompt, recovery prompt at start-up.
-- `stop_input` discards loops; consider exporting to the pending slot on
-  stop so a later save still has them.
+- Verify the implemented parked-looper stop/restart restoration through the
+  native app, including sample-rate changes and unsaved-work behavior.
 - Lock file against two writers on one package; RF64 for > 4 GiB files.
-- REAPER `.rpp` export, then DAWproject (see `INTEROP.md`).
+- Manually verify the implemented REAPER `.rpp` export; consider DAWproject
+  later when VoiceLoop has richer clips/automation (see `INTEROP.md`).
 - MIDI clip playback in the engine (imported MIDI is data only).
 - Frontend mirror: `src/models/domain.ts` must replace its `Project`,
   `Session`, `Track`, `AudioClip`-based project types with the document

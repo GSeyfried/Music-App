@@ -85,6 +85,8 @@ pub struct Inventory {
     pub max_frames: usize,
     pub max_layers: usize,
     pub track_count: u8,
+    /// Most tracks the looper can hold (`addTrack` limit).
+    pub track_capacity: u8,
     pub tracks: [TrackPlan; MAX_TRACKS],
 }
 
@@ -102,6 +104,8 @@ pub struct RestorePlan {
     /// Free-mode loop period. Ignored in Metronome mode (derived from the transport).
     pub period: Option<f64>,
     pub latency: u32,
+    /// Active tracks after the restore (empty ones included).
+    pub track_count: u8,
     pub tracks: [TrackPlan; MAX_TRACKS],
 }
 
@@ -360,13 +364,19 @@ impl Importer {
                 self.plan.transport.sample_rate, inv.transport.sample_rate
             )));
         }
+        if self.plan.track_count > inv.track_capacity {
+            return Err(TransferError::DoesNotFit(format!(
+                "the project has {} tracks but the looper holds at most {}",
+                self.plan.track_count, inv.track_capacity
+            )));
+        }
         for (t, tp) in self.plan.tracks.iter().enumerate() {
             let used = tp.layers > 0 || tp.redo > 0;
-            if used && t >= inv.track_count as usize {
+            if used && t >= inv.track_capacity as usize {
                 return Err(TransferError::DoesNotFit(format!(
-                    "the project uses track {} but the looper has {} tracks",
+                    "the project uses track {} but the looper holds at most {} tracks",
                     t + 1,
-                    inv.track_count
+                    inv.track_capacity
                 )));
             }
             if tp.layers as usize > inv.max_layers || tp.redo as usize > inv.max_layers {
@@ -498,6 +508,7 @@ pub struct ParkedLooper {
     pub latency: u32,
     pub max_frames: usize,
     pub max_layers: usize,
+    pub track_capacity: usize,
     pub tracks: Vec<ParkedTrack>,
 }
 
@@ -522,6 +533,7 @@ impl ParkedLooper {
             max_frames: self.max_frames,
             max_layers: self.max_layers,
             track_count: self.tracks.len().min(MAX_TRACKS) as u8,
+            track_capacity: self.track_capacity.min(MAX_TRACKS) as u8,
             tracks: tracks_plan,
         };
         let frames = inventory.content_frames();

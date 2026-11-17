@@ -20,6 +20,7 @@ Every command rejects with an `EngineError` (`{ kind, message? }`).
 | `close_midi_input` | `{ portId: string }` | `null` | Closes and forgets the port (no auto-reopen; saved). Also succeeds for a remembered port that is currently unplugged — that is how to cancel its auto-reopen. Error `invalid` (and no change) only if it is neither open nor remembered. |
 | `get_audio_settings` | none | `AudioSettings` | What is in effect (and on disk). |
 | `save_audio_settings` | none | `null` | Settings are auto-saved after every change; this forces a write. |
+| `request_mic_permission` | none | `MicPermission` | Current state; iOS shows the system prompt and the answer arrives as an `audioSession` event `{ kind: "micPermission" }`. macOS: `unknown` (denial shows up as the `silentInput` warning). |
 | `startup_warnings` | none | `{ kind, message }[]` | Warnings raised while loading the settings file at app start (`settingsProblem`, `deviceFallback` for saved MIDI ports). **Call once after subscribing to `engine://event`**: they were emitted before the webview listened. Not cleared by reading. |
 | `start_latency_calibration` | `{ apply: boolean }` | `null` | Loopback calibration (output → cable/speaker → input). Needs audio running with the looper output, transport **stopped**, monitoring **off** (else `invalid`); one at a time (`busy`). Plays 8 short chirps at −12 dBFS (~2 s). Result arrives as a `calibration` event ~2.5 s later. With `apply: true` a successful result is sent as `setInputLatency` (and saved). |
 | `looper_command` | `{ command: { type: "setInputLatency", frames } }` | `null` | **Changed:** now accepted while audio is stopped; the value is remembered, re-applied on every start, and saved. |
@@ -49,7 +50,8 @@ export interface ConfigRange {
 export interface StreamFormat { sampleRate: number; channels: number; sampleFormat: string; }
 
 export interface DeviceInfo {
-  id: string;                      // pass back as inputDevice/outputDevice (currently = name, D-008)
+  id: string;                      // stable id, e.g. "coreaudio:AppleUSBAudioEngine:ZOOM:H4n Pro:14200000:1,2";
+                                   // pass back as inputDevice/outputDevice (names are also accepted)
   name: string;
   host: string;                    // "CoreAudio"
   direction: DeviceDirection;
@@ -80,7 +82,10 @@ export type MissingDevicePolicy = "fail" | "useDefault";
 
 /** Every field optional on input; omitted = default. */
 export interface AudioConfig {
-  inputDevice: string | null;      // null = system default
+  inputDevice: string | null;      // DeviceInfo.id (or a name); null = system default
+  inputDeviceName: string | null;  // filled in by the engine; used if the id is gone (macOS USB UIDs
+                                   // change with the USB port), then the id is updated
+  outputDeviceName: string | null;
   outputDevice: string | null;     // null = system default
   missingDevice: MissingDevicePolicy;   // default "fail"
   sampleRate: number | null;       // null = negotiate (see below)
@@ -98,14 +103,15 @@ export interface AudioSettings {
 }
 
 export interface CaptureInfo {
-  deviceId: string;
+  deviceId: string;                // stable id (same as DeviceInfo.id)
+  deviceName: string;
   sampleRate: number;
   channels: number;                // all are metered; the route picks what the engine uses
   sampleFormat: string;
   route: InputRoute;               // as applied (may differ from requested; see configAdjusted)
   requestedBufferSize: number | null;
   blockFrames: number | null;      // actual frames per callback (null until the first)
-  reportedLatencyFrames: number | null;  // backend estimate; CPAL 0.16/CoreAudio = one buffer
+  reportedLatencyFrames: number | null;  // backend estimate; calibrate rather than treating it as authoritative
   discontinuities: number;         // xruns detected from callback timestamps
   lostFrames: number;
   nonFiniteSamples: number;        // NaN/Inf samples replaced by silence
@@ -120,7 +126,8 @@ export interface BridgeInfo {
 }
 
 export interface OutputInfo {
-  deviceId: string;
+  deviceId: string;                // stable id (same as DeviceInfo.id)
+  deviceName: string;
   sampleRate: number;
   channels: number;
   sampleFormat: string;
@@ -163,7 +170,32 @@ export interface EngineStatus {
   output: OutputInfo | null;
   looper: boolean;
   analysis: boolean;
-  audioConfig: AudioConfig;        // what start_input will use
+  audioConfig: AudioConfig;        // what start_input will use (devices pinned to ids once opened)
+  micPermission: MicPermission;
+}
+
+export type MicPermission = "granted" | "denied" | "undetermined" | "unknown"; // macOS: unknown
+
+export type RouteChangeReason =
+  | "unknown" | "newDeviceAvailable" | "oldDeviceUnavailable" | "categoryChange" | "override"
+  | "wakeFromSleep" | "noSuitableRouteForCategory" | "routeConfigurationChange";
+
+/** Platform audio-session notifications (iOS). */
+export type SessionEvent =
+  | { kind: "interruptionBegan" }                         // audio stopped, loops parked
+  | { kind: "interruptionEnded"; shouldResume: boolean }  // audio restarted if shouldResume
+  | { kind: "routeChanged"; reason: RouteChangeReason }   // streams rebuilt for device changes
+  | { kind: "mediaServicesReset" }
+  | { kind: "micPermission"; permission: MicPermission };
+
+export interface SessionPort { uid: string; name: string; portType: string; }
+
+/** What the iOS audio session granted (sent on every start; never on macOS). */
+export interface SessionInfo {
+  sampleRate: number; ioBufferFrames: number;
+  inputLatencyFrames: number; outputLatencyFrames: number;
+  inputChannels: number; maxInputChannels: number;
+  inputs: SessionPort[]; outputs: SessionPort[];
 }
 
 export interface ChannelLevel { rmsDb: number; peakDb: number; clipped: boolean; }
@@ -215,11 +247,13 @@ export interface AudioDiagnostics {
 | --- | --- | --- |
 | `level` | `LevelReading` | ~30 Hz while capturing. **Changed:** `rms/peak` = routed signal; new `channels`. |
 | `status` | `EngineStatus` | **Changed:** new fields above. |
-| `devicesChanged` | `DevicesChanged` | Audio device set changed (polled every 2 s). Re-call `list_audio_devices` if needed. |
+| `devicesChanged` | `DevicesChanged` | Audio device set changed (polled every 2 s by stable id; payload lists names). Re-call `list_audio_devices` if needed. |
 | `midiPorts` | `MidiPortInfo[]` | MIDI port list changed (polled every 2 s). |
 | `midi` | `MidiBatch` | MIDI received; ≤ 100 Hz batches while a port is open. |
 | `audioDiagnostics` | `AudioDiagnostics` | 1 Hz while audio runs. `output.bridge` carries the drift correction. |
 | `calibration` | `CalibrationOutcome` | A `start_latency_calibration` run finished or failed. |
+| `audioSession` | `SessionEvent` | iOS session notification, or the answer to `request_mic_permission` (all platforms). |
+| `audioSessionInfo` | `SessionInfo` | iOS: granted session values, on every audio start. |
 | `error` | `EngineError` | New kind `deviceLost`: an active device is no longer listed, or its stream stopped delivering callbacks for 1.5 s (checked every 2 s, from the first poll). Audio has been stopped and a `status` follows. |
 | `warning` | `{ kind, message }` | New kinds below. |
 
@@ -229,7 +263,8 @@ New `EngineError.kind` values: `deviceLost`, `midi`, `io` (settings file).
 New `warning` kinds: `deviceFallback` (saved/requested device or MIDI port
 missing, default used), `configAdjusted` (route or buffer size did not fit the
 device), `midiPortLost` (open port unplugged; reopens automatically),
-`settingsProblem` (settings file unreadable/unwritable).
+`settingsProblem` (settings file unreadable/unwritable), `audioRestarted` (streams
+were rebuilt after a device/route/default-device change; loops were kept).
 
 ## Sample-rate negotiation (`sampleRate: null`)
 

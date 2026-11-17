@@ -111,6 +111,7 @@ fn main() {
                         d.max_channels,
                         d.sample_rates
                     );
+                    println!("        id {}", d.id);
                     for c in &d.configs {
                         println!(
                             "        {} ch  {}-{} Hz  {}  buffer {:?}-{:?}",

@@ -14,7 +14,7 @@ manual procedure in `README.md`.
    project start lines them up to the sample, whatever the DAW does with
    metadata. The tempo and meter come from the SMF conductor track, or are
    typed in (they are in the file names and `project.json`).
-2. **Next, cheap and high value: a REAPER `.rpp` export.** It is a documented,
+2. **Implemented natively; UI/manual verification pending: REAPER `.rpp` export.** It is a documented,
    line-based text format. A generator that writes tracks, items pointing at
    the stems, tempo/meter, and loop region is about a day of work. It would
    make "open in REAPER" a single file.
@@ -84,7 +84,7 @@ Notes:
 | **WAV + SMF** | Universal audio + MIDI | Public specs | Works everywhere | **Done** |
 | **FLAC** | Lossless compressed audio, ~50-60 % of WAV | BSD (libFLAC), pure-Rust decoders exist (`claxon`, Apache-2.0, decode only) | Good for project storage size; every DAW above imports it except older GarageBand versions | **Later**, as an optional storage format for `audio/` (a pure-Rust encoder would need writing or `flacenc`, Apache-2.0, to be assessed). Not needed for interop. |
 | **CAF / AIFF** | Apple audio containers | Apple specs | Useful for Apple Loops metadata in GarageBand/Logic | Not needed: Apple apps read WAV. |
-| **REAPER `.rpp`** | REAPER project, plain text | Format documented by Cockos (RPP is a nested `<TAG ... >` text format; community documentation is thorough) | Exact tracks, items, tempo, loop region, track volume/mute/solo | **Recommended next.** Low cost; write-only export is enough. |
+| **REAPER `.rpp`** | REAPER project, plain text | Format documented by Cockos (RPP is a nested `<TAG ... >` text format; community documentation is thorough) | Exact tracks, items, tempo, loop region, track volume/mute/solo | Generator and project command implemented; React flow and manual REAPER verification pending. |
 | **DAWproject** | Open DAW session interchange (XML + audio in a ZIP), by Bitwig and PreSonus | MIT-licensed reference and XSD | Tracks, clips, tempo, automation, plug-in references | **Recommended after `.rpp`** when VoiceLoop has clips/automation. Not read by REAPER, Logic or GarageBand today, so it does not replace stems for these three. |
 | **AAF** | Avid/post-production interchange | Spec available, complex (structured storage) | Logic imports AAF; REAPER via extension; GarageBand no | **No.** High cost, poor fit for loops. |
 | **OMF** | Older AAF predecessor | Deprecated | Same as AAF, worse | **No.** |

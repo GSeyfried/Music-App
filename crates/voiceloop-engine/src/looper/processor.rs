@@ -28,8 +28,9 @@ use serde::{Deserialize, Serialize};
 
 use super::click::{accent_for, db_to_gain, ClickVoice};
 use super::pool::{self, LayerBuf, LayerRecycler, LayerSource};
-use super::transfer::{ParkedLooper, ParkedTrack, 
-    Chunk, Inventory, JobKind, LayerJob, LayerSlot, RestorePlan, TrackPlan, JOBS_PER_BLOCK, JOB_CAPACITY,
+use super::transfer::{
+    Chunk, Inventory, JobKind, LayerJob, LayerSlot, ParkedLooper, ParkedTrack, RestorePlan, TrackPlan, JOBS_PER_BLOCK,
+    JOB_CAPACITY,
 };
 use super::{LooperConfig, MAX_TRACKS};
 use crate::error::EngineError;
@@ -103,6 +104,15 @@ pub enum LooperCommand {
     Redo {
         track: u8,
     },
+    /// Activate one more track (preallocated, so no stream restart). It is
+    /// appended after the existing tracks. Rejected with `trackLimit` at capacity.
+    AddTrack,
+    /// Remove a track: its layers and redo history are released and later
+    /// tracks move down one index. Rejected while it records (`trackBusy`)
+    /// or when it is the only track (`trackLimit`).
+    RemoveTrack {
+        track: u8,
+    },
     /// Remove all layers on the track.
     Clear {
         track: u8,
@@ -112,6 +122,12 @@ pub enum LooperCommand {
     SetInputLatency {
         frames: u32,
     },
+    /// The input stream skipped or repeated time (bridge underrun, skip, or
+    /// input overrun). Takes recording now are flagged `timingSuspect`.
+    /// Internal: sent by the output callback through [`LooperCore::apply_now`],
+    /// never accepted from the UI.
+    #[serde(skip)]
+    InputDiscontinuity,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -130,6 +146,8 @@ pub enum RejectReason {
     InvalidTransport,
     LoopTooLong,
     TooShort,
+    /// No more tracks can be added, or the last track cannot be removed.
+    TrackLimit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -178,6 +196,9 @@ pub struct TrackSnapshot {
     pub redo_layers: u8,
     pub record_start: Option<i64>,
     pub record_end: Option<i64>,
+    /// An input discontinuity happened while this track recorded its newest
+    /// take: that take may be shifted in time. Cleared by the next take or Clear.
+    pub timing_suspect: bool,
 }
 
 impl TrackSnapshot {
@@ -191,6 +212,7 @@ impl TrackSnapshot {
         redo_layers: 0,
         record_start: None,
         record_end: None,
+        timing_suspect: false,
     };
 }
 
@@ -207,6 +229,7 @@ pub struct LooperSnapshot {
     pub transport: TransportState,
     pub tracks: [TrackSnapshot; MAX_TRACKS],
     pub track_count: u8,
+    pub track_capacity: u8,
     pub free_layers: u32,
     pub latency_frames: u32,
     pub frames_processed: u64,
@@ -301,6 +324,8 @@ struct Track {
     /// Smoothed gain actually applied; slews toward the audible target so
     /// mute, solo, level, and play/stop changes never click.
     level: f32,
+    /// See [`TrackSnapshot::timing_suspect`].
+    timing_suspect: bool,
 }
 
 impl Track {
@@ -346,7 +371,10 @@ pub struct LooperCore {
     count_in_total: u64,
     count_in_left: u64,
     master: Option<Master>,
+    /// Active tracks, in UI order.
     tracks: Vec<Track>,
+    /// Preallocated inactive tracks (empty, zero-layer).
+    spare: Vec<Track>,
     any_solo: bool,
     /// Largest per-frame change of a track's applied gain.
     gain_slew: f32,
@@ -405,8 +433,12 @@ impl LooperCore {
             transport = TransportState { sample_rate, ..TransportState::default() };
         }
 
-        let tracks = (0..config.max_tracks)
-            .map(|_| Track {
+        // Every track the looper can ever have is allocated now; `addTrack`
+        // only moves one from `spare` to `tracks` (both within capacity).
+        let mut tracks = Vec::with_capacity(config.track_capacity);
+        let mut spare = Vec::with_capacity(config.track_capacity);
+        for i in 0..config.track_capacity {
+            let tr = Track {
                 layers: Vec::with_capacity(config.max_layers_per_track),
                 redo: Vec::with_capacity(config.max_layers_per_track),
                 rec: None,
@@ -415,8 +447,14 @@ impl LooperCore {
                 solo: false,
                 gain: 1.0,
                 level: 1.0,
-            })
-            .collect();
+                timing_suspect: false,
+            };
+            if i < config.max_tracks {
+                tracks.push(tr);
+            } else {
+                spare.push(tr);
+            }
+        }
 
         let fade = config.fade_frames;
         let core = Self {
@@ -432,6 +470,7 @@ impl LooperCore {
             count_in_total: 0,
             count_in_left: 0,
             tracks,
+            spare,
             any_solo: false,
             gain_slew: if config.gain_smoothing_frames == 0 {
                 f32::INFINITY
@@ -781,6 +820,14 @@ impl LooperCore {
         }
     }
 
+    /// Apply a command immediately, from the thread that owns the core (the
+    /// output callback). Realtime-safe; a rejection becomes a notice.
+    pub fn apply_now(&mut self, cmd: LooperCommand) {
+        if let Err(reason) = self.apply(cmd) {
+            let _ = self.notice_tx.push(LooperNotice::Rejected { reason });
+        }
+    }
+
     fn apply(&mut self, cmd: LooperCommand) -> Result<(), RejectReason> {
         use LooperCommand as C;
         match cmd {
@@ -821,9 +868,19 @@ impl LooperCore {
             C::Undo { track } => self.undo(track as usize),
             C::Redo { track } => self.redo(track as usize),
             C::Clear { track } => self.clear(track as usize),
+            C::AddTrack => self.add_track(),
+            C::RemoveTrack { track } => self.remove_track(track as usize),
             C::ClearAll => {
                 for ti in 0..self.tracks.len() {
                     let _ = self.clear(ti);
+                }
+                Ok(())
+            }
+            C::InputDiscontinuity => {
+                for tr in &mut self.tracks {
+                    if tr.rec.is_some() {
+                        tr.timing_suspect = true;
+                    }
                 }
                 Ok(())
             }
@@ -1011,6 +1068,7 @@ impl LooperCore {
         Self::release_redo(&mut self.pool, tr);
         tr.layers.push(buf); // within capacity: checked by check_can_add_layer
         tr.rec = Some(rec);
+        tr.timing_suspect = false;
         tr.playing = true;
         Ok(())
     }
@@ -1133,10 +1191,57 @@ impl LooperCore {
         Ok(())
     }
 
+    fn add_track(&mut self) -> Result<(), RejectReason> {
+        let mut tr = self.spare.pop().ok_or(RejectReason::TrackLimit)?;
+        tr.rec = None;
+        tr.playing = true;
+        tr.muted = false;
+        tr.solo = false;
+        tr.gain = 1.0;
+        tr.level = if self.any_solo { 0.0 } else { 1.0 };
+        tr.timing_suspect = false;
+        self.tracks.push(tr); // within capacity: total tracks never exceed track_capacity
+        self.touch();
+        Ok(())
+    }
+
+    fn remove_track(&mut self, ti: usize) -> Result<(), RejectReason> {
+        let tr = self.tracks.get(ti).ok_or(RejectReason::NoSuchTrack)?;
+        if tr.rec.is_some() {
+            return Err(RejectReason::TrackBusy);
+        }
+        if self.tracks.len() == 1 {
+            return Err(RejectReason::TrackLimit);
+        }
+        self.clear(ti)?; // releases layers and redo history to the recycler
+        let tr = self.tracks.remove(ti); // moves at most MAX_TRACKS small structs; no allocation
+        self.spare.push(tr);
+        self.any_solo = self.tracks.iter().any(|t| t.solo);
+        if self.transport.mode == LoopMode::Free && !self.has_content() && !self.any_recording() {
+            self.master = None;
+        }
+        Ok(())
+    }
+
+    /// Make exactly `n` tracks active (clamped to 1..=capacity). Only used on
+    /// an empty looper (restore), so moved tracks hold no layers.
+    fn set_track_count(&mut self, n: usize) {
+        let n = n.clamp(1, self.tracks.len() + self.spare.len());
+        while self.tracks.len() < n {
+            let _ = self.add_track();
+        }
+        while self.tracks.len() > n {
+            if let Some(tr) = self.tracks.pop() {
+                self.spare.push(tr);
+            }
+        }
+    }
+
     fn clear(&mut self, ti: usize) -> Result<(), RejectReason> {
         let tr = self.tracks.get_mut(ti).ok_or(RejectReason::NoSuchTrack)?;
         self.epoch = self.epoch.wrapping_add(1);
         tr.rec = None;
+        tr.timing_suspect = false;
         tr.playing = true;
         while let Some(buf) = tr.layers.pop() {
             self.pool.release(buf);
@@ -1203,6 +1308,7 @@ impl LooperCore {
             max_frames: self.max_frames,
             max_layers: self.max_layers,
             track_count: self.tracks.len().min(MAX_TRACKS) as u8,
+            track_capacity: (self.tracks.len() + self.spare.len()).min(MAX_TRACKS) as u8,
             tracks,
         }
     }
@@ -1262,8 +1368,8 @@ impl LooperCore {
         let mut needed = 0usize;
         for (t, tp) in plan.tracks.iter().enumerate() {
             let n = tp.layers as usize + tp.redo as usize;
-            if n > 0 && t >= self.tracks.len() {
-                return Err(RejectReason::NoSuchTrack);
+            if n > 0 && t >= self.tracks.len() + self.spare.len() {
+                return Err(RejectReason::TrackLimit);
             }
             if tp.layers as usize > self.max_layers || tp.redo as usize > self.max_layers {
                 return Err(RejectReason::LayerLimit);
@@ -1273,9 +1379,15 @@ impl LooperCore {
             }
             needed += n;
         }
+        if plan.track_count as usize > self.tracks.len() + self.spare.len() {
+            return Err(RejectReason::TrackLimit);
+        }
         for ti in 0..self.tracks.len() {
             let _ = self.clear(ti);
         }
+        // Exactly the planned tracks, including empty ones (at least every used one).
+        let used = plan.tracks.iter().rposition(|tp| tp.layers > 0 || tp.redo > 0).map_or(0, |i| i + 1);
+        self.set_track_count((plan.track_count as usize).max(used));
         if self.pool.available() < needed {
             return Err(RejectReason::PoolExhausted);
         }
@@ -1344,6 +1456,7 @@ impl LooperCore {
             transport: self.transport,
             tracks,
             track_count: self.tracks.len().min(MAX_TRACKS) as u8,
+            track_capacity: (self.tracks.len() + self.spare.len()).min(MAX_TRACKS) as u8,
             free_layers: self.pool.available() as u32,
             latency_frames: self.latency as u32,
             frames_processed: self.frames_processed,
@@ -1369,6 +1482,7 @@ impl LooperCore {
             playing: tr.playing,
             gain: tr.gain,
             redo_layers: tr.redo.len().min(u8::MAX as usize) as u8,
+            timing_suspect: tr.timing_suspect,
             record_start: tr.rec.map(|r| r.start),
             record_end: tr.rec.and_then(|r| r.end),
         }
@@ -1417,6 +1531,7 @@ impl Drop for LooperCore {
             latency: self.latency as u32,
             max_frames: self.max_frames,
             max_layers: self.max_layers,
+            track_capacity: (self.tracks.len() + self.spare.len()).min(MAX_TRACKS),
             tracks,
         });
     }

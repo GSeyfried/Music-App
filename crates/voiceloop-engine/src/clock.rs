@@ -171,6 +171,13 @@ pub const STREAM_OK: u32 = 0;
 pub const STREAM_DEVICE_LOST: u32 = 1;
 /// Any other backend error.
 pub const STREAM_BACKEND_ERROR: u32 = 2;
+/// The backend moved the stream to another device or invalidated it (route
+/// change, sample-rate change): the streams must be rebuilt.
+pub const STREAM_DEVICE_CHANGED: u32 = 3;
+/// A buffer xrun reported by the backend (counted, not fatal).
+pub const STREAM_XRUN: u32 = 4;
+/// Realtime thread priority was refused (reported once, not fatal).
+pub const STREAM_REALTIME_DENIED: u32 = 5;
 
 /// Live facts about one stream, written by its callbacks.
 #[derive(Debug, Default)]
@@ -192,6 +199,8 @@ pub struct StreamStats {
     pub non_finite_samples: AtomicU64,
     /// First error reported by the stream's error callback (`STREAM_*`).
     pub error: AtomicU32,
+    /// The backend could not give the callback thread realtime priority.
+    pub realtime_denied: AtomicU32,
 }
 
 impl StreamStats {
@@ -214,6 +223,18 @@ impl StreamStats {
     pub fn on_discontinuity(&self, lost_frames: u64) {
         add_saturating(&self.discontinuities, 1);
         add_saturating(&self.lost_frames, lost_frames);
+    }
+
+    /// Dispatch a code from [`crate::devices::stream_error_code`]: xruns count
+    /// as discontinuities, a realtime-priority refusal sets a flag, everything
+    /// else is stored as the stream's (first) error. Realtime-safe.
+    #[inline]
+    pub fn on_stream_error(&self, code: u32) {
+        match code {
+            STREAM_XRUN => self.on_discontinuity(0),
+            STREAM_REALTIME_DENIED => self.realtime_denied.store(1, Ordering::Relaxed),
+            code => self.on_error(code),
+        }
     }
 
     /// Called from a CPAL error callback. Stores a code only: no formatting,
@@ -451,6 +472,18 @@ mod tests {
         assert!((255..=257).contains(&lost), "{lost}");
         // Timestamps that go backwards are ignored rather than counted.
         assert_eq!(d_obs(&mut d, block_ns), None);
+    }
+
+    #[test]
+    fn xruns_and_priority_refusals_are_not_fatal() {
+        let s = StreamStats::default();
+        s.on_stream_error(STREAM_XRUN);
+        s.on_stream_error(STREAM_REALTIME_DENIED);
+        assert_eq!(s.error_code(), None);
+        assert_eq!(s.discontinuities.load(Ordering::Relaxed), 1);
+        assert_eq!(s.realtime_denied.load(Ordering::Relaxed), 1);
+        s.on_stream_error(STREAM_DEVICE_CHANGED);
+        assert_eq!(s.error_code(), Some(STREAM_DEVICE_CHANGED));
     }
 
     #[test]

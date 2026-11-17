@@ -39,8 +39,15 @@ pub use processor::{
     TrackSnapshot, TrackState, LIMIT_KNEE, MAX_TRANSPORT_FRAME,
 };
 
-/// Hard upper bound on tracks (snapshot arrays are sized by this).
-pub const MAX_TRACKS: usize = 8;
+/// Hard upper bound on tracks (snapshot and plan arrays are sized by this).
+///
+/// Cost of the ceiling: a track owns no audio (every layer is a pool
+/// buffer), so a preallocated track is ~100 bytes plus two pointer vectors of
+/// `max_layers_per_track` entries. Snapshots grow by ~40 bytes per track.
+/// Per-sample work is one gain-slew step per active track plus the layer
+/// reads, which stay bounded by `pool_layers` whatever the track count.
+/// 16 is ample for "at least 10 usable tracks" and keeps snapshots small.
+pub const MAX_TRACKS: usize = 16;
 
 /// Realtime work bounds. Every layer is a pool buffer, so `pool_layers`
 /// bounds both the layers summed per output sample and the buffers released
@@ -59,8 +66,11 @@ pub const MAX_FADE_FRAMES: u32 = 4_800;
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LooperConfig {
-    /// Tracks available (1..=MAX_TRACKS). Milestone 1A UI shows 2.
+    /// Tracks active when audio starts (1..=`track_capacity`). More can be
+    /// added at runtime with `addTrack` (no stream restart).
     pub max_tracks: usize,
+    /// Tracks preallocated, i.e. the most `addTrack` can reach (1..=MAX_TRACKS).
+    pub track_capacity: usize,
     /// Longest loop, in seconds. Sets the size of every layer buffer.
     pub max_loop_seconds: f32,
     /// Layer buffers in the shared pool (base takes + overdubs across all tracks).
@@ -80,6 +90,7 @@ impl Default for LooperConfig {
     fn default() -> Self {
         Self {
             max_tracks: 2,
+            track_capacity: MAX_TRACKS,
             max_loop_seconds: 30.0,
             pool_layers: 8,
             max_layers_per_track: 6,
@@ -93,8 +104,11 @@ impl Default for LooperConfig {
 impl LooperConfig {
     /// Validate and return the layer length in frames at `sample_rate`.
     pub fn max_loop_frames(&self, sample_rate: u32) -> Result<usize, EngineError> {
-        if self.max_tracks == 0 || self.max_tracks > MAX_TRACKS {
-            return Err(EngineError::Invalid(format!("max_tracks must be 1..={MAX_TRACKS}")));
+        if self.track_capacity == 0 || self.track_capacity > MAX_TRACKS {
+            return Err(EngineError::Invalid(format!("track_capacity must be 1..={MAX_TRACKS}")));
+        }
+        if self.max_tracks == 0 || self.max_tracks > self.track_capacity {
+            return Err(EngineError::Invalid("max_tracks must be 1..=track_capacity".into()));
         }
         if self.pool_layers == 0 || self.pool_layers > u16::MAX as usize {
             return Err(EngineError::Invalid("pool_layers must be at least 1".into()));
@@ -164,6 +178,8 @@ pub struct LooperState {
     pub loop_phase: u64,
     pub transport: TransportState,
     pub tracks: Vec<TrackSnapshot>,
+    /// Most tracks this looper can run (preallocated): the `addTrack` ceiling.
+    pub max_tracks: u32,
     pub free_layers: u32,
     pub latency_frames: u32,
     pub sample_rate: u32,
@@ -188,6 +204,7 @@ impl LooperState {
             loop_phase: s.loop_phase,
             transport: s.transport,
             tracks: s.tracks[..n].to_vec(),
+            max_tracks: s.track_capacity as u32,
             free_layers: s.free_layers,
             latency_frames: s.latency_frames,
             sample_rate: s.transport.sample_rate,

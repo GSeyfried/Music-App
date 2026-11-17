@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -15,7 +15,7 @@ use serde::Serialize;
 use crate::analysis::AnalysisWorker;
 use crate::calibration::{self, CalibrationFailure, CalibrationResult, TestSignal};
 use crate::capture::{CaptureInfo, CaptureRequest, InputCapture, InputTaps, LooperFeed};
-use crate::clock::{self, DriftEstimator, StreamStats, STREAM_DEVICE_LOST};
+use crate::clock::{self, DriftEstimator, StreamStats, STREAM_DEVICE_CHANGED, STREAM_DEVICE_LOST};
 use crate::devices::{self, RateCaps, RateChoice};
 use crate::engine::{EngineEvent, EngineWarning};
 use crate::error::EngineError;
@@ -23,6 +23,7 @@ use crate::looper::io::{CalibrationJob, LooperPlayback, OutputInfo, OutputOption
 use crate::looper::{IoCounters, LooperConfig};
 use crate::midi_in::{MidiBatch, MidiManager, MidiPortInfo};
 use crate::model::DeviceDirection;
+use crate::platform::{self, MicPermission, SessionEvent};
 use crate::routing::{AudioConfig, MissingDevicePolicy};
 use crate::settings::{self, AudioSettings};
 use crate::transport::TransportState;
@@ -58,6 +59,16 @@ pub struct AudioDiagnostics {
 
 /// A stream whose callbacks stopped for this long is treated as lost.
 pub const STALL_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+/// What the control loop must do about a stream problem.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HardwareAction {
+    /// Stop audio and report the error.
+    Lost(EngineError),
+    /// Rebuild the streams with the same configuration (loops are parked and
+    /// restored by the looper's park/restore path). The text says why.
+    Restart(String),
+}
 
 /// Outcome of a loopback calibration (`calibration` event).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -100,6 +111,10 @@ pub struct Opened {
     /// Why the looper is not running, when it is not.
     pub looper_problem: Option<String>,
     pub warnings: Vec<EngineWarning>,
+    /// `config` with explicitly chosen devices pinned to the stable ids and
+    /// names actually opened (devices left at "system default" stay `None`;
+    /// a fallback keeps the wanted device so it is used again when it returns).
+    pub resolved: AudioConfig,
 }
 
 /// Open input (and, when the devices agree on a rate, the looper's output) for `config`.
@@ -109,14 +124,29 @@ pub fn open_audio(
     transport: TransportState,
 ) -> Result<Opened, EngineError> {
     let mut warnings = Vec::new();
-    let input = devices::find_device(DeviceDirection::Input, config.input_device.as_deref(), config.missing_device)?;
+    let input = devices::find_device(
+        DeviceDirection::Input,
+        config.input_device.as_deref(),
+        config.input_device_name.as_deref(),
+        config.missing_device,
+    )?;
     if let Some(missing) = &input.fell_back_from {
         warnings.push(EngineWarning::DeviceFallback(format!(
             "input device \"{missing}\" is not connected; using \"{}\"",
             input.name
         )));
     }
-    let output = devices::find_device(DeviceDirection::Output, config.output_device.as_deref(), config.missing_device);
+    let output = devices::find_device(
+        DeviceDirection::Output,
+        config.output_device.as_deref(),
+        config.output_device_name.as_deref(),
+        config.missing_device,
+    );
+    let output_pinned = output
+        .as_ref()
+        .ok()
+        .filter(|f| f.fell_back_from.is_none() && config.output_device.is_some())
+        .map(|f| (f.id.clone(), f.name.clone()));
     let output = match output {
         Ok(found) => {
             if let Some(missing) = &found.fell_back_from {
@@ -134,6 +164,8 @@ pub fn open_audio(
         Err(e) => Err(e),
     };
 
+    // On iOS the session sets the IO buffer; CPAL streams must use the default.
+    let cpal_buffer = if platform::SESSION_MANAGES_BUFFER { None } else { config.buffer_size };
     let counters = Arc::new(IoCounters::default());
     // Shared so the output bridge can read the input clock anchor.
     let input_stats = Arc::new(StreamStats::default());
@@ -152,7 +184,7 @@ pub fn open_audio(
                         let capacity = ((r / 2) as usize).max(4096);
                         let (tx, rx) = rtrb::RingBuffer::<f32>::new(capacity);
                         let options = OutputOptions {
-                            buffer_size: config.buffer_size,
+                            buffer_size: cpal_buffer,
                             route: config.output_route,
                             monitor: config.monitor,
                             input_clock: Some(input_stats.clone()),
@@ -196,7 +228,7 @@ pub fn open_audio(
         Ok(CaptureRequest {
             device: input.device.clone(),
             config: cfg,
-            buffer_size: config.buffer_size,
+            buffer_size: cpal_buffer,
             route: config.input_route,
             stats: Some(input_stats.clone()),
         })
@@ -233,7 +265,7 @@ pub fn open_audio(
         }
     }
     let granted = [Some(capture.info.requested_buffer_size), playback.as_ref().map(|p| p.info.requested_buffer_size)];
-    if config.buffer_size.is_some() && granted.iter().flatten().any(|&g| g != config.buffer_size) {
+    if cpal_buffer.is_some() && granted.iter().flatten().any(|&g| g != config.buffer_size) {
         warnings.push(EngineWarning::ConfigAdjusted(format!(
             "buffer size {} frames is outside a device's range; using input {:?}, output {:?}",
             config.buffer_size.unwrap_or_default(),
@@ -241,7 +273,16 @@ pub fn open_audio(
             playback.as_ref().and_then(|p| p.info.requested_buffer_size)
         )));
     }
-    Ok(Opened { capture, playback, analysis_rx, analysis_dropped, looper_problem, warnings })
+    let mut resolved = config.clone();
+    if config.input_device.is_some() && input.fell_back_from.is_none() {
+        resolved.input_device = Some(input.id.clone());
+        resolved.input_device_name = Some(input.name.clone());
+    }
+    if let Some((id, name)) = output_pinned {
+        resolved.output_device = Some(id);
+        resolved.output_device_name = Some(name);
+    }
+    Ok(Opened { capture, playback, analysis_rx, analysis_dropped, looper_problem, warnings, resolved })
 }
 
 /// Hardware state owned by the control thread.
@@ -253,7 +294,11 @@ pub struct Hardware {
     pub input_latency: Option<u32>,
     pub midi: MidiManager,
     midi_events: Vec<crate::midi_in::MidiEvent>,
-    device_names: Option<Vec<String>>,
+    device_ids: Option<Vec<String>>,
+    /// Names for device ids seen so far (looked up once per id; probing is slow).
+    device_labels: Vec<(String, String)>,
+    /// System default (input, output) ids when audio last started.
+    defaults_at_start: Option<(Option<String>, Option<String>)>,
     last_poll: Instant,
     last_diagnostics: Instant,
     drift: DriftEstimator,
@@ -263,23 +308,47 @@ pub struct Hardware {
     /// (the webview is not listening yet when the Tauri setup hook runs).
     startup_warnings: Vec<EngineWarning>,
     calibration: Option<PendingCalibration>,
+    // Platform audio session (iOS AVAudioSession; no-ops elsewhere).
+    session_tx: mpsc::Sender<SessionEvent>,
+    session_rx: mpsc::Receiver<SessionEvent>,
+    _observers: platform::Observers,
+    /// Audio was stopped by a session interruption and may resume when it ends.
+    interrupted: bool,
+}
+
+/// What the control loop should do about a platform session event.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionAction {
+    /// Stop audio (interruption began); loops are parked.
+    Stop,
+    /// Start audio again with the current config (interruption ended).
+    Start,
+    /// Rebuild the streams (route change, media-services reset).
+    Restart(String),
 }
 
 impl Default for Hardware {
     fn default() -> Self {
+        let (session_tx, session_rx) = mpsc::channel();
         Self {
             config: AudioConfig::default(),
             settings_path: None,
             input_latency: None,
             midi: MidiManager::default(),
             midi_events: Vec::with_capacity(256),
-            device_names: None,
+            device_ids: None,
+            device_labels: Vec::new(),
+            defaults_at_start: None,
             last_poll: Instant::now(),
             last_diagnostics: Instant::now(),
             drift: DriftEstimator::default(),
             audio_started_ns: 0,
             startup_warnings: Vec::new(),
             calibration: None,
+            session_tx: session_tx.clone(),
+            session_rx,
+            _observers: platform::observe(session_tx),
+            interrupted: false,
         }
     }
 }
@@ -418,9 +487,43 @@ impl Hardware {
         latency
     }
 
+    /// Ask the platform for record permission; the answer arrives as an
+    /// `audioSession` event (`micPermission`). Returns the current state.
+    pub fn request_mic_permission(&self) -> MicPermission {
+        platform::request_mic_permission(self.session_tx.clone());
+        platform::mic_permission()
+    }
+
+    /// Forward platform session events and decide what audio must do.
+    pub fn poll_session(&mut self, running: bool, sink: Sink<'_>) -> Option<SessionAction> {
+        let mut action = None;
+        while let Ok(event) = self.session_rx.try_recv() {
+            sink(EngineEvent::AudioSession(event.clone()));
+            match event {
+                SessionEvent::InterruptionBegan if running => {
+                    self.interrupted = true;
+                    action = Some(SessionAction::Stop);
+                }
+                SessionEvent::InterruptionEnded { should_resume } if self.interrupted => {
+                    self.interrupted = false;
+                    action = should_resume.then_some(SessionAction::Start);
+                }
+                SessionEvent::RouteChanged { reason } if running && reason.needs_restart() => {
+                    action = Some(SessionAction::Restart(format!("audio route changed ({reason:?})")));
+                }
+                SessionEvent::MediaServicesReset if running => {
+                    action = Some(SessionAction::Restart("the system media services were reset".into()));
+                }
+                _ => {}
+            }
+        }
+        action
+    }
+
     /// Restart drift measurement (new streams).
     pub fn reset_clock(&mut self) {
         self.audio_started_ns = clock::host_now_ns();
+        self.defaults_at_start = Some(devices::default_ids());
         self.drift.reset();
         self.last_diagnostics = Instant::now();
     }
@@ -435,22 +538,20 @@ impl Hardware {
     }
 
     /// Error codes stored by the stream error callbacks, formatted here.
-    pub fn stream_failure(capture: Option<&InputCapture>, playback: Option<&LooperPlayback>) -> Option<EngineError> {
-        let describe = |code: u32, what: &str, device: &str| {
-            if code == STREAM_DEVICE_LOST {
-                EngineError::DeviceLost(format!("{what} device \"{device}\""))
-            } else {
-                EngineError::Backend(format!("{what} stream on \"{device}\" reported an error"))
-            }
+    pub fn stream_failure(capture: Option<&InputCapture>, playback: Option<&LooperPlayback>) -> Option<HardwareAction> {
+        let describe = |code: u32, what: &str, device: &str| match code {
+            STREAM_DEVICE_LOST => HardwareAction::Lost(EngineError::DeviceLost(format!("{what} device \"{device}\""))),
+            STREAM_DEVICE_CHANGED => HardwareAction::Restart(format!("the {what} device \"{device}\" changed")),
+            _ => HardwareAction::Lost(EngineError::Backend(format!("{what} stream on \"{device}\" reported an error"))),
         };
         if let Some(c) = capture {
             if let Some(code) = c.stats.error_code() {
-                return Some(describe(code, "input", &c.info.device_id));
+                return Some(describe(code, "input", &c.info.device_name));
             }
         }
         if let Some(p) = playback {
             if let Some(code) = p.stats.error_code() {
-                return Some(describe(code, "output", &p.info.device_id));
+                return Some(describe(code, "output", &p.info.device_name));
             }
         }
         None
@@ -463,18 +564,28 @@ impl Hardware {
         capture: Option<&InputCapture>,
         playback: Option<&LooperPlayback>,
         sink: Sink<'_>,
-    ) -> Option<EngineError> {
+    ) -> Option<HardwareAction> {
         if self.last_poll.elapsed() < HOTPLUG_POLL_INTERVAL {
             return None;
         }
         self.last_poll = Instant::now();
         let mut lost = None;
-        if let Ok(names) = devices::device_names() {
-            if let Some(previous) = &self.device_names {
-                if previous != &names {
-                    let added = names.iter().filter(|n| !previous.contains(n)).cloned().collect();
-                    let removed: Vec<String> = previous.iter().filter(|n| !names.contains(n)).cloned().collect();
-                    sink(EngineEvent::DevicesChanged(DevicesChanged { names: names.clone(), added, removed }));
+        if let Ok(ids) = devices::device_ids() {
+            for id in &ids {
+                if !self.device_labels.iter().any(|(known, _)| known == id) {
+                    let name = devices::name_for_id(id).unwrap_or_else(|| id.clone());
+                    self.device_labels.push((id.clone(), name));
+                }
+            }
+            let label = |id: &String| {
+                self.device_labels.iter().find(|(k, _)| k == id).map(|(_, n)| n.clone()).unwrap_or_else(|| id.clone())
+            };
+            if let Some(previous) = &self.device_ids {
+                if previous != &ids {
+                    let added = ids.iter().filter(|n| !previous.contains(n)).map(label).collect();
+                    let removed: Vec<String> = previous.iter().filter(|n| !ids.contains(n)).map(label).collect();
+                    let names = ids.iter().map(label).collect();
+                    sink(EngineEvent::DevicesChanged(DevicesChanged { names, added, removed }));
                 }
             }
             // Every poll checks the active devices against the current list, so
@@ -484,21 +595,37 @@ impl Hardware {
                 .into_iter()
                 .chain(playback.map(|p| p.info.device_id.as_str()))
                 .collect();
-            if let Some(device) = missing_active(&names, &active) {
-                lost = Some(EngineError::DeviceLost(format!("\"{device}\" was disconnected")));
+            if let Some(device) = missing_active(&ids, &active) {
+                let name = label(&device.to_string());
+                lost = Some(HardwareAction::Lost(EngineError::DeviceLost(format!("\"{name}\" was disconnected"))));
             }
-            self.device_names = Some(names);
+            self.device_ids = Some(ids);
+        }
+        // Audio opened on "system default" follows a change of the default
+        // (CoreAudio-side equivalent of an iOS route change): restart.
+        if lost.is_none() && (capture.is_some() || playback.is_some()) {
+            let now = devices::default_ids();
+            if let Some(then) = &self.defaults_at_start {
+                let input_moved = self.config.input_device.is_none() && capture.is_some() && now.0 != then.0;
+                let output_moved = self.config.output_device.is_none() && playback.is_some() && now.1 != then.1;
+                if input_moved || output_moved {
+                    let which = if input_moved { "input" } else { "output" };
+                    lost = Some(HardwareAction::Restart(format!("the system default {which} device changed")));
+                }
+            }
         }
         // A stream whose callbacks stopped (device gone without an error, or a
         // device that lost its input/output direction but kept its name).
         let now = clock::host_now_ns();
         let streams = capture
-            .map(|c| (c.stats.anchor.read(), "input", &c.info.device_id))
+            .map(|c| (c.stats.anchor.read(), "input", &c.info.device_name))
             .into_iter()
-            .chain(playback.map(|p| (p.stats.anchor.read(), "output", &p.info.device_id)));
+            .chain(playback.map(|p| (p.stats.anchor.read(), "output", &p.info.device_name)));
         for (anchor, what, device) in streams {
             if lost.is_none() && stalled(anchor.map(|a| a.host_ns), now, self.audio_started_ns) {
-                lost = Some(EngineError::DeviceLost(format!("{what} device \"{device}\" stopped delivering audio")));
+                lost = Some(HardwareAction::Lost(EngineError::DeviceLost(format!(
+                    "{what} device \"{device}\" stopped delivering audio"
+                ))));
             }
         }
         let midi = self.midi.poll_hotplug();
@@ -599,6 +726,29 @@ mod tests {
         );
         let w = EngineEvent::Warning(EngineWarning::DeviceFallback("x".into()));
         assert_eq!(serde_json::to_value(w).unwrap()["payload"]["kind"], "deviceFallback");
+    }
+
+    #[test]
+    fn session_events_stop_resume_and_restart_audio() {
+        let mut hw = Hardware::default();
+        let tx = hw.session_tx.clone();
+        let sink = |_: EngineEvent| {};
+        tx.send(SessionEvent::InterruptionBegan).unwrap();
+        assert_eq!(hw.poll_session(true, &sink), Some(SessionAction::Stop));
+        tx.send(SessionEvent::InterruptionEnded { should_resume: true }).unwrap();
+        assert_eq!(hw.poll_session(false, &sink), Some(SessionAction::Start));
+        tx.send(SessionEvent::InterruptionEnded { should_resume: true }).unwrap();
+        assert_eq!(hw.poll_session(false, &sink), None, "nothing to resume when we were not interrupted");
+        tx.send(SessionEvent::RouteChanged { reason: platform::RouteChangeReason::OldDeviceUnavailable }).unwrap();
+        assert!(matches!(hw.poll_session(true, &sink), Some(SessionAction::Restart(_))));
+        tx.send(SessionEvent::RouteChanged { reason: platform::RouteChangeReason::CategoryChange }).unwrap();
+        assert_eq!(hw.poll_session(true, &sink), None);
+        tx.send(SessionEvent::MediaServicesReset).unwrap();
+        assert_eq!(hw.poll_session(false, &sink), None, "nothing to restart when stopped");
+        let events = std::cell::RefCell::new(0);
+        tx.send(SessionEvent::MicPermission { permission: MicPermission::Granted }).unwrap();
+        assert_eq!(hw.poll_session(false, &|_| *events.borrow_mut() += 1), None);
+        assert_eq!(*events.borrow(), 1, "every session event is forwarded");
     }
 
     #[test]

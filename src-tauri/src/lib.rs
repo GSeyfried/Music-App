@@ -7,6 +7,7 @@ use tauri::{Emitter, Manager, RunEvent, State};
 use voiceloop_engine::devices::DeviceList;
 use voiceloop_engine::midi_in::MidiPortInfo;
 use voiceloop_engine::model::AudioDevice;
+use voiceloop_engine::platform::MicPermission;
 use voiceloop_engine::{
     AnalysisConfig, AudioConfig, AudioSettings, Engine, EngineError, EngineStatus, EngineWarning, InputRoute,
     LooperCommand, MonitorConfig, OutputRoute,
@@ -34,6 +35,17 @@ fn stop_input(engine: State<'_, Engine>) -> Result<EngineStatus, EngineError> {
 #[tauri::command]
 fn looper_command(engine: State<'_, Engine>, command: LooperCommand) -> Result<(), EngineError> {
     engine.looper(command)
+}
+
+/// Looper limits; omitted fields keep their current value. A higher
+/// `maxTracks` adds tracks immediately while audio runs; other fields apply
+/// at the next audio start. Returns the resulting config.
+#[tauri::command]
+fn set_looper_config(
+    engine: State<'_, Engine>,
+    config: serde_json::Value,
+) -> Result<voiceloop_engine::LooperConfig, EngineError> {
+    engine.patch_looper_config(config)
 }
 
 /// Pitch / note / onset analysis settings; any omitted field keeps its default.
@@ -106,6 +118,13 @@ fn save_audio_settings(engine: State<'_, Engine>) -> Result<(), EngineError> {
 #[tauri::command]
 fn start_latency_calibration(engine: State<'_, Engine>, apply: bool) -> Result<(), EngineError> {
     engine.start_latency_calibration(apply)
+}
+
+/// Microphone permission (iOS shows the prompt). Returns the current state;
+/// the answer arrives as an `audioSession` event of kind `micPermission`.
+#[tauri::command]
+fn request_mic_permission(engine: State<'_, Engine>) -> Result<MicPermission, EngineError> {
+    engine.request_mic_permission()
 }
 
 /// Warnings raised while loading settings at startup (emitted before the webview listened).
@@ -248,6 +267,8 @@ fn practice_import_library(engine: State<'_, Engine>, library: PracticeLibrary, 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        // Open/save pickers for projects and exports; paths are passed to `project_command`.
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle().clone();
             let engine = Engine::start(Box::new(move |event| {
@@ -281,7 +302,9 @@ pub fn run() {
             save_audio_settings,
             start_latency_calibration,
             startup_warnings,
+            request_mic_permission,
             project_command,
+            set_looper_config,
             find_recovery,
             discard_recovery,
             practice_start_reference,

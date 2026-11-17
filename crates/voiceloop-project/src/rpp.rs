@@ -124,7 +124,13 @@ mod tests {
                     muted: false,
                     solo: true,
                 },
-                RppTrack { name: "Say \"hi\"".into(), file: "Audio/b.wav".into(), volume: 0.5, muted: true, solo: false },
+                RppTrack {
+                    name: "Say \"hi\"".into(),
+                    file: "Audio/b.wav".into(),
+                    volume: 0.5,
+                    muted: true,
+                    solo: false,
+                },
             ],
         }
     }

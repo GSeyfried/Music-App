@@ -26,6 +26,7 @@
 //! - [`settings`]  persisted hardware settings
 //! - [`practice`]  Practice Lab: reference/attempt takes, input→transport clock mapping, scoring
 //! - [`hardware`]  control-thread side of devices, MIDI, diagnostics
+//! - [`platform`]  audio session (iOS AVAudioSession; desktop no-ops)
 //! - [`calibration`] loopback latency test signal and detector
 
 pub mod analysis;
@@ -40,6 +41,7 @@ pub mod looper;
 pub mod meter;
 pub mod midi_in;
 pub mod model;
+pub mod platform;
 pub mod practice;
 pub mod project;
 pub mod routing;

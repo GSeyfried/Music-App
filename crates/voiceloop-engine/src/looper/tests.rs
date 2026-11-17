@@ -14,6 +14,7 @@ const BLOCK: usize = 64;
 fn config(fade: u32) -> LooperConfig {
     LooperConfig {
         max_tracks: 2,
+        track_capacity: MAX_TRACKS,
         max_loop_seconds: 10.0,
         pool_layers: 6,
         max_layers_per_track: 4,
@@ -24,9 +25,7 @@ fn config(fade: u32) -> LooperConfig {
 }
 
 fn transport(sample_rate: u32, mode: LoopMode) -> TransportState {
-    let mut t = TransportState::default();
-    t.sample_rate = sample_rate;
-    t.mode = mode;
+    let mut t = TransportState { sample_rate, mode, ..Default::default() };
     t.metronome.enabled = false;
     t.metronome.count_in_bars = 0;
     t
@@ -1012,6 +1011,7 @@ fn plan_of(c: &Captured) -> (RestorePlan, Vec<(u8, LayerSlot, Vec<f32>)>) {
         transport: c.inventory.transport,
         period: c.inventory.period,
         latency: c.inventory.latency,
+        track_count: c.inventory.track_count,
         tracks,
     };
     (plan, layers)
@@ -1209,8 +1209,16 @@ fn an_empty_or_loading_looper_parks_nothing_useful() {
     let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
     let mut tracks = [super::transfer::TrackPlan::EMPTY; MAX_TRACKS];
     tracks[0].layers = 1;
-    let plan = RestorePlan { transport: transport(1_000, LoopMode::Free), period: Some(100.0), latency: 0, tracks };
-    r.h.jobs.push(super::transfer::LayerJob { ticket: 0, kind: super::transfer::JobKind::Restore(plan, None) }).unwrap();
+    let plan = RestorePlan {
+        transport: transport(1_000, LoopMode::Free),
+        period: Some(100.0),
+        latency: 0,
+        track_count: 2,
+        tracks,
+    };
+    r.h.jobs
+        .push(super::transfer::LayerJob { ticket: 0, kind: super::transfer::JobKind::Restore(plan, None) })
+        .unwrap();
     r.silence(1);
     let Rig { core, mut h, .. } = r;
     let rx = h.parked.take().unwrap();
@@ -1228,4 +1236,125 @@ fn snapshots_carry_a_content_epoch() {
     r.send(C::Record { track: 0 });
     r.silence(100);
     assert_ne!(r.snap().epoch, e0);
+}
+
+// ---- input discontinuities (hardware-io bridge hook) ------------------------------
+
+#[test]
+fn an_input_discontinuity_flags_only_takes_in_progress() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.silence(1_000);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(10);
+    r.core.apply_now(C::InputDiscontinuity); // nothing is recording: no flag
+    assert!(!r.snap().tracks[0].timing_suspect);
+
+    r.send(C::Overdub { track: 0 });
+    r.silence(100);
+    r.core.apply_now(C::InputDiscontinuity);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(100);
+    let s = r.snap();
+    assert!(s.tracks[0].timing_suspect && !s.tracks[1].timing_suspect);
+    let json = serde_json::to_value(s.tracks[0]).unwrap();
+    assert_eq!(json["timingSuspect"], true);
+
+    r.send(C::Overdub { track: 0 }); // the next take starts clean
+    r.silence(10);
+    assert!(!r.snap().tracks[0].timing_suspect);
+    assert!(serde_json::from_str::<LooperCommand>(r#"{"type":"inputDiscontinuity"}"#).is_err(), "internal only");
+}
+
+// ---- adding and removing tracks at runtime -----------------------------------------
+
+#[test]
+fn tracks_are_added_and_removed_without_a_restart() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    assert_eq!((r.snap().track_count, r.snap().track_capacity), (2, MAX_TRACKS as u8));
+    for _ in 2..MAX_TRACKS {
+        r.send(C::AddTrack);
+    }
+    r.silence(1);
+    assert_eq!(r.snap().track_count, MAX_TRACKS as u8);
+    r.send(C::AddTrack);
+    r.silence(1);
+    assert_eq!(r.notices(), vec![rejected(RejectReason::TrackLimit)]);
+
+    // The last track records and plays like any other.
+    let last = (MAX_TRACKS - 1) as u8;
+    r.send(C::Record { track: last });
+    r.run(1_000, impulse(250));
+    r.send(C::StopRecording { track: last });
+    r.send(C::Record { track: 1 });
+    r.run(1_000, impulse(1_500));
+    r.silence(1_000);
+    assert_eq!(nonzero_from(&r.out, 2_000), vec![2_250, 2_500]);
+
+    // Removing track 0 shifts later tracks down; removing one with content frees its layers.
+    let free = r.snap().free_layers;
+    r.send(C::RemoveTrack { track: 0 });
+    r.silence(1);
+    let s = r.snap();
+    assert_eq!(s.track_count, MAX_TRACKS as u8 - 1);
+    assert_eq!(s.tracks[0].layers, 1, "old track 1 is now track 0");
+    r.send(C::RemoveTrack { track: last - 1 });
+    r.silence(1);
+    assert_eq!(r.snap().free_layers, free + 1, "its layer went back to the pool");
+    let b = r.out.len();
+    r.silence(1_000);
+    assert_eq!(nonzero_from(&r.out, b).len(), 1, "only the remaining loop plays");
+
+    // A recording track cannot be removed; the last track cannot be removed.
+    r.send(C::Overdub { track: 0 });
+    r.send(C::RemoveTrack { track: 0 });
+    r.silence(1);
+    assert_eq!(r.notices(), vec![rejected(RejectReason::TrackBusy)]);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(10);
+    while r.snap().track_count > 1 {
+        r.send(C::RemoveTrack { track: 0 });
+        r.silence(1);
+    }
+    r.send(C::RemoveTrack { track: 0 });
+    r.silence(1);
+    assert!(r.notices().contains(&rejected(RejectReason::TrackLimit)));
+    let s = r.snap();
+    assert_eq!(s.free_layers + s.tracks[0].layers as u32, 6, "every removed track's buffers are back");
+
+    let state = LooperState::from_snapshot(&r.snap(), &IoCounters::default(), 0);
+    let json = serde_json::to_value(&state).unwrap();
+    assert_eq!(json["maxTracks"], MAX_TRACKS as u64, "the frontend's name for the ceiling");
+    let cmd: LooperCommand = serde_json::from_str(r#"{"type":"removeTrack","track":3}"#).unwrap();
+    assert_eq!(cmd, C::RemoveTrack { track: 3 });
+    assert_eq!(serde_json::from_str::<LooperCommand>(r#"{"type":"addTrack"}"#).unwrap(), C::AddTrack);
+}
+
+#[test]
+fn restore_recreates_the_track_count_including_empty_tracks() {
+    let mut a = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    for _ in 0..4 {
+        a.send(C::AddTrack);
+    }
+    a.send(C::Record { track: 4 });
+    a.run(1_000, impulse(10));
+    a.send(C::Stop);
+    a.silence(10);
+    let captured = export(&mut a).unwrap();
+    assert_eq!(captured.inventory.track_count, 6);
+    let mut b = Rig::new(config(0), transport(1_000, LoopMode::Free)); // starts with 2
+    import(&mut b, &captured).unwrap();
+    let s = b.snap();
+    assert_eq!((s.track_count, s.tracks[4].layers), (6, 1));
+    // More tracks than this looper can hold does not fit.
+    let mut small = Rig::new(LooperConfig { track_capacity: 4, ..config(0) }, transport(1_000, LoopMode::Free));
+    assert!(matches!(import(&mut small, &captured), Err(TransferError::DoesNotFit(_))));
+}
+
+#[test]
+fn track_capacity_is_validated() {
+    let ok = config(0);
+    assert!(LooperConfig { track_capacity: MAX_TRACKS + 1, ..ok }.max_loop_frames(1_000).is_err());
+    assert!(LooperConfig { track_capacity: 4, max_tracks: 5, ..ok }.max_loop_frames(1_000).is_err());
+    assert!(LooperConfig { track_capacity: 4, max_tracks: 4, ..ok }.max_loop_frames(1_000).is_ok());
 }

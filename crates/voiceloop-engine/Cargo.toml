@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-cpal = "0.16"
+cpal = "0.18.2"
 midir = "0.11.1"
 rtrb = "0.3"
 serde = { workspace = true }
@@ -15,6 +15,14 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 voiceloop-analysis = { path = "../voiceloop-analysis" }
 voiceloop-project = { path = "../voiceloop-project" }
+
+# iOS audio session (platform/ios.rs). All already in the tree through CPAL;
+# Zlib / MIT / Apache-2.0 (objc2 project).
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSError", "NSDictionary", "NSNotification", "NSOperation", "NSValue", "NSObject", "block2"] }
+objc2-avf-audio = { version = "0.3", features = ["AVAudioSession", "AVAudioSessionTypes", "AVAudioSessionRoute", "AVAudioApplication", "block2"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -39,7 +39,9 @@ pub const MONITOR_SLEW_FRAMES: f32 = 512.0;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutputInfo {
+    /// Stable device id (`DeviceId` text), as accepted by `inputDevice`/`outputDevice`.
     pub device_id: String,
+    pub device_name: String,
     pub sample_rate: u32,
     pub channels: u16,
     pub sample_format: String,
@@ -175,7 +177,7 @@ impl LooperPlayback {
         let (buffer, _) = devices::buffer_size_for(options.buffer_size, supported.buffer_size());
         let mut config: cpal::StreamConfig = supported.into();
         config.buffer_size = buffer;
-        let sample_rate = config.sample_rate.0;
+        let sample_rate = config.sample_rate;
         let (core, handles) = LooperCore::new(looper, transport, sample_rate)?;
         let memory_bytes = looper.memory_bytes(sample_rate);
         let (route, _) = options.route.resolve(config.channels);
@@ -219,7 +221,8 @@ impl LooperPlayback {
             handles,
             counters,
             info: OutputInfo {
-                device_id: devices::name_of(&device),
+                device_id: devices::id_of(&device),
+                device_name: devices::name_of(&device),
                 sample_rate,
                 channels: config.channels,
                 sample_format: sample_format.to_string(),
@@ -350,7 +353,7 @@ where
         monitor,
     } = parts;
     let channels = (config.channels as usize).max(1);
-    let sample_rate = config.sample_rate.0;
+    let sample_rate = config.sample_rate;
     let mut bridge = InputBridge::new(sample_rate, input_rx.buffer().capacity());
     counters.input_cushion_frames.store(bridge.cushion() as u64, std::sync::atomic::Ordering::Relaxed);
     // Scratch buffers are allocated here, before the callback exists.
@@ -365,15 +368,15 @@ where
     let err_stats = stats.clone();
 
     let stream = device.build_output_stream(
-        config,
+        *config,
         move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
             // REALTIME: no allocation, locks, blocking, logging, or I/O below.
             let frames = data.len() / channels;
             let ts = info.timestamp();
             let origin = *origin.get_or_insert(ts.callback);
-            let latency_ns = ts.playback.duration_since(&ts.callback).map(|d| d.as_nanos() as u64);
+            let latency_ns = ts.playback.checked_duration_since(ts.callback).map(|d| d.as_nanos() as u64);
             let host_start = clock::host_now_ns();
-            if let Some(cb) = ts.callback.duration_since(&origin) {
+            if let Some(cb) = ts.callback.checked_duration_since(origin) {
                 if let Some(lost) = xrun.observe(cb.as_nanos() as u64, frames, sample_rate) {
                     stats.on_discontinuity(lost);
                 }
@@ -404,6 +407,9 @@ where
                 let n = (frames - done).min(MAX_BLOCK);
 
                 let report = bridge.fill(&mut input_rx, &mut in_buf[..n]);
+                if report.discontinuity {
+                    core.apply_now(super::LooperCommand::InputDiscontinuity); // flags takes in progress
+                }
                 add_saturating(&counters.drift_dropped_frames, report.dropped as u64);
                 if report.underrun > 0 {
                     add_saturating(&counters.input_underrun_frames, report.underrun as u64);
@@ -445,7 +451,7 @@ where
         },
         move |err| {
             // May run on the realtime thread: store a code only (formatted on the control thread).
-            err_stats.on_error(devices::stream_error_code(err));
+            err_stats.on_stream_error(devices::stream_error_code(err));
         },
         None,
     )?;
