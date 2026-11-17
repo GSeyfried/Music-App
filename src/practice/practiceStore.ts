@@ -80,6 +80,8 @@ export class PracticeStore {
     lastAttemptOptions: {},
   };
   private listeners = new Set<() => void>();
+  /** Increments on every practiceState event (orders command replies against events). */
+  private stateSeq = 0;
   readonly live: PracticeLive = { trace: [], progress: null, anchor: null, progressAt: 0 };
 
   constructor(
@@ -112,6 +114,7 @@ export class PracticeStore {
         const prev = this.snapshot.status;
         // A new take starts with a fresh trace.
         if (e.payload.phase !== "idle" && (!prev || prev.phase === "idle")) this.resetLive();
+        this.stateSeq += 1;
         this.set({ status: e.payload });
         if (e.payload.references !== this.snapshot.references.length) void this.loadReferences();
         return;
@@ -166,6 +169,19 @@ export class PracticeStore {
     }
   }
 
+  /**
+   * Run a command that returns a status. The reply can arrive after newer
+   * practiceState events (the take may already have finished); a stale reply
+   * must not overwrite them.
+   */
+  private statusCommand(op: () => Promise<PracticeStatus>): Promise<unknown> {
+    const seq = this.stateSeq;
+    return this.attempt(async () => {
+      const status = await op();
+      if (this.stateSeq === seq) this.set({ status });
+    });
+  }
+
   async refresh(): Promise<void> {
     await this.attempt(async () => {
       const [status, config] = await Promise.all([this.client.call("practice_status"), this.client.call("practice_get_config")]);
@@ -200,14 +216,14 @@ export class PracticeStore {
   }
 
   recordReference(options: CaptureOptions): Promise<unknown> {
-    return this.attempt(async () => this.set({ status: await this.client.call("practice_start_reference", { options }) }));
+    return this.statusCommand(() => this.client.call("practice_start_reference", { options }));
   }
 
   startAttempt(options: CaptureOptions): Promise<unknown> {
     const referenceId = this.snapshot.selectedId;
     if (!referenceId) return Promise.resolve();
     this.set({ lastAttemptOptions: options, view: "reference", result: null });
-    return this.attempt(async () => this.set({ status: await this.client.call("practice_start_attempt", { referenceId, options }) }));
+    return this.statusCommand(() => this.client.call("practice_start_attempt", { referenceId, options }));
   }
 
   /** Repeat the exercise with the same options. */
@@ -216,11 +232,11 @@ export class PracticeStore {
   }
 
   stop(): Promise<unknown> {
-    return this.attempt(async () => this.set({ status: await this.client.call("practice_stop") }));
+    return this.statusCommand(() => this.client.call("practice_stop"));
   }
 
   cancel(): Promise<unknown> {
-    return this.attempt(async () => this.set({ status: await this.client.call("practice_cancel") }));
+    return this.statusCommand(() => this.client.call("practice_cancel"));
   }
 
   rename(referenceId: string, name: string): Promise<unknown> {

@@ -44,8 +44,8 @@ export interface EngineActions {
   openMidiInput(portId: string): Promise<void>;
   closeMidiInput(portId: string): Promise<void>;
   startCalibration(apply: boolean): Promise<void>;
-  /** Add one track, up to the engine's reported ceiling (no-op when unknown). */
-  addTrack(): Promise<void>;
+  /** Add one track (looper `addTrack`), up to the engine's track capacity. */
+  addTrack(): void;
   dismissError(id: number): void;
   dismissWarning(kind: EngineWarningKind): void;
   dismissNotice(id: number): void;
@@ -180,12 +180,11 @@ export function createActions(client: EngineClient, store: EngineStore): EngineA
         });
       }, CALIBRATION_TIMEOUT_MS);
     },
-    addTrack: () =>
-      run(async () => {
-        const view = store.getSnapshot().looper;
-        if (!view || view.maxTracks === null || view.tracks.length >= view.maxTracks) return;
-        await client.setLooperConfig({ maxTracks: view.tracks.length + 1 });
-      }),
+    addTrack: () => {
+      const view = store.getSnapshot().looper;
+      if (!view || view.trackCapacity === null || view.tracks.length >= view.trackCapacity) return;
+      sendLooper({ type: "addTrack" });
+    },
     dismissError: (id) => store.dismissError(id),
     dismissWarning: (kind) => store.dismissWarning(kind),
     dismissNotice: (id) => store.dismissNotice(id),

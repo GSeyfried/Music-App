@@ -97,8 +97,8 @@ export interface LooperView {
   latencyFrames: number;
   sampleRate: number;
   freeLayers: number;
-  /** Track ceiling when the engine reports one (proposed field); null = unknown. */
-  maxTracks: number | null;
+  /** Most tracks addTrack can reach; null when the engine does not report it. */
+  trackCapacity: number | null;
 }
 
 export interface ErrorEntry {
@@ -179,7 +179,7 @@ function looperView(s: LooperState): LooperView {
     latencyFrames: s.latencyFrames,
     sampleRate: s.sampleRate,
     freeLayers: s.freeLayers,
-    maxTracks: s.maxTracks ?? null,
+    trackCapacity: s.maxTracks ?? s.trackCapacity ?? null,
   };
 }
 
@@ -341,11 +341,6 @@ export class EngineStore {
         return;
       case "audioDiagnostics":
         live.audioDiagnostics = event.payload;
-        return;
-      case "practiceState":
-      case "practiceProgress":
-      case "practiceTake":
-        // Practice Lab state lives in src/practice (PracticeStore subscribes to the client).
         return;
       default: {
         // Adding an EngineEvent member without a case above fails the typecheck here.

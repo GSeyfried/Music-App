@@ -247,6 +247,87 @@ Expected results are in brackets.
 8. Sing a held note with vibrato 30 cents flat (check with a tuner) as an attempt
    against a reference on that pitch. [`pitchErrorCents` −30 ± 10, no `unsteadyPitch`.]
 
+## UI (Practice Lab workspace)
+
+**Status: typechecks, unit and component tests pass (`npm test`), builds.
+Not run inside Tauri or against the native engine.**
+
+| File | Role |
+| --- | --- |
+| `src/workspaces/PracticeLab.tsx` | Workspace: practice workflow, plus the live tuner and pitch curve while input runs |
+| `src/practice/types.ts` | Wire types, transcribed from INTERFACE.md; merged into `EngineCommands` / `EngineEvent` |
+| `src/practice/practiceStore.ts`, `PracticeContext.tsx` | State outside React: slow snapshot + a live ~30 Hz trace; subscribes to the client directly |
+| `src/practice/PracticePanel.tsx` | Library, record controls, take banner, reference view, history, results |
+| `src/practice/canvas.tsx` | Live expected-vs-sung overlay, reference pitch curve, results piano roll (canvas, one rAF loop) |
+| `src/practice/text.ts`, `geometry.ts` | Pure phrasing of feedback/limitations and piano-roll layout (unit-tested) |
+| `src/practice/mockPractice.ts` | Simulated Practice Lab for the browser (`MockEngine` delegates `practice_*` to it) |
+| `src/practice/practice.css` | Styles (design tokens only, container queries down to 320 px) |
+| `src/practice/practice.test.tsx` | 14 tests: phrasing, geometry, protocol, simulated flow, store race, full UI flow |
+
+Flow:
+1. **Library.** Record a reference with a name. *Free* stops on Stop. *With
+   click* sets tempo, count-in and length in bars, presses Play, and stops by
+   itself. Each reference shows notes, range, BPM, attempts and latest score.
+2. **Reference.** Shows the pitch curve and notes, with Rename and Delete
+   (delete needs a second press). The key is shown only when the estimate's margin is ≥ 0.1.
+   Start an attempt in the same mode as the reference, with *Ignore key*,
+   *Ignore tempo* and *Ignore octave* toggles. The history shows a sparkline
+   and trend text, and each attempt opens or deletes.
+3. **Take banner** (while capturing): phase (count-in / recording / analysing),
+   time and bar/beat, a Stop button that acts on press, and Cancel. The live
+   overlay draws the expected reference notes, anchored on the engine's
+   `expected` note, and the sung trace coloured by distance (≤10¢ / ≤25¢ /
+   further). Unclear frames are dimmed and gaps are never bridged.
+4. **Result.**
+   - Scores (null scores are hidden, never shown as 0) and counts.
+   - Feedback in plain language, "work on" items first.
+   - The piano roll: reference outlines, sung bars coloured by cents with
+     labels, and a "?" for unclear pitch.
+   - A note table with expected, sung, Δ¢, Δms, Δms vs the click (grid only),
+     length and result.
+   - Limitations in small print.
+   - The tolerance toggles re-score (`practice_rescore_attempt`) and save the setting.
+   - **Try again** repeats with the same options.
+
+Honesty in the UI: uncertain pitch reads "unclear" or "pitch unclear", never
+wrong. Trends are claimed only when the engine says `improving` or
+`declining`. Relative timing always carries its limitation sentence.
+
+Demo in a browser: `npm run dev`, open the app (add `?autostart=1` to start the
+simulated microphone), open **Practice Lab**, and record a reference (free).
+Stop after the scale (about 4.5 s), then start attempts. The simulator's script:
+- attempt 1 misses note 7 and sings note 3 flat;
+- attempt 2 has an unclear note;
+- every 3rd attempt is slower;
+- every 4th is a tone higher (try *Ignore key*).
+Mistakes shrink with repetition, so the trend improves.
+
+Edits to shared frontend files:
+- `src/engine/protocol.ts`: imports the practice types, adds
+  `PitchUpdate.transportMap?`, the three event members and tags, and makes
+  `EngineCommands extends PracticeCommands`.
+- `src/engine/EngineContext.tsx`: `client` in the context value and `useEngineClient()`.
+- `src/engine/mock.ts`: a `practice` field (`MockPractice`), a `practice_*`
+  fallback in `invoke`, `practice.tick` in `tick`, and `practice.audioStopped`
+  in `stopInput`.
+- `src/engine/store.ts`: none remaining. The frontend agent added its own
+  practice-event cases; I removed my duplicate ignore-cases.
+
+Defect found and fixed: a command reply (e.g. `practice_stop` → "finishing")
+could resolve after the take had already finished and overwrite the newer
+"idle" state, which hid the attempt controls. Replies now apply only if no
+newer `practiceState` event arrived (regression test included).
+
+UI PENDING:
+- Run in Tauri against the native engine. Check the real progress rate,
+  canvas cost on an iPad, and that `expected` anchoring matches the
+  engine's alignment when the reference is free and the attempt uses the click.
+- Canvas drawing is not exercised by tests (jsdom has no canvas).
+- No latency override or calibration control in Practice Lab yet
+  (`practice_set_config.latencyOverrideMs`).
+- Library persistence across launches waits for the project save/open
+  integration (`practice_export_library` / `practice_import_library`).
+
 ## PENDING
 
 - Hardware verification (procedure above): callback-start vs hardware time, and the

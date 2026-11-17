@@ -221,7 +221,7 @@ function RecordReferenceCard({ ready }: { ready: boolean }) {
       <p className="hint">Sing or play the phrase you want to learn. You'll then sing it back and see what to work on.</p>
       <label className="pl-field">
         <span className="stepper-label">Name</span>
-        <input className="field" value={name} maxLength={200} placeholder="e.g. Verse melody" onChange={(e) => setName(e.currentTarget.value)} />
+        <input className="pl-input" value={name} maxLength={200} placeholder="e.g. Verse melody" onChange={(e) => setName(e.currentTarget.value)} />
       </label>
       <CaptureControls mode={mode} setMode={setMode} bars={bars} setBars={setBars} />
       <Button
@@ -301,7 +301,7 @@ function RenameControl({ summary }: { summary: ReferenceSummary }) {
         save();
       }}
     >
-      <input className="field" aria-label="Reference name" value={draft} maxLength={200} autoFocus onChange={(e) => setDraft(e.currentTarget.value)} />
+      <input className="pl-input" aria-label="Reference name" value={draft} maxLength={200} autoFocus onChange={(e) => setDraft(e.currentTarget.value)} />
       <Button variant="solid" size="sm" onPress={save}>
         Save
       </Button>

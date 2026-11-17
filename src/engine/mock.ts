@@ -48,6 +48,8 @@ export interface MockOptions {
   seed?: number;
   /** Returned by `startup_warnings` (e.g. a settingsProblem to exercise the UI). */
   startupWarnings?: EngineWarning[];
+  /** Most tracks addTrack can reach (default 16, like the engine). */
+  trackCapacity?: number;
 }
 
 
@@ -120,8 +122,8 @@ const ARPEGGIO = [60, 64, 67, 72, 67, 64];
 const CALIBRATION_SECONDS = 2.5;
 
 const POOL_LAYERS = 8;
-/** Mirrors looper::MAX_TRACKS in the Rust engine today. */
-export const MOCK_MAX_TRACKS = 8;
+/** Mirrors the Rust default `track_capacity` (= looper::MAX_TRACKS = 16). */
+export const MOCK_TRACK_CAPACITY = 16;
 const MAX_LAYERS_PER_TRACK = 6;
 const MAX_LOOP_SECONDS = 30;
 const TICK_MS = 33;
@@ -229,6 +231,7 @@ export class MockEngine implements EngineTransport {
   private readonly rand: () => number;
   private sampleRate: number;
   private readonly startupWarningList: EngineWarning[];
+  private readonly trackCapacity: number;
 
   private capturing = false;
   private deviceId = "mock-mic";
@@ -282,6 +285,7 @@ export class MockEngine implements EngineTransport {
     this.realtime = options.realtime ?? true;
     this.rand = mulberry32(options.seed ?? 7);
     this.startupWarningList = options.startupWarnings ?? [];
+    this.trackCapacity = options.trackCapacity ?? MOCK_TRACK_CAPACITY;
     this.transport = { ...defaultTransport, sampleRate: this.sampleRate };
     this.tracks = Array.from({ length: options.tracks ?? 2 }, () => this.emptyTrack());
   }
@@ -331,8 +335,7 @@ export class MockEngine implements EngineTransport {
         return [...this.startupWarningList];
       case "start_latency_calibration":
         return this.startCalibration(Boolean(args.apply));
-      case "set_looper_config":
-        return this.setLooperConfig((args.config ?? {}) as { maxTracks?: number });
+
       default:
         if (command.startsWith("practice_")) return this.practice.invoke(command, args);
         throw { kind: "invalid", message: `the simulated engine has no command "${command}"` } satisfies EngineError;
@@ -479,22 +482,6 @@ export class MockEngine implements EngineTransport {
     this.monitor = { ...m };
     this.audioConfig = { ...this.audioConfig, monitor: this.monitor };
     return this.emitStatus();
-  }
-
-  /** Only maxTracks is modelled. Existing tracks and loops are kept (the real engine may not). */
-  private setLooperConfig(config: { maxTracks?: number }): null {
-    const n = config.maxTracks ?? this.tracks.length;
-    if (!Number.isInteger(n) || n < 1 || n > MOCK_MAX_TRACKS) {
-      throw { kind: "invalid", message: `max_tracks must be 1..=${MOCK_MAX_TRACKS}` } satisfies EngineError;
-    }
-    if (n < this.tracks.length && this.tracks.slice(n).some((t) => t.layers > 0 || t.rec)) {
-      throw { kind: "busy", message: "clear the tracks being removed first" } satisfies EngineError;
-    }
-    this.tracks = n > this.tracks.length
-      ? [...this.tracks, ...Array.from({ length: n - this.tracks.length }, () => this.emptyTrack())]
-      : this.tracks.slice(0, n);
-    if (this.capturing) this.emit({ type: "looper", payload: this.looperState() });
-    return null;
   }
 
   private midiPorts(): MidiPortInfo[] {
@@ -853,6 +840,10 @@ export class MockEngine implements EngineTransport {
       case "clearAll":
         this.tracks.forEach((_, i) => this.clear(i));
         return null;
+      case "addTrack":
+        if (this.tracks.length >= this.trackCapacity) return "trackLimit";
+        this.tracks.push(this.emptyTrack());
+        return null;
       case "setInputLatency":
         this.latencySet = true;
         this.latency = Math.max(0, Math.min(Math.round(cmd.frames), (MAX_LOOP_SECONDS * this.sampleRate) / 2));
@@ -894,6 +885,12 @@ export class MockEngine implements EngineTransport {
         return null;
       case "clear":
         this.clear(cmd.track);
+        return null;
+      case "removeTrack":
+        if (tr.rec) return "trackBusy";
+        if (this.tracks.length === 1) return "trackLimit";
+        this.clear(cmd.track);
+        this.tracks.splice(cmd.track, 1);
         return null;
     }
   }
@@ -1120,7 +1117,7 @@ export class MockEngine implements EngineTransport {
       inputUnderrunFrames: 0,
       driftDroppedFrames: 0,
       inputCushionFrames: 480 + Math.round(this.rand() * 96),
-      maxTracks: MOCK_MAX_TRACKS,
+      maxTracks: this.trackCapacity,
     };
   }
 

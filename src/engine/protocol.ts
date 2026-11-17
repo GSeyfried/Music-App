@@ -343,11 +343,10 @@ export interface LooperState {
   driftDroppedFrames: number;
   /** Input buffered ahead of the looper; grows after underruns. */
   inputCushionFrames: number;
-  /**
-   * PROPOSED (not yet sent by the Rust engine): the most tracks this engine can
-   * run (today `looper::MAX_TRACKS` = 8). Absent = unknown; the UI then cannot add tracks.
-   */
+  /** Most tracks `addTrack` can reach (preallocated). Absent on engines older than addTrack. */
   maxTracks?: number;
+  /** Earlier name of `maxTracks` in the in-flight engine change; read as a fallback. */
+  trackCapacity?: number;
 }
 
 /** Mirrors `looper::LooperConfig` (serde camelCase, every field defaulted). */
@@ -374,7 +373,9 @@ export type RejectReason =
   | "transportLocked"
   | "invalidTransport"
   | "loopTooLong"
-  | "tooShort";
+  | "tooShort"
+  /** No more tracks can be added, or the last track cannot be removed. */
+  | "trackLimit";
 
 export type LooperNotice = { kind: "rejected"; reason: RejectReason } | { kind: "maxLengthReached"; track: number };
 
@@ -397,6 +398,10 @@ export type LooperCommand =
   | { type: "redo"; track: number }
   | { type: "clear"; track: number }
   | { type: "clearAll" }
+  /** Activate one more (preallocated) track, appended at the end. `trackLimit` at capacity. */
+  | { type: "addTrack" }
+  /** Remove a track; later tracks move down one index. `trackBusy` while it records, `trackLimit` for the last one. */
+  | { type: "removeTrack"; track: number }
   | { type: "setInputLatency"; frames: number };
 
 // ---- Analysis -------------------------------------------------------------------
@@ -566,11 +571,7 @@ export interface EngineCommands extends PracticeCommands {
   startup_warnings: { args: undefined; result: EngineWarning[] };
   /** Result arrives as a `calibration` event ~2.5 s later. */
   start_latency_calibration: { args: { apply: boolean }; result: null };
-  /**
-   * PROPOSED: `Engine::set_looper_config` exists in Rust but has no Tauri command yet
-   * (persistence INTERFACE.md: "when exposed"). Only the simulator implements it.
-   */
-  set_looper_config: { args: { config: Partial<LooperConfig> }; result: null };
+
 }
 
 export type CommandName = keyof EngineCommands;
