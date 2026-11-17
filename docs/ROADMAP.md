@@ -66,7 +66,49 @@ working, installable app.
 - Pitch correction as derived clips (originals preserved): evaluate Signalsmith Stretch
 - Synths and effects (evaluate FunDSP); audio editing; export (WAV/FLAC/MP3)
 
-## Milestone 5: Portability
+## Milestone 5: iPadOS and iOS (first-class platform; core requirement)
 
-- iOS build (Tauri 2 mobile + CPAL iOS, AVAudioSession), touch-adapted layouts
-- Portable project packages; import/export between devices
+One workstation on Mac and iPad with shared projects, capabilities, and workflows.
+Details: `docs/projects/ios/`. Simulator success is never evidence of working realtime audio.
+
+- [ ] Feasibility investigation, compatibility matrix, build/install procedure (in progress)
+- [ ] Install full Xcode (user action; blocks every item below)
+- [ ] Minimal iOS proof of concept: Tauri 2 shell + engine metering on a physical iPad
+- [ ] AVAudioSession layer: category, buffer/sample rate, interruptions, route changes, mic permission
+- [ ] Looper and analysis parity on iPad; latency and clock measurements on device
+- [ ] External USB audio interfaces and MIDI hardware on iPad
+- [ ] Files integration and project import/export; same portable project package as macOS
+- [ ] Touch-native UI: large loop controls, multitouch, swipe navigation, adaptive layouts,
+      external keyboard and MIDI controller support
+- [ ] Development-signed installs on personal iPad and iPhone
+
+## Milestone 6: Hardware inputs and routing
+
+Inputs are not assumed to be microphones; multichannel audio is not collapsed to mono
+unnecessarily. Details: `docs/projects/hardware-io/`.
+
+- [ ] Input and output device enumeration and selection; sample rate and buffer size
+- [ ] Input channel selection and routing; per-channel metering (in progress)
+- [ ] True stereo layers and per-track input assignment in the looper
+- [ ] USB-MIDI input, kept distinct from recorded instrument audio (in progress)
+- [ ] Device configuration persistence
+- [ ] Aggregate-device and clock-drift handling; monitoring and latency handling
+- [ ] Verify with Zoom H4n Pro and a USB-MIDI keyboard
+
+## Milestone 7: DAW interoperability
+
+Works alongside REAPER, GarageBand, and Logic Pro. Native project formats are not an
+immediate goal. Details: `docs/projects/persistence/INTEROP.md`.
+
+- [ ] WAV import/export at reliable sample rates and bit depths (in progress)
+- [ ] Individually exported, timeline-aligned stems
+- [ ] Standard MIDI file import/export with tempo and time signature preserved
+- [ ] Portable project packages
+- [ ] Manual import checks in REAPER, GarageBand, Logic
+
+## UI design direction
+
+Original design; Vochlea Dubler 2 (approachable, focused presentation of musical
+information), Loopy Pro (live looping interaction), and REAPER (routing, interop) are
+qualitative references only. No proprietary assets or code. Consistent between Studio
+and Practice Lab, and between desktop and touch. Details: `docs/projects/frontend/`.
