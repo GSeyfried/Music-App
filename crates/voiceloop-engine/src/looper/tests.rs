@@ -19,6 +19,7 @@ fn config(fade: u32) -> LooperConfig {
         max_layers_per_track: 4,
         memory_limit_bytes: 64 << 20,
         fade_frames: fade,
+        gain_smoothing_frames: 0,
     }
 }
 
@@ -209,10 +210,10 @@ fn metronome_record_starts_and_ends_on_loop_boundaries() {
     assert_eq!(s.tracks[0].state, TrackState::Armed);
     assert_eq!((s.tracks[0].record_start, s.tracks[0].record_end), (Some(2_000), Some(4_000)));
 
-    r.run(5_699, |_| 1.0); // to abs 6000; input is 1.0 everywhere
+    r.run(5_699, |_| 0.5); // to abs 6000; input is 0.5 everywhere
     assert!(r.out[..4_000].iter().all(|&v| v == 0.0));
     // Exactly one pass was captured (not the armed period, not more).
-    assert!(r.out[4_000..6_000].iter().all(|&v| v == 1.0));
+    assert!(r.out[4_000..6_000].iter().all(|&v| v == 0.5));
     assert_eq!(r.snap().tracks[0].state, TrackState::Playing);
 }
 
@@ -377,19 +378,85 @@ fn undo_removes_only_latest_overdub_and_recycles_clean_buffers() {
     assert_eq!(r.out[3_500], 0.25, "base take is untouched");
     let s = r.snap();
     assert_eq!(s.tracks[0].layers, 1);
-    assert_eq!(s.free_layers, 1, "released layer returned to the pool");
+    assert_eq!(s.free_layers, 0, "the undone layer is held for redo");
 
     r.send(C::Undo { track: 0 });
     r.silence(1);
     assert!(r.notices().contains(&rejected(RejectReason::NothingToUndo)));
 
-    // A recycled buffer must be zeroed: a silent overdub adds nothing.
+    // With the pool empty, a new take first reclaims the redo history. The
+    // buffer is zeroed off the audio thread, so this attempt is refused...
+    r.send(C::Overdub { track: 0 });
+    r.silence(1);
+    assert!(r.notices().contains(&rejected(RejectReason::PoolExhausted)));
+    let s = r.snap();
+    assert_eq!((s.tracks[0].redo_layers, s.free_layers), (0, 1), "redo history reclaimed and recycled");
+
+    // ...and the next one succeeds. A recycled buffer must be zeroed: a
+    // silent overdub adds nothing.
     r.send(C::Overdub { track: 0 });
     r.silence(1_000);
     r.send(C::StopRecording { track: 0 });
     r.silence(1_000);
     let n = r.out.len();
     assert!(r.out[n - 1_000..].iter().all(|&v| v == 0.25));
+}
+
+#[test]
+fn redo_restores_an_undone_overdub_until_a_new_take() {
+    let mut r = Rig::new(LooperConfig { pool_layers: 3, ..config(0) }, transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, |_| 0.25);
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::Overdub { track: 0 });
+    r.run(1_000, |_| 0.25);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(10);
+    assert_eq!(*r.out.last().unwrap(), 0.5);
+
+    r.send(C::Undo { track: 0 });
+    r.silence(10);
+    assert_eq!(*r.out.last().unwrap(), 0.25);
+    let s = r.snap();
+    assert_eq!((s.tracks[0].layers, s.tracks[0].redo_layers), (1, 1));
+    assert_eq!(s.free_layers, 1, "an undone layer stays reserved for redo");
+
+    r.send(C::Redo { track: 0 });
+    r.silence(10);
+    assert_eq!(*r.out.last().unwrap(), 0.5, "redo restores the identical audio");
+    assert_eq!(r.snap().tracks[0].redo_layers, 0);
+    r.send(C::Redo { track: 0 });
+    r.silence(1);
+    assert!(r.notices().contains(&rejected(RejectReason::NothingToRedo)));
+
+    // A new take discards redo history and returns its buffer to the pool.
+    r.send(C::Undo { track: 0 });
+    r.silence(10);
+    r.send(C::Overdub { track: 0 });
+    r.silence(10);
+    let s = r.snap();
+    assert_eq!((s.tracks[0].layers, s.tracks[0].redo_layers), (2, 0));
+    assert_eq!(s.free_layers, 1);
+    r.send(C::Redo { track: 0 });
+    r.silence(1);
+    assert!(r.notices().contains(&rejected(RejectReason::TrackBusy)));
+}
+
+#[test]
+fn first_take_is_latency_compensated_including_its_tail() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::SetInputLatency { frames: 37 });
+    r.send(C::Record { track: 0 });
+    // Performed at 100 and 973 (inside the take); both arrive 37 frames late,
+    // the second one after Stop has been pressed at 1000.
+    let input = |f: u64| if f == 137 || f == 1_010 { 1.0 } else { 0.0 };
+    r.run(1_000, input);
+    r.send(C::StopRecording { track: 0 });
+    r.run(1, input);
+    assert_eq!(r.snap().loop_period, Some(1_000.0), "length is press to press");
+    r.run(2_999, input);
+    assert_eq!(nonzero_from(&r.out, 0), vec![1_100, 1_973, 2_100, 2_973, 3_100, 3_973]);
+    assert_eq!(r.snap().tracks[0].state, TrackState::Playing);
 }
 
 // ---- mixing ---------------------------------------------------------------------
@@ -441,6 +508,28 @@ fn two_tracks_mix_and_mute_independently() {
     r.send(C::SetMute { track: 0, muted: true });
     r.silence(10);
     assert_eq!(*r.out.last().unwrap(), 0.5);
+}
+
+#[test]
+fn solo_silences_every_other_track() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, |_| 0.25);
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::Record { track: 1 });
+    r.run(1_000, |_| 0.5);
+    r.silence(100);
+    fn last(r: &mut Rig, c: LooperCommand) -> f32 {
+        r.send(c);
+        r.silence(10);
+        *r.out.last().unwrap()
+    }
+    assert_eq!(last(&mut r, C::SetSolo { track: 0, solo: true }), 0.25);
+    assert!(r.snap().tracks[0].solo);
+    assert_eq!(last(&mut r, C::SetSolo { track: 1, solo: true }), 0.75);
+    assert_eq!(last(&mut r, C::SetSolo { track: 0, solo: false }), 0.5);
+    assert_eq!(last(&mut r, C::SetMute { track: 1, muted: true }), 0.0, "mute wins over solo");
+    assert_eq!(last(&mut r, C::SetSolo { track: 1, solo: false }), 0.25, "no solo left: unmuted tracks play");
 }
 
 // ---- limits and cleanup ----------------------------------------------------------
@@ -572,6 +661,21 @@ fn pause_holds_position_and_stop_rewinds() {
 }
 
 #[test]
+fn restart_jumps_to_the_loop_start_and_keeps_running() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, impulse(100));
+    r.send(C::StopRecording { track: 0 });
+    r.silence(350);
+    let before = r.out.len();
+    r.send(C::Restart);
+    r.silence(200);
+    assert_eq!(r.snap().run, RunState::Running);
+    assert_eq!(r.core.transport_frame(), 200);
+    assert_eq!(nonzero_from(&r.out, before), vec![before + 100]);
+}
+
+#[test]
 fn musical_position_tracks_the_clock() {
     let mut t = one_bar_synced();
     t.metronome.subdivision = 2;
@@ -588,16 +692,95 @@ fn musical_position_tracks_the_clock() {
 fn recording_edges_are_faded_without_moving_boundaries() {
     let mut r = Rig::new(config(10), transport(1_000, LoopMode::Free));
     r.send(C::Record { track: 0 });
-    r.run(1_000, |_| 1.0);
+    r.run(1_000, |_| 0.5);
     r.send(C::StopRecording { track: 0 });
     r.silence(1_000);
     assert_eq!(r.snap().loop_period, Some(1_000.0), "fades do not change the loop length");
     let cycle = &r.out[1_000..2_000];
-    assert!((cycle[0] - 0.1).abs() < 1e-6);
-    assert!((cycle[9] - 1.0).abs() < 1e-6);
-    assert!((cycle[500] - 1.0).abs() < 1e-6);
-    assert!((cycle[990] - 1.0).abs() < 1e-6);
-    assert!((cycle[999] - 0.1).abs() < 1e-6);
+    assert!((cycle[0] - 0.05).abs() < 1e-6);
+    assert!((cycle[9] - 0.5).abs() < 1e-6);
+    assert!((cycle[500] - 0.5).abs() < 1e-6);
+    assert!((cycle[990] - 0.5).abs() < 1e-6);
+    assert!((cycle[999] - 0.05).abs() < 1e-6);
+}
+
+#[test]
+fn transport_stop_fades_a_recording_it_cuts_short() {
+    let mut r = Rig::new(config(10), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.silence(1_000); // silent base take: only the overdub is audible
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::Overdub { track: 0 });
+    r.run(300, |_| 0.5); // overdub phases 0..300, then the transport stops mid-take
+    r.send(C::Stop);
+    r.silence(10);
+    let before = r.out.len();
+    r.send(C::Play);
+    r.silence(400);
+    let cycle = &r.out[before..];
+    assert!((cycle[150] - 0.5).abs() < 1e-6);
+    assert!((cycle[290] - 0.5).abs() < 1e-6, "ten frames before the cut are untouched");
+    assert!((cycle[295] - 0.25).abs() < 1e-6);
+    assert!((cycle[299] - 0.05).abs() < 1e-6, "last recorded frame is faded");
+    assert_eq!(cycle[300], 0.0);
+}
+
+// ---- gain smoothing and limiting --------------------------------------------------
+
+#[test]
+fn mute_ramps_instead_of_stepping() {
+    let cfg = LooperConfig { gain_smoothing_frames: 100, ..config(0) };
+    let mut r = Rig::new(cfg, transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, |_| 0.5);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(100);
+    let b = r.out.len();
+    r.send(C::SetMute { track: 0, muted: true });
+    r.silence(200);
+    for k in 0..100 {
+        let expected = 0.5 * (1.0 - (k + 1) as f32 / 100.0);
+        assert!((r.out[b + k] - expected).abs() < 1e-4, "frame {k}: {} vs {expected}", r.out[b + k]);
+    }
+    assert!(r.out[b + 100..].iter().all(|&v| v.abs() < 1e-5));
+    // The largest step is one slew increment, never the full signal.
+    let max_step = r.out[b - 1..b + 101].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+    assert!(max_step < 0.006, "max step {max_step}");
+}
+
+#[test]
+fn soft_limiter_is_transparent_below_the_knee_and_bounded_above() {
+    for &v in &[0.0f32, 0.1, -0.5, LIMIT_KNEE, -LIMIT_KNEE] {
+        assert_eq!(soft_limit(v), v);
+    }
+    let mut prev = soft_limit(LIMIT_KNEE);
+    for i in 1..=400 {
+        let x = LIMIT_KNEE + i as f32 * 0.01;
+        let y = soft_limit(x);
+        assert!(y >= prev && y <= 1.0, "monotonic and within full scale at {x}: {y}");
+        assert_eq!(soft_limit(-x), -y, "odd symmetry");
+        prev = y;
+    }
+    assert!(soft_limit(1.0) < 0.96, "full-scale input is pulled below full scale");
+    // Continuous slope at the knee: no kink that would add harsh harmonics.
+    let slope = (soft_limit(LIMIT_KNEE + 1e-3) - LIMIT_KNEE) / 1e-3;
+    assert!((slope - 1.0).abs() < 0.01, "slope at knee {slope}");
+    assert_eq!(soft_limit(f32::NAN), 0.0);
+    assert_eq!(soft_limit(f32::INFINITY), 0.0);
+}
+
+#[test]
+fn stacked_overdubs_saturate_instead_of_clipping() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, |_| 0.5);
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::Overdub { track: 0 });
+    r.run(2_000, |_| 0.5); // two more passes: the layer sum is 1.5
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1_000);
+    let v = *r.out.last().unwrap();
+    assert!(v > LIMIT_KNEE && v < 1.0, "limited to {v}");
 }
 
 // ---- state for the UI ---------------------------------------------------------------

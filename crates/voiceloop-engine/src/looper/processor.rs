@@ -46,6 +46,9 @@ pub enum LooperCommand {
     Stop,
     Pause,
     Resume,
+    /// Jump to the loop start and keep running (no count-in). Finishes or
+    /// cancels recordings exactly like `Stop`.
+    Restart,
     /// Record a new loop on an empty track. Free mode: starts now (the first
     /// take sets the loop length). Metronome mode: starts at the next loop boundary
     /// and lasts exactly one loop.
@@ -57,10 +60,15 @@ pub enum LooperCommand {
     StopRecording { track: u8 },
     SetTrackPlaying { track: u8, playing: bool },
     SetMute { track: u8, muted: bool },
+    /// While any track is soloed, only soloed tracks are audible.
+    SetSolo { track: u8, solo: bool },
     /// Linear gain, clamped to 0..=2.
     SetGain { track: u8, gain: f32 },
     /// Remove the most recent overdub layer.
     Undo { track: u8 },
+    /// Restore the overdub layer most recently removed by `Undo`. A new
+    /// recording on the track discards its redo history.
+    Redo { track: u8 },
     /// Remove all layers on the track.
     Clear { track: u8 },
     ClearAll,
@@ -77,6 +85,7 @@ pub enum RejectReason {
     TrackEmpty,
     NotRecording,
     NothingToUndo,
+    NothingToRedo,
     LayerLimit,
     PoolExhausted,
     TransportLocked,
@@ -120,8 +129,11 @@ pub struct TrackSnapshot {
     pub state: TrackState,
     pub layers: u8,
     pub muted: bool,
+    pub solo: bool,
     pub playing: bool,
     pub gain: f32,
+    /// Undone overdub layers that `Redo` can restore.
+    pub redo_layers: u8,
     pub record_start: Option<i64>,
     pub record_end: Option<i64>,
 }
@@ -131,8 +143,10 @@ impl TrackSnapshot {
         state: TrackState::Empty,
         layers: 0,
         muted: false,
+        solo: false,
         playing: false,
         gain: 1.0,
+        redo_layers: 0,
         record_start: None,
         record_end: None,
     };
@@ -206,17 +220,53 @@ struct Recording {
     /// Performance-time window (frames on the transport clock).
     start: i64,
     end: Option<i64>,
-    /// Latency applied to this recording (0 for a free first take).
+    /// Input latency: the frame arriving at transport frame `t` was performed at `t - lat`.
     lat: i64,
 }
 
 struct Track {
     /// Base take first, then overdubs. Capacity fixed at construction.
     layers: Vec<LayerBuf>,
+    /// Layers removed by Undo, newest last. Capacity fixed at construction.
+    redo: Vec<LayerBuf>,
     rec: Option<Recording>,
     playing: bool,
     muted: bool,
+    solo: bool,
     gain: f32,
+    /// Smoothed gain actually applied; slews toward the audible target so
+    /// mute, solo, level, and play/stop changes never click.
+    level: f32,
+}
+
+impl Track {
+    fn target_level(&self, any_solo: bool) -> f32 {
+        if self.playing && !self.muted && (!any_solo || self.solo) {
+            self.gain
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Output level above which the soft limiter starts to act (about -1.9 dBFS).
+pub const LIMIT_KNEE: f32 = 0.8;
+
+/// Soft limiter for the mix bus. Exactly transparent up to [`LIMIT_KNEE`];
+/// above it the signal saturates smoothly toward ±1 instead of hard-clipping,
+/// so stacked overdubs distort gently rather than crackle. Stateless (no
+/// pumping, no lookahead latency). Non-finite input yields silence.
+#[inline]
+pub fn soft_limit(y: f32) -> f32 {
+    let a = y.abs();
+    if a <= LIMIT_KNEE {
+        y
+    } else if a.is_finite() {
+        let head = 1.0 - LIMIT_KNEE;
+        (LIMIT_KNEE + head * ((a - LIMIT_KNEE) / head).tanh()).copysign(y)
+    } else {
+        0.0
+    }
 }
 
 pub struct LooperCore {
@@ -233,6 +283,9 @@ pub struct LooperCore {
     count_in_left: u64,
     master: Option<Master>,
     tracks: Vec<Track>,
+    any_solo: bool,
+    /// Largest per-frame change of a track's applied gain.
+    gain_slew: f32,
     latency: i64,
     click: ClickVoice,
     click_next_index: i64,
@@ -277,10 +330,13 @@ impl LooperCore {
         let tracks = (0..config.max_tracks)
             .map(|_| Track {
                 layers: Vec::with_capacity(config.max_layers_per_track),
+                redo: Vec::with_capacity(config.max_layers_per_track),
                 rec: None,
                 playing: true,
                 muted: false,
+                solo: false,
                 gain: 1.0,
+                level: 1.0,
             })
             .collect();
 
@@ -298,6 +354,12 @@ impl LooperCore {
             count_in_total: 0,
             count_in_left: 0,
             tracks,
+            any_solo: false,
+            gain_slew: if config.gain_smoothing_frames == 0 {
+                f32::INFINITY
+            } else {
+                1.0 / config.gain_smoothing_frames as f32
+            },
             latency: 0,
             click: ClickVoice::new(sample_rate),
             click_next_index: 0,
@@ -353,7 +415,7 @@ impl LooperCore {
                 RunState::Stopped | RunState::Paused => {}
             }
             y += self.click.next_sample();
-            out[i] = y.clamp(-1.0, 1.0);
+            out[i] = soft_limit(y);
         }
         for o in out.iter_mut().skip(n) {
             *o = 0.0;
@@ -375,13 +437,19 @@ impl LooperCore {
         let mut y = 0.0f32;
         if let Some(m) = self.master {
             let (_, idx) = m.locate(t);
-            for tr in &self.tracks {
-                if tr.playing && !tr.muted && tr.gain > 0.0 {
+            let (any_solo, slew) = (self.any_solo, self.gain_slew);
+            for tr in &mut self.tracks {
+                let target = tr.target_level(any_solo);
+                let d = target - tr.level;
+                if d != 0.0 {
+                    tr.level = if d.abs() <= slew { target } else { tr.level + slew.copysign(d) };
+                }
+                if tr.level > 0.0 {
                     let mut s = 0.0f32;
                     for layer in &tr.layers {
                         s += layer.get(idx).copied().unwrap_or(0.0);
                     }
-                    y += s * tr.gain;
+                    y += s * tr.level;
                 }
             }
         }
@@ -408,7 +476,7 @@ impl LooperCore {
             RecKind::FirstTake => {
                 let i = (tp - rec.start) as usize;
                 if i >= self.max_frames {
-                    self.finish_first_take(ti, tp);
+                    self.finish_first_take(ti, tp, false);
                     let _ = self.notice_tx.push(LooperNotice::MaxLengthReached { track: ti as u8 });
                     return;
                 }
@@ -447,8 +515,14 @@ impl LooperCore {
         }
     }
 
-    /// Close a free-mode first take at performance frame `end` and establish the loop.
-    fn finish_first_take(&mut self, ti: usize, end: i64) {
+    /// Close a free-mode first take whose performance ended at frame `end`
+    /// and establish the loop (`period = end - start`, press to press).
+    ///
+    /// With input latency, the last `lat` frames of the performance have not
+    /// arrived yet. When `keep_tail` is set the recording stays open as a
+    /// bounded take until they have; playback of the new loop starts at once
+    /// and reaches those frames only a full period later.
+    fn finish_first_take(&mut self, ti: usize, end: i64, keep_tail: bool) {
         let Some(rec) = self.tracks.get(ti).and_then(|tr| tr.rec) else { return };
         let len = (end - rec.start).max(0) as usize;
         if len < self.min_loop_frames {
@@ -456,19 +530,49 @@ impl LooperCore {
             let _ = self.notice_tx.push(LooperNotice::Rejected { reason: RejectReason::TooShort });
             return;
         }
-        let f = self.fade_frames as usize;
-        let n = f.min(len);
-        if let Some(layer) = self.tracks[ti].layers.last_mut() {
-            // Retro-fade the tail. A first take is a single pass into a zeroed buffer,
-            // so scaling only affects this take.
-            for k in 0..n {
-                if let Some(s) = layer.get_mut(len - 1 - k) {
-                    *s *= (k + 1) as f32 / f as f32;
+        // Frames [0, written) are already in the layer.
+        let written = (self.t - rec.lat - rec.start).clamp(0, len as i64) as usize;
+        let fade = self.fade_frames as usize;
+        if fade > 0 {
+            if let Some(layer) = self.tracks[ti].layers.last_mut() {
+                // Fade the part of the tail that was written at full level. It
+                // matches `ramp`, which fades the frames still to come. A first
+                // take is a single pass into a zeroed buffer, so only this take
+                // is scaled.
+                for i in len.saturating_sub(fade)..written {
+                    if let Some(s) = layer.get_mut(i) {
+                        *s *= (len - i) as f32 / fade as f32;
+                    }
                 }
             }
         }
         self.master = Some(Master { origin: rec.start, period: len as f64 });
-        self.complete_recording(ti);
+        if keep_tail && written < len {
+            let end = Some(rec.start + len as i64);
+            self.tracks[ti].rec = Some(Recording { kind: RecKind::NewLoop, start: rec.start, end, lat: rec.lat });
+        } else {
+            self.complete_recording(ti);
+        }
+    }
+
+    /// A recording is being cut short at performance frame `tp_end` (transport
+    /// stop). If it is still a single pass over a zeroed layer, fade the last
+    /// frames written so the cut does not click. Multi-pass overdubs are left
+    /// alone: scaling them would also scale earlier passes.
+    fn fade_cut(&mut self, ti: usize, rec: Recording, tp_end: i64) {
+        let Some(m) = self.master else { return };
+        let written = tp_end - rec.start;
+        if self.fade_frames == 0 || written <= 0 || written as f64 > m.period.floor() {
+            return;
+        }
+        let fade = self.fade_frames as i64;
+        let Some(layer) = self.tracks.get_mut(ti).and_then(|tr| tr.layers.last_mut()) else { return };
+        for k in 0..fade.min(written) {
+            let (_, idx) = m.locate(tp_end - 1 - k);
+            if let Some(s) = layer.get_mut(idx) {
+                *s *= (k + 1) as f32 / fade as f32;
+            }
+        }
     }
 
     fn discard_recording(&mut self, ti: usize) {
@@ -550,16 +654,28 @@ impl LooperCore {
                 }
                 Ok(())
             }
+            C::Restart => {
+                self.stop();
+                self.run = RunState::Running;
+                self.resync_click();
+                Ok(())
+            }
             C::Record { track } => self.record(track as usize),
             C::Overdub { track } => self.overdub(track as usize),
             C::StopRecording { track } => self.stop_recording(track as usize),
             C::SetTrackPlaying { track, playing } => self.with_track(track as usize, |tr| tr.playing = playing),
             C::SetMute { track, muted } => self.with_track(track as usize, |tr| tr.muted = muted),
+            C::SetSolo { track, solo } => {
+                self.with_track(track as usize, |tr| tr.solo = solo)?;
+                self.any_solo = self.tracks.iter().any(|tr| tr.solo);
+                Ok(())
+            }
             C::SetGain { track, gain } => {
                 let g = if gain.is_finite() { gain.clamp(0.0, 2.0) } else { 1.0 };
                 self.with_track(track as usize, |tr| tr.gain = g)
             }
             C::Undo { track } => self.undo(track as usize),
+            C::Redo { track } => self.redo(track as usize),
             C::Clear { track } => self.clear(track as usize),
             C::ClearAll => {
                 for ti in 0..self.tracks.len() {
@@ -640,12 +756,16 @@ impl LooperCore {
         let t = self.t;
         for ti in 0..self.tracks.len() {
             if let Some(rec) = self.tracks[ti].rec {
-                let tp = t - rec.lat;
-                if tp < rec.start {
+                if t <= rec.start {
                     self.discard_recording(ti);
                 } else if rec.kind == RecKind::FirstTake {
-                    self.finish_first_take(ti, tp);
+                    // The transport stops now, so frames still in flight never arrive.
+                    self.finish_first_take(ti, t, false);
                 } else {
+                    let tp = t - rec.lat;
+                    if rec.end.map_or(true, |end| tp < end) {
+                        self.fade_cut(ti, rec, tp);
+                    }
                     self.complete_recording(ti);
                 }
             }
@@ -673,7 +793,7 @@ impl LooperCore {
         grid_frame(first_grid_index_at_or_after(frame, step), step)
     }
 
-    fn check_can_add_layer(&self, ti: usize) -> Result<(), RejectReason> {
+    fn check_can_add_layer(&mut self, ti: usize) -> Result<(), RejectReason> {
         let tr = self.tracks.get(ti).ok_or(RejectReason::NoSuchTrack)?;
         if tr.rec.is_some() {
             return Err(RejectReason::TrackBusy);
@@ -682,14 +802,30 @@ impl LooperCore {
             return Err(RejectReason::LayerLimit);
         }
         if self.pool.available() == 0 {
+            // Redo history is the only reclaimable memory: give it up so the
+            // next attempt (after the control thread has zeroed the buffers,
+            // a few milliseconds later) can succeed.
+            for tr in &mut self.tracks {
+                Self::release_redo(&mut self.pool, tr);
+            }
             return Err(RejectReason::PoolExhausted);
         }
         Ok(())
     }
 
+    /// Hand every undone layer back to the pool. Buffers become available
+    /// again once the control thread has zeroed them.
+    fn release_redo(pool: &mut LayerSource, tr: &mut Track) {
+        while let Some(buf) = tr.redo.pop() {
+            pool.release(buf);
+        }
+    }
+
     fn begin(&mut self, ti: usize, rec: Recording) -> Result<(), RejectReason> {
         let buf = self.pool.acquire().ok_or(RejectReason::PoolExhausted)?;
         let tr = &mut self.tracks[ti];
+        // A new take invalidates this track's redo history.
+        Self::release_redo(&mut self.pool, tr);
         tr.layers.push(buf); // within capacity: checked by check_can_add_layer
         tr.rec = Some(rec);
         tr.playing = true;
@@ -708,7 +844,7 @@ impl LooperCore {
                 }
                 self.ensure_running_free();
                 match self.master {
-                    None => Recording { kind: RecKind::FirstTake, start: self.t, end: None, lat: 0 },
+                    None => Recording { kind: RecKind::FirstTake, start: self.t, end: None, lat: self.latency },
                     Some(m) => {
                         let start = self.t;
                         let end = start + m.period.round() as i64;
@@ -754,20 +890,23 @@ impl LooperCore {
         self.begin(ti, Recording { kind: RecKind::Overdub, start, end: None, lat: self.latency })
     }
 
+    /// The performer asks to stop at transport frame `t` (performance time).
+    /// Input for the frames up to that point is still arriving, so the
+    /// recording itself closes `lat` frames later.
     fn stop_recording(&mut self, ti: usize) -> Result<(), RejectReason> {
         let tr = self.tracks.get(ti).ok_or(RejectReason::NoSuchTrack)?;
         let rec = tr.rec.ok_or(RejectReason::NotRecording)?;
-        let tp = self.t - rec.lat;
-        if tp < rec.start {
-            self.discard_recording(ti);
+        let t = self.t;
+        if self.run == RunState::CountIn || t <= rec.start {
+            self.discard_recording(ti); // never started: cancel
             return Ok(());
         }
         match rec.kind {
-            RecKind::FirstTake => self.finish_first_take(ti, tp),
+            RecKind::FirstTake => self.finish_first_take(ti, t, true),
             RecKind::NewLoop | RecKind::Overdub => {
                 let requested = match self.transport.mode {
-                    LoopMode::Free => tp + self.fade_frames as i64,
-                    LoopMode::Synced => self.next_bar_at_or_after(tp + 1),
+                    LoopMode::Free => t + self.fade_frames as i64,
+                    LoopMode::Synced => self.next_bar_at_or_after(t),
                 };
                 let end = rec.end.map_or(requested, |e| e.min(requested));
                 if let Some(r) = self.tracks[ti].rec.as_mut() {
@@ -787,8 +926,25 @@ impl LooperCore {
             return Err(RejectReason::NothingToUndo);
         }
         if let Some(buf) = tr.layers.pop() {
-            self.pool.release(buf);
+            if tr.redo.len() < tr.redo.capacity() {
+                tr.redo.push(buf);
+            } else {
+                self.pool.release(buf);
+            }
         }
+        Ok(())
+    }
+
+    fn redo(&mut self, ti: usize) -> Result<(), RejectReason> {
+        let tr = self.tracks.get_mut(ti).ok_or(RejectReason::NoSuchTrack)?;
+        if tr.rec.is_some() {
+            return Err(RejectReason::TrackBusy);
+        }
+        if tr.layers.len() >= self.max_layers {
+            return Err(RejectReason::LayerLimit);
+        }
+        let buf = tr.redo.pop().ok_or(RejectReason::NothingToRedo)?;
+        tr.layers.push(buf);
         Ok(())
     }
 
@@ -799,6 +955,7 @@ impl LooperCore {
         while let Some(buf) = tr.layers.pop() {
             self.pool.release(buf);
         }
+        Self::release_redo(&mut self.pool, tr);
         if self.transport.mode == LoopMode::Free && !self.has_content() && !self.any_recording() {
             self.master = None;
         }
@@ -847,7 +1004,7 @@ impl LooperCore {
     fn track_snapshot(&self, tr: &Track) -> TrackSnapshot {
         let state = match tr.rec {
             Some(_) if self.run == RunState::CountIn => TrackState::Armed,
-            Some(r) if self.t - r.lat < r.start => TrackState::Armed,
+            Some(r) if self.t < r.start => TrackState::Armed,
             Some(r) if r.kind == RecKind::Overdub => TrackState::Overdubbing,
             Some(_) => TrackState::Recording,
             None if tr.layers.is_empty() => TrackState::Empty,
@@ -858,8 +1015,10 @@ impl LooperCore {
             state,
             layers: tr.layers.len().min(u8::MAX as usize) as u8,
             muted: tr.muted,
+            solo: tr.solo,
             playing: tr.playing,
             gain: tr.gain,
+            redo_layers: tr.redo.len().min(u8::MAX as usize) as u8,
             record_start: tr.rec.map(|r| r.start),
             record_end: tr.rec.and_then(|r| r.end),
         }

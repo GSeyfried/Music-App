@@ -13,8 +13,10 @@
 //! - [`processor`]: the realtime looper (pure; unit-tested with synthetic buffers)
 //! - [`pool`]: fixed pool of layer buffers recycled through wait-free rings
 //! - [`click`]: metronome click synthesis and accent selection
+//! - [`bridge`]: input→output clock bridge (cushion, underrun, drift; unit-tested)
 //! - [`io`]: CPAL output stream that hosts the processor (hardware; not unit-tested)
 
+pub mod bridge;
 mod click;
 pub mod io;
 mod pool;
@@ -32,8 +34,8 @@ use crate::transport::{MusicalPosition, TransportState};
 pub use click::Accent;
 pub use pool::{LayerRecycler, StorageSink};
 pub use processor::{
-    LooperCommand, LooperCore, LooperHandles, LooperNotice, LooperSnapshot, RejectReason, RunState, TrackSnapshot,
-    TrackState,
+soft_limit, LooperCommand, LooperCore, LooperHandles, LooperNotice, LooperSnapshot, RejectReason, RunState, TrackSnapshot,
+    TrackState, LIMIT_KNEE,
 };
 
 /// Hard upper bound on tracks (snapshot arrays are sized by this).
@@ -56,6 +58,9 @@ pub struct LooperConfig {
     pub memory_limit_bytes: usize,
     /// Edge fade length in frames applied where a recording starts and ends (0 = none).
     pub fade_frames: u32,
+    /// Frames a track's gain takes to move by 1.0 when mute, solo, level, or
+    /// play/stop changes (0 = instant). Prevents zipper noise and clicks.
+    pub gain_smoothing_frames: u32,
 }
 
 impl Default for LooperConfig {
@@ -67,6 +72,7 @@ impl Default for LooperConfig {
             max_layers_per_track: 6,
             memory_limit_bytes: 256 * 1024 * 1024,
             fade_frames: 64,
+            gain_smoothing_frames: 256,
         }
     }
 }
@@ -116,6 +122,8 @@ pub struct IoCounters {
     pub input_underrun_frames: AtomicU64,
     /// Input frames skipped to correct input/output clock drift.
     pub drift_dropped_frames: AtomicU64,
+    /// Input frames currently buffered ahead of the looper (adaptive; part of round-trip latency).
+    pub input_cushion_frames: AtomicU64,
 }
 
 /// Looper state for the UI, built on the control thread from the latest snapshot.
@@ -138,6 +146,8 @@ pub struct LooperState {
     pub input_overrun_frames: u64,
     pub input_underrun_frames: u64,
     pub drift_dropped_frames: u64,
+    /// Input buffered ahead of the looper, in frames. Grows after underruns.
+    pub input_cushion_frames: u64,
 }
 
 impl LooperState {
@@ -160,6 +170,7 @@ impl LooperState {
             input_overrun_frames: counters.input_overrun_frames.load(Ordering::Relaxed),
             input_underrun_frames: counters.input_underrun_frames.load(Ordering::Relaxed),
             drift_dropped_frames: counters.drift_dropped_frames.load(Ordering::Relaxed),
+            input_cushion_frames: counters.input_cushion_frames.load(Ordering::Relaxed),
         }
     }
 }

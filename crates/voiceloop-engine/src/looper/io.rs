@@ -2,15 +2,10 @@
 //! the master clock.
 //!
 //! Input arrives from the input callback as mono f32 through an SPSC ring.
-//! The two devices have independent clocks, so the bridge:
-//! - **primes:** waits until ~10 ms of input is buffered before consuming (no
-//!   underruns counted while priming). That buffer is part of round-trip latency.
-//! - **underrun:** if fewer input frames are available than the block needs,
-//!   substitutes silence and counts the missing frames.
-//! - **drift:** if the backlog exceeds 8× the prime level, skips the excess
-//!   and counts it. (Proper drift resampling with `rubato` is future work.)
+//! The two devices have independent clocks; [`InputBridge`] (unit-tested in
+//! `bridge.rs`) handles priming, underruns, and drift.
 //!
-//! Hardware-dependent: compiled and exercised only on a real machine.
+//! Hardware-dependent: this file is exercised only on a real machine.
 
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc};
@@ -20,6 +15,7 @@ use cpal::{FromSample, SizedSample};
 use rtrb::Consumer;
 use serde::Serialize;
 
+use super::bridge::InputBridge;
 use super::{IoCounters, LooperConfig, LooperCore, LooperHandles};
 use crate::devices;
 use crate::error::EngineError;
@@ -117,10 +113,8 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let channels = (config.channels as usize).max(1);
-    let sample_rate = config.sample_rate.0 as usize;
-    let prime = (sample_rate / 100).max(256);
-    let high_water = prime * 8;
-    let mut primed = false;
+    let mut bridge = InputBridge::new(config.sample_rate.0, input_rx.buffer().capacity());
+    counters.input_cushion_frames.store(bridge.cushion() as u64, Ordering::Relaxed);
     // Scratch buffers are allocated here, before the callback exists.
     let mut in_buf = vec![0.0f32; MAX_BLOCK];
     let mut out_buf = vec![0.0f32; MAX_BLOCK];
@@ -134,30 +128,13 @@ where
             while done < frames {
                 let n = (frames - done).min(MAX_BLOCK);
 
-                let mut available = input_rx.slots();
-                if !primed && available >= prime {
-                    primed = true;
+                let report = bridge.fill(&mut input_rx, &mut in_buf[..n]);
+                if report.dropped > 0 {
+                    counters.drift_dropped_frames.fetch_add(report.dropped as u64, Ordering::Relaxed);
                 }
-                if primed && available > high_water {
-                    let skip = available - prime;
-                    if let Ok(chunk) = input_rx.read_chunk(skip) {
-                        chunk.commit_all();
-                    }
-                    counters.drift_dropped_frames.fetch_add(skip as u64, Ordering::Relaxed);
-                    available = input_rx.slots();
-                }
-                let take = if primed { available.min(n) } else { 0 };
-                if take > 0 {
-                    if let Ok(chunk) = input_rx.read_chunk(take) {
-                        let (a, b) = chunk.as_slices();
-                        in_buf[..a.len()].copy_from_slice(a);
-                        in_buf[a.len()..a.len() + b.len()].copy_from_slice(b);
-                        chunk.commit_all();
-                    }
-                }
-                in_buf[take..n].fill(0.0);
-                if primed && take < n {
-                    counters.input_underrun_frames.fetch_add((n - take) as u64, Ordering::Relaxed);
+                if report.underrun > 0 {
+                    counters.input_underrun_frames.fetch_add(report.underrun as u64, Ordering::Relaxed);
+                    counters.input_cushion_frames.store(bridge.cushion() as u64, Ordering::Relaxed);
                 }
 
                 core.process(&in_buf[..n], &mut out_buf[..n]);
