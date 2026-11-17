@@ -17,6 +17,7 @@
 //! - [`meter`]     RMS / peak accumulation (pure, realtime-safe)
 //! - [`looper`]    master clock, metronome, multitrack looper, output stream
 //! - [`analysis`]  live pitch / note / onset analysis thread (DSP in `voiceloop-analysis`)
+//! - [`practice`]  Practice Lab session: reference melody capture and take scoring
 //! - [`engine`]    control thread, command handling, event delivery
 //! - [`transport`] musical-time arithmetic (bars/beats/subdivisions ↔ frames)
 //! - [`model`]     shared domain types (serialisable)
@@ -29,6 +30,7 @@ pub mod error;
 pub mod looper;
 pub mod meter;
 pub mod model;
+pub mod practice;
 pub mod transport;
 
 pub use analysis::AnalysisConfig;
