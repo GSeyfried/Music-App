@@ -20,6 +20,7 @@
 //! - [`onset`]    energy-based onset detection (percussive and plucked attacks)
 //! - [`rhythm`]   timing of onsets against a tempo grid; tempo estimation
 //! - [`melody`]   reference melodies and performed-versus-reference comparison
+//! - [`practice`] Practice Lab takes, attempt scoring, feedback items, progress trend
 //! - [`theory`]   intervals, scales, key estimation, chord identification
 //! - [`midi`]     MIDI-compatible events and Standard MIDI File export
 //! - [`note`]     frequency ↔ note arithmetic
@@ -30,6 +31,7 @@ pub mod midi;
 pub mod note;
 pub mod onset;
 pub mod pitch;
+pub mod practice;
 pub mod rhythm;
 pub mod segment;
 pub mod signal;

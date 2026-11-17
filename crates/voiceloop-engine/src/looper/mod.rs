@@ -23,6 +23,7 @@ mod pool;
 mod processor;
 #[cfg(test)]
 mod tests;
+pub mod transfer;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -35,11 +36,23 @@ pub use click::Accent;
 pub use pool::{LayerRecycler, StorageSink};
 pub use processor::{
     soft_limit, LooperCommand, LooperCore, LooperHandles, LooperNotice, LooperSnapshot, RejectReason, RunState,
-    TrackSnapshot, TrackState, LIMIT_KNEE,
+    TrackSnapshot, TrackState, LIMIT_KNEE, MAX_TRANSPORT_FRAME,
 };
 
 /// Hard upper bound on tracks (snapshot arrays are sized by this).
 pub const MAX_TRACKS: usize = 8;
+
+/// Realtime work bounds. Every layer is a pool buffer, so `pool_layers`
+/// bounds both the layers summed per output sample and the buffers released
+/// in one callback (each buffer can be released at most once per callback,
+/// because a released buffer only becomes usable after the control thread
+/// zeroes it). These caps keep the worst case far inside a 64-frame deadline.
+pub const MAX_POOL_LAYERS: usize = 64;
+/// Upper bound for `max_layers_per_track` (base take + overdubs).
+pub const MAX_LAYERS_PER_TRACK: usize = 32;
+/// Upper bound for `fade_frames` (~100 ms at 48 kHz). Fades are applied in
+/// one callback when a take closes, so this also bounds that work.
+pub const MAX_FADE_FRAMES: u32 = 4_800;
 
 /// Resource limits. Everything the looper can ever use is allocated once, up
 /// front, from these numbers; nothing grows while audio runs.
@@ -101,6 +114,18 @@ impl LooperConfig {
                 self.pool_layers,
                 self.max_loop_seconds,
                 self.memory_limit_bytes / (1024 * 1024)
+            )));
+        }
+        // Checked after the memory budget so an oversized request reports the budget first.
+        if self.pool_layers > MAX_POOL_LAYERS {
+            return Err(EngineError::Invalid(format!("pool_layers must be at most {MAX_POOL_LAYERS}")));
+        }
+        if self.max_layers_per_track > MAX_LAYERS_PER_TRACK {
+            return Err(EngineError::Invalid(format!("max_layers_per_track must be at most {MAX_LAYERS_PER_TRACK}")));
+        }
+        if self.fade_frames > MAX_FADE_FRAMES || (self.fade_frames as usize) * 4 > frames {
+            return Err(EngineError::Invalid(format!(
+                "fade_frames must be at most {MAX_FADE_FRAMES} and a quarter of the longest loop"
             )));
         }
         Ok(frames)

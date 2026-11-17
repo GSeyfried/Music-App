@@ -1,0 +1,12 @@
+[package]
+name = "voiceloop-project"
+description = "VoiceLoop project packages and audio/MIDI file interchange: WAV I/O, project.json, recovery. Pure Rust; no audio devices, no Tauri."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

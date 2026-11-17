@@ -102,7 +102,7 @@ pub struct PitchTracker {
 
 impl PitchTracker {
     pub fn new(config: TrackerConfig, sample_rate: u32) -> Result<Self, &'static str> {
-        if config.median_frames == 0 || config.median_frames > MAX_MEDIAN || config.median_frames % 2 == 0 {
+        if config.median_frames == 0 || config.median_frames > MAX_MEDIAN || config.median_frames.is_multiple_of(2) {
             return Err("median_frames must be odd and between 1 and 15");
         }
         if !(config.hop_seconds.is_finite() && config.hop_seconds > 0.0 && config.hop_seconds <= 0.1) {
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn isolated_octave_slips_are_folded_back() {
         let mut tracker = PitchTracker::new(TrackerConfig::default(), SR).unwrap();
-        let mut input = vec![220.0f32; 40];
+        let mut input = [220.0f32; 40];
         input[20] = 440.0; // two frames an octave up
         input[21] = 440.0;
         input[30] = 110.0; // one frame an octave down

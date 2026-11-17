@@ -1,9 +1,11 @@
 //! Note segmentation: turns the pitch-frame stream into discrete notes with
 //! onset, offset, pitch, intonation, and stability.
 //!
-//! A note is labelled with an equal-tempered semitone. The label changes only
-//! when the pitch has been more than `switch_semitones` away from it for
-//! `switch_hold_frames` consecutive frames. That hysteresis keeps vibrato and
+//! A note is labelled with an equal-tempered semitone. A new note starts only
+//! when the pitch has left the current one for `switch_hold_frames`
+//! consecutive frames, "left" meaning more than `switch_semitones` from its
+//! semitone. Exits that stay near where the note is actually sung (the far
+//! side of vibrato on an off-pitch note) must persist for 100 ms instead. That hysteresis keeps vibrato and
 //! scoops inside one note while still splitting a real step. A glide comes
 //! out as a run of short notes, or as a gap if it moves too fast for any
 //! semitone to last `min_note_seconds`.
@@ -13,6 +15,18 @@
 use serde::{Deserialize, Serialize};
 
 use crate::tracker::{std_dev, PitchFrame};
+
+/// The note's settled centre ignores its first frames (the scoop into it) ...
+const CENTRE_SKIP_FRAMES: usize = 3;
+/// ... and exists only once this many later frames do.
+const CENTRE_MIN_FRAMES: usize = 5;
+/// A frame off the label but within `switch_semitones` of the settled centre
+/// and within `switch_semitones + SOFT_MARGIN` of the label is a "soft" exit:
+/// probably the far side of vibrato on a note sung off-pitch.
+const SOFT_MARGIN: f32 = 0.5;
+/// Soft exits must persist this long (about half a vibrato cycle) before a
+/// new note starts; hard exits need only `switch_hold_frames`.
+const SOFT_HOLD_SECONDS: f32 = 0.1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -75,8 +89,9 @@ pub struct NoteSegmenter {
     active: Option<Active>,
     /// Pitches of the active note.
     pitches: Vec<f32>,
-    /// Frames that left the note and may become the next one: (frame, midi, clarity).
-    pending: Vec<(u64, f32, f32)>,
+    /// Frames that left the note and may become the next one: (frame, midi, clarity, soft).
+    pending: Vec<(u64, f32, f32, bool)>,
+    soft_hold: u32,
     gap: u32,
 }
 
@@ -89,7 +104,8 @@ impl NoteSegmenter {
             min_frames: (config.min_note_seconds.max(0.0) * sample_rate as f32).round() as u64,
             active: None,
             pitches: Vec::with_capacity(1_024),
-            pending: Vec::with_capacity(config.switch_hold_frames as usize + 1),
+            pending: Vec::with_capacity(64),
+            soft_hold: (SOFT_HOLD_SECONDS * sample_rate as f32 / hop_frames.max(1) as f32).round() as u32,
             gap: 0,
         }
     }
@@ -115,31 +131,60 @@ impl NoteSegmenter {
             self.open(frame.frame, midi, frame.clarity);
             return;
         };
-        if (midi - active.label as f32).abs() <= self.config.switch_semitones {
-            // Back inside the note: frames that strayed were ornament, not a new note.
+        // Leaving the note. A frame more than `switch_semitones` from the
+        // label is an exit. It is *soft* if it is still near where the note
+        // is actually sung (its settled centre) and not far past the label:
+        // the far side of vibrato on a note sung off-pitch, which returns
+        // within half a cycle. Judging only from the label split a note sung
+        // 40 cents sharp with ±40-cent vibrato into pieces. A real change of
+        // note persists: hard exits need `switch_hold_frames`, soft ones
+        // `SOFT_HOLD_SECONDS`.
+        let sw = self.config.switch_semitones;
+        let from_label = (midi - active.label as f32).abs();
+        if from_label <= sw {
+            // Back inside. Soft exits were part of the note (keep them);
+            // hard exits were an ornament or an outlier (drop them).
+            for &(f, m, c, soft) in &self.pending {
+                if soft {
+                    active.last_frame = f;
+                    active.clarity_sum += c;
+                    self.pitches.push(m);
+                }
+            }
             self.pending.clear();
             active.last_frame = frame.frame;
             active.clarity_sum += frame.clarity;
             self.pitches.push(midi);
             return;
         }
-
-        self.pending.push((frame.frame, midi, frame.clarity));
-        if self.pending.len() as u32 >= self.config.switch_hold_frames.max(1) {
-            self.close(&mut emit);
+        let settled = &self.pitches[self.pitches.len().min(CENTRE_SKIP_FRAMES)..];
+        let soft = settled.len() >= CENTRE_MIN_FRAMES
+            && (midi - settled.iter().sum::<f32>() / settled.len() as f32).abs() <= sw
+            && from_label <= sw + SOFT_MARGIN;
+        self.pending.push((frame.frame, midi, frame.clarity, soft));
+        let hard = self.pending.iter().any(|p| !p.3);
+        let hold = self.config.switch_hold_frames.max(1);
+        let needed = if hard { hold } else { hold.max(self.soft_hold) };
+        if self.pending.len() as u32 >= needed {
+            // A note too short to keep, ended by a pitch change rather than a
+            // rest, was the start of this one: a glide through an intermediate
+            // semitone, or a scoop from more than `switch_semitones` below.
+            // The new note inherits its onset (otherwise legato portamento
+            // reported onsets 30-90 ms late).
+            let carried = self.close(&mut emit);
             let mut moved = std::mem::take(&mut self.pending);
-            moved.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            moved.sort_unstable_by_key(|p| p.0);
             let mut sorted_pitch: Vec<f32> = moved.iter().map(|p| p.1).collect();
             sorted_pitch.sort_unstable_by(f32::total_cmp);
             let label = sorted_pitch[sorted_pitch.len() / 2];
-            let (first_frame, _, _) = moved[0];
+            let (first_frame, _, _, _) = moved[0];
             self.active = Some(Active {
-                start_frame: first_frame,
+                start_frame: carried.unwrap_or(first_frame),
                 last_frame: first_frame,
                 label: round_note(label),
                 clarity_sum: 0.0,
             });
-            for &(f, m, c) in &moved {
+            for &(f, m, c, _) in &moved {
                 if let Some(a) = self.active.as_mut() {
                     a.last_frame = f;
                     a.clarity_sum += c;
@@ -165,8 +210,10 @@ impl NoteSegmenter {
             Some(Active { start_frame: frame, last_frame: frame, label: round_note(midi), clarity_sum: clarity });
     }
 
-    fn close(&mut self, emit: &mut impl FnMut(NoteEvent)) {
-        let Some(active) = self.active.take() else { return };
+    /// Emit the active note if it is long enough. Returns the start frame of
+    /// a note that was discarded as too short (a blip), `None` otherwise.
+    fn close(&mut self, emit: &mut impl FnMut(NoteEvent)) -> Option<u64> {
+        let active = self.active.take()?;
         let end_frame = active.last_frame + self.hop_frames;
         let n = self.pitches.len();
         if n > 0 && end_frame - active.start_frame >= self.min_frames {
@@ -185,8 +232,11 @@ impl NoteSegmenter {
                 clarity: active.clarity_sum / n as f32,
                 frames: n as u32,
             });
+            self.pitches.clear();
+            return None;
         }
         self.pitches.clear();
+        (n > 0).then_some(active.start_frame)
     }
 }
 
@@ -359,5 +409,35 @@ mod tests {
         feed(&mut segmenter, &mut events, Some(64.0), 30);
         segmenter.flush(|e| events.push(e));
         assert_eq!(events[1].note, 64);
+    }
+
+    #[test]
+    fn an_off_pitch_note_with_vibrato_stays_one_note() {
+        // A4 sung 40 cents sharp with ±40-cent vibrato: its peaks reach 80
+        // cents above A4. Judged only from the semitone, they used to split it.
+        let events =
+            notes(&signal::vibrato(hz_of(69) * 2f64.powf(40.0 / 1200.0), 40.0, 5.5, SR, 48_000, &VOICE_PARTIALS));
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].note, 69);
+    }
+
+    #[test]
+    fn portamento_into_a_legato_note_keeps_its_onset() {
+        // C4 to D4 legato with an exponential glide (25 ms time constant): the
+        // glide passes through C#4, which is too short to be a note. D4 must
+        // start at the change, not when the glide settles.
+        let signal = signal::sweep(
+            |t| {
+                let midi = if t < 0.4 { 60.0 } else { 62.0 - 2.0 * (-(t - 0.4) / 0.025).exp() };
+                hz_of(0) * 2f64.powf(midi / 12.0)
+            },
+            SR,
+            38_400,
+            &VOICE_PARTIALS,
+        );
+        let events = notes(&signal);
+        assert_eq!(events.iter().map(|e| e.note).collect::<Vec<_>>(), vec![60, 62]);
+        let start = ms(events[1].start_frame as i64);
+        assert!((start - 400.0).abs() <= 25.0, "D4 starts at {start} ms (change at 400 ms)");
     }
 }

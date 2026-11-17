@@ -12,8 +12,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::transport::{TimeSignature, TransportState};
-
 /// Frames on the authoritative audio clock (sample frames at the session rate).
 pub type FramePos = u64;
 /// Stable identifier (UUID string in practice).
@@ -40,62 +38,20 @@ pub struct AudioDevice {
     pub sample_format: Option<String>,
 }
 
-/// On-disk project: a folder containing `project.json` and an `audio/` directory.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Project {
-    pub id: Id,
-    pub name: String,
-    pub format_version: u32,
-    pub created_at: String,
-    pub sessions: Vec<Session>,
-    pub reference_tracks: Vec<ReferenceTrack>,
-}
+// ---- Persisted project document --------------------------------------------
+//
+// The on-disk project (`<Name>.voiceloop/project.json`) is defined in the
+// `voiceloop-project` crate so it stays usable without the audio engine
+// (and on iOS). Its types are re-exported here as the engine's domain model.
+// `LoopMode` and `TrackKind` live there too, with unchanged JSON.
 
-/// A working arrangement: tempo/meter, tracks, and the takes recorded against it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Session {
-    pub id: Id,
-    pub name: String,
-    pub sample_rate: u32,
-    pub transport: TransportState,
-    pub tracks: Vec<Track>,
-    pub takes: Vec<PerformanceTake>,
-}
+pub use voiceloop_project::doc::{
+    DeviceHints, LayerDoc, LoopDoc, LoopMode, MidiClip, MidiNote, PracticeDoc, ProjectDoc, TrackDoc, TrackKind,
+    TransportDoc,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum TrackKind {
-    Audio,
-    Midi,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum LoopMode {
-    /// Loop length is set by the first recording (no grid).
-    Free,
-    /// Loop length is quantised to whole bars of the track's meter.
-    Synced,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Track {
-    pub id: Id,
-    pub name: String,
-    pub kind: TrackKind,
-    pub loop_mode: LoopMode,
-    /// Overrides the session meter for polymetric tracks.
-    pub time_signature: Option<TimeSignature>,
-    pub gain_db: f32,
-    pub muted: bool,
-    pub audio_clips: Vec<AudioClip>,
-    pub midi_clips: Vec<MidiClip>,
-}
-
-/// Non-destructive window onto an immutable source recording.
+/// Non-destructive window onto an immutable source recording (Practice Lab
+/// references and attempts; looper layers use [`LayerDoc`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioClip {
@@ -114,25 +70,6 @@ pub struct AudioClip {
     pub gain_db: f32,
     /// Set when this clip is a processed derivative (e.g. pitch-corrected) of another clip.
     pub derived_from: Option<Id>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MidiNote {
-    pub pitch: u8,
-    pub velocity: u8,
-    pub start: FramePos,
-    pub length: FramePos,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MidiClip {
-    pub id: Id,
-    pub start: FramePos,
-    pub length: FramePos,
-    pub loop_length: Option<FramePos>,
-    pub notes: Vec<MidiNote>,
 }
 
 /// A performance the user wants to reproduce. Never mixed with attempts.

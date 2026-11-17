@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/voiceloop-analysis", "crates/voiceloop-engine", "src-tauri"]
+members = ["crates/voiceloop-analysis", "crates/voiceloop-engine", "crates/voiceloop-project", "src-tauri"]
 
 [workspace.package]
 edition = "2021"
@@ -24,3 +24,8 @@ opt-level = 2
 
 [profile.dev.package.voiceloop-analysis]
 opt-level = 3
+
+# File I/O, resampling, and offline rendering run on worker threads; optimise
+# them so saving a session does not take seconds in `tauri dev`.
+[profile.dev.package.voiceloop-project]
+opt-level = 2

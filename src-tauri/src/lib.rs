@@ -8,8 +8,8 @@ use voiceloop_engine::devices::DeviceList;
 use voiceloop_engine::midi_in::MidiPortInfo;
 use voiceloop_engine::model::AudioDevice;
 use voiceloop_engine::{
-    AnalysisConfig, AudioConfig, AudioSettings, Engine, EngineError, EngineStatus, InputRoute, LooperCommand,
-    MonitorConfig, OutputRoute,
+    AnalysisConfig, AudioConfig, AudioSettings, Engine, EngineError, EngineStatus, EngineWarning, InputRoute,
+    LooperCommand, MonitorConfig, OutputRoute,
 };
 
 pub const ENGINE_EVENT: &str = "engine://event";
@@ -102,6 +102,149 @@ fn save_audio_settings(engine: State<'_, Engine>) -> Result<(), EngineError> {
     engine.save_audio_settings()
 }
 
+/// Loopback latency calibration; the result arrives as a `calibration` event.
+#[tauri::command]
+fn start_latency_calibration(engine: State<'_, Engine>, apply: bool) -> Result<(), EngineError> {
+    engine.start_latency_calibration(apply)
+}
+
+/// Warnings raised while loading settings at startup (emitted before the webview listened).
+#[tauri::command]
+fn startup_warnings(engine: State<'_, Engine>) -> Result<Vec<EngineWarning>, EngineError> {
+    engine.startup_warnings()
+}
+
+// --- Projects and file interchange (docs/projects/persistence/INTERFACE.md) ---
+
+/// New / save / open / export / import / recovery settings. Returns at once;
+/// progress and results arrive as `project` events.
+#[tauri::command]
+fn project_command(
+    engine: State<'_, Engine>,
+    request: voiceloop_engine::ProjectRequest,
+) -> Result<voiceloop_engine::ProjectReply, EngineError> {
+    engine.project(request)
+}
+
+/// The crash-recovery session in `dir`, if any.
+#[tauri::command]
+fn find_recovery(dir: String) -> Result<Option<voiceloop_engine::project::RecoveryInfo>, EngineError> {
+    voiceloop_engine::project::find_recovery(std::path::Path::new(&dir))
+}
+
+#[tauri::command]
+fn discard_recovery(dir: String) -> Result<(), EngineError> {
+    voiceloop_engine::project::discard_recovery(std::path::Path::new(&dir))
+}
+
+// ---- Practice Lab (docs/projects/practice-lab/INTERFACE.md) ----------------------
+
+use voiceloop_engine::practice::{
+    AttemptRecord, CaptureOptions, PracticeConfig, PracticeLibrary, PracticeScoring, PracticeStatus, ReferenceDetail,
+    ReferenceSummary,
+};
+
+/// Record a reference. Ends with `practice_stop` (or by itself); the result
+/// arrives as a `practiceTake` event of kind `reference`.
+#[tauri::command]
+fn practice_start_reference(
+    engine: State<'_, Engine>,
+    options: Option<CaptureOptions>,
+) -> Result<PracticeStatus, EngineError> {
+    engine.practice_start_reference(options.unwrap_or_default())
+}
+
+/// Record an attempt against a reference; the scored result arrives as a
+/// `practiceTake` event of kind `attempt`.
+#[tauri::command]
+fn practice_start_attempt(
+    engine: State<'_, Engine>,
+    reference_id: String,
+    options: Option<CaptureOptions>,
+) -> Result<PracticeStatus, EngineError> {
+    engine.practice_start_attempt(reference_id, options.unwrap_or_default())
+}
+
+#[tauri::command]
+fn practice_stop(engine: State<'_, Engine>) -> Result<PracticeStatus, EngineError> {
+    engine.practice_stop()
+}
+
+#[tauri::command]
+fn practice_cancel(engine: State<'_, Engine>) -> Result<PracticeStatus, EngineError> {
+    engine.practice_cancel()
+}
+
+#[tauri::command]
+fn practice_status(engine: State<'_, Engine>) -> Result<PracticeStatus, EngineError> {
+    engine.practice_status()
+}
+
+#[tauri::command]
+fn practice_list_references(engine: State<'_, Engine>) -> Result<Vec<ReferenceSummary>, EngineError> {
+    engine.practice_list_references()
+}
+
+#[tauri::command]
+fn practice_get_reference(engine: State<'_, Engine>, reference_id: String) -> Result<ReferenceDetail, EngineError> {
+    engine.practice_get_reference(reference_id)
+}
+
+#[tauri::command]
+fn practice_rename_reference(engine: State<'_, Engine>, reference_id: String, name: String) -> Result<(), EngineError> {
+    engine.practice_rename_reference(reference_id, name)
+}
+
+#[tauri::command]
+fn practice_delete_reference(engine: State<'_, Engine>, reference_id: String) -> Result<(), EngineError> {
+    engine.practice_delete_reference(reference_id)
+}
+
+#[tauri::command]
+fn practice_get_attempt(
+    engine: State<'_, Engine>,
+    reference_id: String,
+    attempt_id: String,
+) -> Result<AttemptRecord, EngineError> {
+    engine.practice_get_attempt(reference_id, attempt_id)
+}
+
+#[tauri::command]
+fn practice_delete_attempt(engine: State<'_, Engine>, reference_id: String, attempt_id: String) -> Result<(), EngineError> {
+    engine.practice_delete_attempt(reference_id, attempt_id)
+}
+
+/// Score a stored attempt again; `scoring` omitted = the current configuration.
+#[tauri::command]
+fn practice_rescore_attempt(
+    engine: State<'_, Engine>,
+    reference_id: String,
+    attempt_id: String,
+    scoring: Option<PracticeScoring>,
+) -> Result<AttemptRecord, EngineError> {
+    engine.practice_rescore_attempt(reference_id, attempt_id, scoring)
+}
+
+#[tauri::command]
+fn practice_get_config(engine: State<'_, Engine>) -> Result<PracticeConfig, EngineError> {
+    engine.practice_get_config()
+}
+
+#[tauri::command]
+fn practice_set_config(engine: State<'_, Engine>, config: PracticeConfig) -> Result<PracticeConfig, EngineError> {
+    engine.practice_set_config(config)
+}
+
+#[tauri::command]
+fn practice_export_library(engine: State<'_, Engine>) -> Result<PracticeLibrary, EngineError> {
+    engine.practice_export_library()
+}
+
+#[tauri::command]
+fn practice_import_library(engine: State<'_, Engine>, library: PracticeLibrary, replace: bool) -> Result<(), EngineError> {
+    engine.practice_import_library(library, replace)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -135,7 +278,28 @@ pub fn run() {
             open_midi_input,
             close_midi_input,
             get_audio_settings,
-            save_audio_settings
+            save_audio_settings,
+            start_latency_calibration,
+            startup_warnings,
+            project_command,
+            find_recovery,
+            discard_recovery,
+            practice_start_reference,
+            practice_start_attempt,
+            practice_stop,
+            practice_cancel,
+            practice_status,
+            practice_list_references,
+            practice_get_reference,
+            practice_rename_reference,
+            practice_delete_reference,
+            practice_get_attempt,
+            practice_delete_attempt,
+            practice_rescore_attempt,
+            practice_get_config,
+            practice_set_config,
+            practice_export_library,
+            practice_import_library
         ])
         .build(tauri::generate_context!())
         .expect("error while building VoiceLoop");

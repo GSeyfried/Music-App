@@ -26,12 +26,14 @@ use crate::analysis::{AnalysisConfig, AnalysisOutput, AnalysisWorker};
 use crate::capture::{CaptureInfo, InputCapture};
 use crate::devices;
 use crate::error::EngineError;
-use crate::hardware::{self, AudioDiagnostics, DevicesChanged, Hardware};
+use crate::hardware::{self, AudioDiagnostics, CalibrationOutcome, DevicesChanged, Hardware};
 use crate::looper::io::{LooperPlayback, OutputInfo};
 use crate::looper::{LooperCommand, LooperConfig, LooperNotice, LooperSnapshot, LooperState};
 use crate::meter::{amplitude_to_db, MeterFrame};
 use crate::midi_in::{MidiBatch, MidiPortInfo};
+use crate::practice::{self, Practice, PracticeIo, PracticeProgress, PracticeStatus, PracticeTakeEvent, TransportMap};
 use crate::model::AudioDevice;
+use crate::project::{ProjectEvent, ProjectGlue, ProjectReply, ProjectRequest};
 use crate::routing::{AudioConfig, InputRoute, MonitorConfig, OutputRoute};
 use crate::settings::AudioSettings;
 use crate::transport::TransportState;
@@ -81,6 +83,9 @@ pub struct PitchUpdate {
     /// Input frames the analysis thread never saw because it fell behind
     /// (cumulative). Non-zero means pitch timestamps have slipped.
     pub dropped_input_frames: u64,
+    /// Input→transport mapping while the transport runs (see Practice Lab
+    /// INTERFACE.md): `transport = transportFrame + (frame − inputFrame) × ratio − latencyFrames`.
+    pub transport_map: Option<TransportMap>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -107,6 +112,16 @@ pub enum EngineEvent {
     Midi(MidiBatch),
     /// Stream facts and clock drift, 1 Hz while audio runs.
     AudioDiagnostics(AudioDiagnostics),
+    /// A loopback latency calibration finished (or failed).
+    Calibration(CalibrationOutcome),
+    /// Save / open / export / import progress and results (see `project.rs`).
+    Project(ProjectEvent),
+    /// Practice Lab state changed (see `practice/`).
+    PracticeState(PracticeStatus),
+    /// ~30 Hz while a practice take is captured: sung vs. expected.
+    PracticeProgress(PracticeProgress),
+    /// A reference was saved or an attempt was scored.
+    PracticeTake(Box<PracticeTakeEvent>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -156,6 +171,10 @@ enum Command {
     UseSettingsFile(std::path::PathBuf, Reply<AudioSettings>),
     GetAudioSettings(Reply<AudioSettings>),
     SaveAudioSettings(Reply<()>),
+    StartLatencyCalibration(bool, Reply<()>),
+    StartupWarnings(Reply<Vec<EngineWarning>>),
+    Project(ProjectRequest, Reply<ProjectReply>),
+    Practice(practice::Request, Reply<practice::Response>),
     Shutdown,
 }
 
@@ -287,6 +306,29 @@ impl Engine {
         self.request(Command::SaveAudioSettings)
     }
 
+    /// Play a test signal and measure the round trip through a physical
+    /// loopback. Returns at once; the result arrives as a `calibration` event
+    /// (about 2.5 s later). With `apply`, a successful result becomes the input latency.
+    pub fn start_latency_calibration(&self, apply: bool) -> Result<(), EngineError> {
+        self.request(|r| Command::StartLatencyCalibration(apply, r))
+    }
+
+    /// Warnings raised while loading the settings file at startup.
+    pub fn startup_warnings(&self) -> Result<Vec<EngineWarning>, EngineError> {
+        self.request(Command::StartupWarnings)
+    }
+
+    /// Project files: new, save, open, export, import, recovery. Returns at
+    /// once; long operations report through `EngineEvent::Project`.
+    pub fn project(&self, request: ProjectRequest) -> Result<ProjectReply, EngineError> {
+        self.request(|r| Command::Project(request, r))
+    }
+
+    /// Practice Lab requests; the typed methods are in `practice/api.rs`.
+    pub(crate) fn practice_request(&self, request: practice::Request) -> Result<practice::Response, EngineError> {
+        self.request(|r| Command::Practice(request, r))
+    }
+
     /// Stop audio, release devices and buffers, and join the control thread.
     pub fn shutdown(&self) {
         let _ = self.inner.tx.send(Command::Shutdown);
@@ -310,6 +352,10 @@ struct ControlLoop {
     pitch_pending: Vec<PitchFrame>,
     /// Devices, routes, MIDI, settings, diagnostics (see `hardware.rs`).
     hw: Hardware,
+    /// Project save/open/export state machines (see `project.rs`).
+    project: ProjectGlue,
+    /// Practice Lab sessions, references, clock mapping (see `practice/`).
+    practice: Practice,
     latest: Option<MeterFrame>,
     peak_since_emit: f32,
     channel_peaks: [f32; crate::meter::MAX_METER_CHANNELS],
@@ -335,6 +381,8 @@ impl ControlLoop {
             analysis_config: AnalysisConfig::default(),
             pitch_pending: Vec::with_capacity(64),
             hw: Hardware::default(),
+            project: ProjectGlue::new(),
+            practice: Practice::default(),
             latest: None,
             peak_since_emit: 0.0,
             channel_peaks: [0.0; crate::meter::MAX_METER_CHANNELS],
@@ -366,6 +414,7 @@ impl ControlLoop {
                 Duration::from_millis(250)
             };
             let timeout = self.hw.poll_interval(timeout);
+            let timeout = if self.project.is_active() { timeout.min(crate::project::ACTIVE_POLL) } else { timeout };
             match rx.recv_timeout(timeout) {
                 Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                 Ok(cmd) => self.handle(cmd),
@@ -375,12 +424,16 @@ impl ControlLoop {
             self.poll_hardware();
             self.drain_meter();
             self.drain_looper();
+            self.project.poll(self.playback.as_mut(), &self.hw.config, &*self.sink);
             self.drain_analysis();
+            self.tick_practice();
             if self.capture.is_some() && self.last_emit.elapsed() >= LEVEL_EVENT_INTERVAL {
                 self.last_emit = Instant::now();
                 self.emit_level();
                 self.emit_looper();
                 self.emit_pitch();
+                self.practice.emit_progress();
+                self.flush_practice();
             }
         }
         self.stop_audio();
@@ -465,6 +518,13 @@ impl ControlLoop {
                 let _ = reply.send(Ok(self.status()));
             }
             Command::SetMonitor(monitor, reply) => {
+                let monitor = match monitor.validate() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                };
                 if let Some(p) = self.playback.as_mut() {
                     p.set_monitor(monitor);
                 }
@@ -497,11 +557,27 @@ impl ControlLoop {
             Command::GetAudioSettings(reply) => {
                 let _ = reply.send(Ok(self.hw.settings()));
             }
+            Command::StartLatencyCalibration(apply, reply) => {
+                let idle = self.latest_snapshot.is_none_or(|s| s.run == crate::looper::RunState::Stopped);
+                let _ = reply.send(self.hw.start_calibration(self.playback.as_mut(), idle, apply));
+            }
+            Command::StartupWarnings(reply) => {
+                let _ = reply.send(Ok(self.hw.startup_warnings()));
+            }
             Command::SaveAudioSettings(reply) => {
                 let result = match &self.hw.settings_path {
                     Some(path) => crate::settings::save(path, &self.hw.settings()),
                     None => Err(EngineError::Invalid("no settings file has been set".into())),
                 };
+                let _ = reply.send(result);
+            }
+            Command::Project(request, reply) => {
+                let _ = reply.send(self.project.request(request, self.playback.as_mut()));
+            }
+            Command::Practice(request, reply) => {
+                let io = practice_io!(self);
+                let result = self.practice.handle(request, &io);
+                self.flush_practice();
                 let _ = reply.send(result);
             }
             Command::Shutdown => unreachable!("handled in run loop"),
@@ -533,6 +609,7 @@ impl ControlLoop {
     }
 
     fn start_audio(&mut self, config: AudioConfig) -> Result<EngineStatus, EngineError> {
+        config.monitor.validate()?;
         self.stop_audio();
 
         // Devices, rate, buffer size, routes, and the stream pair: see `hardware::open_audio`.
@@ -584,6 +661,26 @@ impl ControlLoop {
         }
         self.pitch_pending.clear();
         self.latest_snapshot = None;
+        self.practice.audio_stopped();
+        self.flush_practice();
+    }
+
+    fn tick_practice(&mut self) {
+        let io = practice_io!(self);
+        self.practice.tick(&io);
+        self.flush_practice();
+    }
+
+    /// Forward practice events and send the looper commands it asked for.
+    fn flush_practice(&mut self) {
+        for command in self.practice.take_looper_commands() {
+            if let Err(e) = self.send_looper(command) {
+                (self.sink)(EngineEvent::Error(e));
+            }
+        }
+        for event in self.practice.take_events() {
+            (self.sink)(event.into());
+        }
     }
 
     /// Stream error callbacks only store a code (they may run on the realtime
@@ -609,6 +706,9 @@ impl ControlLoop {
         let sink = &*self.sink;
         self.hw.drain_midi(self.capture.as_ref(), self.playback.as_ref(), sink);
         self.hw.diagnostics(self.capture.as_ref(), self.playback.as_ref(), sink);
+        if let Some(frames) = self.hw.poll_calibration(self.playback.as_mut(), sink) {
+            let _ = self.send_looper(LooperCommand::SetInputLatency { frames });
+        }
     }
 
     fn drain_meter(&mut self) {
@@ -658,6 +758,7 @@ impl ControlLoop {
     fn drain_analysis(&mut self) {
         let Some(worker) = self.analysis.as_ref() else { return };
         while let Ok(output) = worker.results.try_recv() {
+            self.practice.on_analysis(&output);
             match output {
                 AnalysisOutput::Pitch(frame) => {
                     // Bounded: if events are not being emitted, keep only the newest frames.
@@ -668,6 +769,7 @@ impl ControlLoop {
                 }
                 AnalysisOutput::Note(note) => (self.sink)(EngineEvent::Note(note)),
                 AnalysisOutput::Onset(onset) => (self.sink)(EngineEvent::Onset(onset)),
+                AnalysisOutput::Gap { .. } => {}
             }
         }
     }
@@ -681,6 +783,7 @@ impl ControlLoop {
             frames: self.pitch_pending.clone(),
             sample_rate: worker.sample_rate,
             dropped_input_frames: worker.dropped.load(std::sync::atomic::Ordering::Relaxed),
+            transport_map: self.practice.transport_map(),
         };
         self.pitch_pending.clear();
         (self.sink)(EngineEvent::Pitch(update));
@@ -711,6 +814,27 @@ impl ControlLoop {
         (self.sink)(EngineEvent::Looper(state));
     }
 }
+
+/// What the practice engine may read from the control loop. A macro so it
+/// borrows only these fields, leaving `self.practice` free to be mutated.
+macro_rules! practice_io {
+    ($c:expr) => {{
+        PracticeIo {
+            now_input_frame: $c.last_end_frame,
+            input_rate: $c.capture.as_ref().map(|cap| cap.info.sample_rate),
+            output_rate: $c.playback.as_ref().map(|p| p.info.sample_rate),
+            input_stats: $c.capture.as_ref().map(|cap| &*cap.stats),
+            output_stats: $c.playback.as_ref().map(|p| &*p.stats),
+            snapshot: $c.latest_snapshot.as_ref(),
+            transport: $c.latest_snapshot.as_ref().map_or(&$c.transport, |s| &s.transport),
+            analysis: $c.analysis.as_ref().map(|w| {
+                let hop = ($c.analysis_config.tracker.hop_seconds * w.sample_rate as f32).round() as usize;
+                (hop.max(1), $c.analysis_config.notes)
+            }),
+        }
+    }};
+}
+use practice_io;
 
 #[cfg(test)]
 mod tests {
@@ -783,7 +907,8 @@ mod tests {
             unpitched: None,
             octave_corrected: false,
         };
-        let update = PitchUpdate { frames: vec![frame], sample_rate: 48_000, dropped_input_frames: 0 };
+        let update =
+            PitchUpdate { frames: vec![frame], sample_rate: 48_000, dropped_input_frames: 0, transport_map: None };
         let json = serde_json::to_value(EngineEvent::Pitch(update)).unwrap();
         assert_eq!(json["type"], "pitch");
         assert_eq!(json["payload"]["sampleRate"], 48_000);
@@ -814,6 +939,32 @@ mod tests {
         assert_eq!(config.tracker.pitch.min_hz, 80.0);
         assert_eq!(config.tracker.tuning.a4_hz, 442.0);
         assert!(config.enabled && config.tracker.pitch.max_hz == 1_400.0, "unspecified fields keep their defaults");
+    }
+
+    #[test]
+    fn monitor_command_status_and_saved_settings_agree() {
+        let dir = std::env::temp_dir().join(format!("voiceloop-monitor-{}", std::process::id()));
+        let path = dir.join(crate::settings::SETTINGS_FILE_NAME);
+        let engine = Engine::start(Box::new(|_| {}));
+        engine.use_settings_file(path.clone()).unwrap();
+        let bad = MonitorConfig { enabled: true, gain: 9.0 };
+        assert!(matches!(engine.set_monitor(bad), Err(EngineError::Invalid(_))));
+        assert_eq!(
+            engine.status().unwrap().audio_config.monitor,
+            MonitorConfig::default(),
+            "a rejected value is not kept"
+        );
+        let good = MonitorConfig { enabled: true, gain: 0.5 };
+        let status = engine.set_monitor(good).unwrap();
+        assert_eq!(
+            serde_json::to_value(&status).unwrap()["audioConfig"]["monitor"],
+            serde_json::json!({"enabled": true, "gain": 0.5})
+        );
+        assert_eq!(crate::settings::load(&path).unwrap().unwrap().audio.monitor, good);
+        let config = AudioConfig { monitor: bad, ..AudioConfig::default() };
+        assert!(matches!(engine.start_audio(config), Err(EngineError::Invalid(_))));
+        engine.shutdown();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

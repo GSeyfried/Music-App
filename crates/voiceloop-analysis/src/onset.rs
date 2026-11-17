@@ -91,7 +91,7 @@ impl OnsetDetector {
         if sample_rate == 0 || !ok(config.hop_seconds) || !ok(config.lookback_seconds) || !ok(config.rise_db) {
             return Err("sample rate, hop, lookback, and rise must be positive");
         }
-        if !config.floor_db.is_finite() || !(config.min_interval_seconds >= 0.0) {
+        if !config.floor_db.is_finite() || config.min_interval_seconds.is_nan() || config.min_interval_seconds < 0.0 {
             return Err("floor_db must be finite and min_interval_seconds non-negative");
         }
         let hop = ((config.hop_seconds * sr).round() as usize).max(1);
@@ -165,7 +165,7 @@ impl OnsetDetector {
         self.recent[self.recent_len] = level;
         self.recent_len += 1;
 
-        let clear = self.last_onset.map_or(true, |last| self.hop_start - last >= self.min_interval);
+        let clear = self.last_onset.is_none_or(|last| self.hop_start - last >= self.min_interval);
         if level >= self.config.floor_db && rise >= self.config.rise_db && clear {
             self.last_onset = Some(self.hop_start);
             return Some(Onset { frame: self.hop_start, level_db: level, rise_db: rise });

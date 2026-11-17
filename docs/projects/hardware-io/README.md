@@ -12,7 +12,7 @@ built-in devices (no H4n, no MIDI keyboard attached), **H** = needs hardware.
 | Area | What | Status |
 | --- | --- | --- |
 | Enumeration | `list_devices()`: inputs **and** outputs, id/name/host/default, default format, every config range (channels, rate range, sample format, buffer range), common rates. Cheap `device_names()` for polling. | T (JSON, rate lists), R |
-| Hot-plug | Control thread polls device names and MIDI ports every 2 s; `devicesChanged`, `midiPorts` events; an active audio device that disappears stops audio with `error: deviceLost`. Stream error callbacks set `deviceLost`/backend codes (CPAL fires `DeviceNotAvailable` for non-default CoreAudio devices). | H |
+| Hot-plug | Control thread polls device names and MIDI ports every 2 s; `devicesChanged`, `midiPorts` events. **Every** poll (including the first) checks the active devices against the current list, and a stream whose callbacks stopped for 1.5 s (none within 3 s of starting) is also lost: audio stops with `error: deviceLost`. Stream error callbacks set `deviceLost`/backend codes (CPAL fires `DeviceNotAvailable` for non-default CoreAudio devices). | T (pure checks), H |
 | Selection | `AudioConfig`: input + output device, missing-device policy, sample rate, buffer size, routes, monitor. `start_audio(config)`; `start_input(deviceId)` unchanged. Rate negotiation (`negotiate_rate`), buffer clamping (16..4096 ∩ device range). | T (negotiation, clamping), R (buffer 128/256 granted) |
 | Status | `CaptureInfo`/`OutputInfo` report negotiated rate, channels, format, route, requested buffer, actual block size, backend-reported latency, xruns, lost frames, NaN count. `audioDiagnostics` at 1 Hz with measured drift. | T (shape), R |
 | Routing | `InputRoute` (`mixAll` / `mono{channel}` / `stereoSum{left,right}`) applied in the input callback, live-changeable via an `AtomicU64` cell. Routes naming missing channels fall back to `mixAll` with `configAdjusted`. `OutputRoute` (`pair` / `mono` / `all`) for multi-out devices; other channels get silence. | T, R (fallback warning) |
@@ -20,9 +20,12 @@ built-in devices (no H4n, no MIDI keyboard attached), **H** = needs hardware.
 | Monitoring | Opt-in input → output in the output callback (`mix_monitor` in `looper/io.rs`), gain 0..2, linear slew over 512 frames, soft-limited. Default off; bit-exact looper output when off. No `processor.rs` change needed. | T, H (audible) |
 | MIDI | `midir` 0.11.1: list/open/close ports, per-port wait-free ring from the MIDI callback, parsing (note on/off, CC, sustain, pitch bend, program, pressures), host-time mapping with jitter removal, frame mapping to output/transport/input clocks, ≤ 100 Hz batches, drop counter, hot-plug close + auto-reopen. | T incl. **end-to-end through CoreMIDI with a virtual source**; H for a real keyboard |
 | Settings | `AudioSettings` JSON (version 1), atomic save, auto-save after every change, loaded at Tauri start from the app config dir; missing devices fall back with a warning; saved MIDI ports reopen when they appear; input latency persisted and re-applied on each start. | T |
-| Clocks | `clock.rs`: per-stream seqlock anchors (host ns ↔ frame, plus transport frame on output), `XrunDetector` (callback timestamps), `DriftEstimator` (ppm). | T; R: drift **+0.9 to +1.4 ppm** on built-in mic/speakers (shared clock, ~20 s window) |
-| Calibration | `calibration.rs`: chirp-train test signal + correlation detector with confidence, spread, polarity. Wiring into a command is specified below (not done). | T (exact delay at 44.1/48 kHz with noise, echo, dropout, inversion) |
-| RT audit | #4 non-finite input sanitised and counted; #5 error closures store a `Copy` code (no `to_string`, no channel); #7 timestamp discontinuity counters; #8 saturating counters in capture/meter/io; #9 output remainder zeroed, frame alignment documented, meter carries channel phase across calls. #1 analysed and designed below. | T where testable |
+| Clocks | `clock.rs`: per-stream seqlock anchors; the output anchor is stamped at the **end** of each callback (after the block's transport commands) and carries the transport frame, running state, and the bridge's input position, ratio, and discontinuity epoch. `XrunDetector`, `DriftEstimator`. | T (incl. MIDI mapping across play/pause blocks with a real `LooperCore`); R: drift +0.9 to +1.4 ppm on built-in devices |
+| Drift bridge | `looper/bridge.rs`: fill-controlled PI loop + 16-tap windowed-sinc fractional reader (256-phase table). No frame dropping in normal operation; constant latency; ratio/ppm, mean fill, target, discontinuities in `output.bridge`. | T: ±50 / ±200 ppm, 6 simulated minutes each, mismatched and equal burst sizes, jittered input anchors (plus one ring-only run): 0 discontinuities/underruns/drops, mean ratio over the last minute within 3 ppm of the offset, ring fill bounded, impulse latency peak-to-peak < 4 frames (0.08 ms), anchor mapping predicts impulse arrival within 1 frame |
+| Calibration | `calibration.rs` detector + `looper/io.rs` `CalibrationJob` (test signal mixed into the output and the bridged input recorded on the same output frames) + `start_latency_calibration { apply }` command + `calibration` event. | T (detector on synthetic loops; job alignment; command preconditions); H (real loopback) |
+| RT audit | #1 drift: implemented (above). #4 non-finite input sanitised and counted; #5 error closures store a `Copy` code; #7 timestamp discontinuity counters; #8 saturating counters; #9 output remainder zeroed, frame alignment documented. | T where testable |
+| Live run (built-in mic + speakers, shared clock, 256-frame buffers, 25 s) | `bridge` ratio +1.8 to +2.3 ppm, mean fill 361 frames, 0 discontinuities; `driftPpm` −2.3 to +1.8. Not a two-clock or H4n test. | R |
+| HW review (`quality/HW_REVIEW.md`) | All six defects fixed: end-of-block transport anchors; first-poll/stall device-loss detection; unreadable settings → `.bad` backup + `settingsProblem` + `startup_warnings`; monitor gain validated (rejected, never silently clamped; persisted values normalised on load); closing an unplugged remembered MIDI port succeeds and saves; per-port single-writer MIDI drop counters. Both suspicions confirmed and closed (see below). | T |
 
 Tauri commands/events: see [INTERFACE.md](INTERFACE.md); all added to `src-tauri/src/lib.rs`.
 
@@ -158,79 +161,104 @@ latency change. `setInputLatency` is a constant, so both break latency
 compensation. Measured here: built-in mic and speakers share a clock
 (+1 ppm). Two separate USB devices will drift; measure with step 3 above.
 
-### Recommended fix: adaptive resampling in the bridge (design, next round)
+### Drift correction: adaptive resampling in the bridge (implemented)
 
-Keep the ring fill at a fixed target by consuming input at a ratio
-`r = 1 + ε` (ε a few ppm to ±1000 ppm) instead of dropping or holding.
+`InputBridge::fill` (output callback, the ring's only consumer):
 
-- **Where:** inside `InputBridge::fill` in the output callback (the only
-  consumer of the ring), replacing the drift-skip branch. Underrun and gross
-  overflow (> 8 × target) keep today's hard behaviour as a last resort and
-  are counted as discontinuities.
-- **Resampler:** `rubato` 5 `Async` (sinc, `sinc_len` 64, Blackman-Harris²,
-  `oversampling_factor` 128, linear table interpolation) with
-  `FixedSync::Output` chunks of 64 frames and `set_resample_ratio_relative`
-  each block. Construct it on the control thread before the stream; call only
-  `process_into_buffer` in the callback (allocation-free per rubato docs —
-  **verify** with a counting global allocator test). Mono, 64-tap: ~64
-  MAC/sample, negligible. A small output FIFO (2 × 64 frames, preallocated)
-  bridges variable callback sizes to the fixed chunk. Alternative if rubato's
-  RT-safety cannot be proven: a 4-point cubic Hermite reader on the ring
-  (≈ −60 dB image error at 8 kHz with ε ≤ 1000 ppm; zero added latency
-  beyond 2 frames). Both give a *constant* added latency (resampler delay,
-  32 frames for sinc 64), which calibration absorbs.
-- **Controller** (once per block, control variable = fill `f` in frames,
-  including frames held inside the resampler):
-  - Target `F` = the mean fill measured over the first 1 s after priming
-    (so bursty block-size mismatches are not "error").
-  - `e` = EMA of `f − F` with τ = 0.5 s (`α = n / (0.5·sr)`).
-  - `ε_ppm = clamp(Kp·e + I, ±1000)`, `Kp = 2 ppm/frame`,
-    `I += Ki·e·(n/sr)`, `Ki = 0.05 ppm/(frame·s)`, `I` clamped ±500.
-    Slew-limit `ε` to 10 ppm per block. Feed-forward: once
-    `DriftEstimator` has 10 s, seed `I` with its estimate.
-  - Deadband `|e| < 2 frames` freezes `I` (stops hunting). 1000 ppm is
-    1.7 cents: inaudible.
-- **Effect on latency:** steady fill = `F` ± a few frames, so recording
-  alignment stays within ±2 frames for hours; `setInputLatency` remains valid.
-- **Tests (pure, no hardware):** simulated producer at `sr·(1+δ)` for
-  δ ∈ {−200, −50, 0, +50, +200} ppm with bursty 441-frame pushes vs 256/512
-  pulls over 10 simulated minutes: no drops/underruns after 5 s, fill within
-  `F ± F/2`; a 1 kHz sine through the bridge has THD+N < −70 dB; an impulse
-  train's delay stays constant within ±1 frame; δ = 0 with steady flow is
-  bit-exact passthrough (existing tests keep passing); allocation counter = 0
-  inside `fill`.
-- **Unrecoverable discontinuities** (underrun, xrun counters increasing):
-  needs a `processor.rs` hook (persistence agent's file): a
-  `LooperCommand::InputDiscontinuity { frame }` pushed by the output
-  callback, upon which an active take is marked `timingSuspect` in its
-  snapshot (or split). Specified here, not implemented.
+1. **Prime** to the cushion (≥ 10 ms, ≥ one output block + 9 frames).
+2. **Measure** for 1 s at ratio exactly 1 (bit-exact copy); the mean ring
+   fill becomes the **target**. Bursty block-size mismatch is therefore not
+   treated as error.
+3. **Fill measure.** The output callback reads the input stream's anchor
+   and passes "input frames captured by now" (`anchor.frame + (now −
+   anchor.host)·rate`); fill = that − read position. This is continuous in
+   time. The raw ring count is a sawtooth of input bursts whose phase slides
+   slowly when the clocks differ (with equal 512-frame blocks at 50 ppm it
+   jumps by a whole block every ~3.5 min), which a controller would chase.
+   Without an anchor the ring count is used (still converges; tested).
+   The target is raised if the lowest ring fill seen while measuring would
+   leave less than one block + 10 frames (filter look-ahead) buffered.
+4. **Control** once per block: fill EMA (τ 0.5 s); `e = ema − target`;
+   `I += 0.05·e·dt` (ppm, clamped ±1000); `ppm = clamp(2·e + I, ±1000)`,
+   slew ≤ 200 ppm/s; `ratio = 1 + ppm·1e-6`. Damping ≈ 1, settling within
+   ~2 min for 200 ppm; steady-state error 0.
+5. **Read** at `ratio` with a 16-tap Blackman-windowed sinc, 256 phases,
+   linear interpolation between phases (table built in `new`, 16 KB). Phase
+   0 is an exact delta, so at ratio 1 the output is bit-identical. 1000 ppm
+   is 1.7 cents (inaudible); no samples are dropped or repeated.
+   Near the edge of the buffered data (only while the fill settles) it falls
+   back to 2-point linear interpolation instead of underrunning.
+6. **Discontinuities** only when concealment is impossible: underrun (ring
+   dry → silence, cushion × 1.5, re-prime, re-measure), backlog > 8 × cushion
+   (skip to the cushion), input overrun (frames lost before the ring; the
+   position advances by the lost count). Each increments
+   `output.bridge.discontinuities` and the anchor `epoch`.
 
-### Loopback latency calibration (detector done, wiring next round)
+**Latency model.** Round trip seen by the looper = output device latency +
+acoustic/cable path + input device latency + input buffer + **bridge mean
+fill** (`output.bridge.meanFillFrames`, constant once the target is set).
+The interpolator is centred (zero-phase): its 8-frame look-ahead comes out of
+the buffered fill and adds no delay of its own. Loopback calibration
+measures the whole sum on the output clock, so `setInputLatency` from a
+calibration includes the bridge. Re-calibrate after a bridge discontinuity
+(the target is re-measured and may differ by up to one input block).
 
-- **Command:** `calibrate_latency {}` → `CalibrationResult`
-  (`latencyFrames, latencyMs, sampleRate, confidence, detected, repeats,
-  spreadFrames, inverted`) or error `calibrationFailed` (`notDetected` /
-  `inconsistent`). Requires audio running and the looper stopped; user
-  connects output to input (cable, or speaker next to the mic).
-- **Signal:** `calibration::TestSignal` (8 Hann-windowed 20 ms 1→8 kHz chirps,
-  250 ms apart, −12 dBFS).
-- **Where it runs:** `looper/io.rs` (no processor change). The control thread
-  preallocates `signal.samples` and a record buffer of
-  `signal.record_frames()` and sends them to the output callback through a
-  one-slot rtrb ring. The callback, after `core.process`, adds the next
-  signal samples to `out_buf` and copies the bridged `in_buf` into the record
-  buffer, advancing one index; when full it returns both buffers through a
-  second ring. Both are on the output clock, so the lag is exactly the round
-  trip the looper experiences (DAC, cable, ADC, input buffer, bridge cushion).
-- **Detection** (control thread): `calibration::detect` — normalised
-  correlation per chirp over 0..200 ms, ≥ 0.3 to count, median of estimates
-  within 2 ms, confidence = detected share × mean correlation (halved if
-  spread > 2 frames). On success, send `setInputLatency { frames }` (which now
-  persists). Report `inverted` as a hint (polarity flip in a cable).
-- **Caveat:** the bridge cushion is part of the measured value. Until
-  resampling holds the fill constant, an underrun after calibration changes
-  the true latency; the UI should suggest re-calibrating when
-  `inputUnderrunFrames` grows.
+**Mapping for the Practice Lab.** Output anchors carry
+`input_pos`, `ratio`, `epoch`: input frame `x` reaches the looper at output
+frame `frame + (x − input_pos)/ratio` (`Anchor::output_frame_for_input`,
+`transport_frame_for_input`); valid while `epoch` is unchanged. The Practice
+Lab's `practice/clock_map.rs` uses wall-clock anchor pairs instead and
+re-anchors on discontinuity counters; both agree when no discontinuity occurs.
+
+**Unrecoverable discontinuity during a take** needs a processor hook (not
+made: `processor.rs` is the persistence agent's). Exact change:
+
+```rust
+// processor.rs, LooperCommand:
+/// The input stream skipped or repeated time (bridge underrun/skip/overrun).
+InputDiscontinuity,
+// apply_command():
+C::InputDiscontinuity => {
+    for tr in &mut self.tracks {
+        if tr.rec.is_some() { tr.timing_suspect = true; } // new bool, cleared when a new take starts
+    }
+    Ok(())
+}
+// TrackSnapshot: pub timing_suspect: bool,
+```
+and in `looper/io.rs` (mine, one line once the variant exists): when
+`report.discontinuity`, call `core.apply_now(LooperCommand::InputDiscontinuity)`
+(or push it into a 1-slot ring the processor drains) before `core.process`.
+
+### Loopback latency calibration (implemented)
+
+- **Command** `start_latency_calibration { apply }`: requires the looper
+  output running, transport stopped, monitoring off; returns at once.
+- **Run:** the control thread allocates a `CalibrationJob` (test signal +
+  record buffer) and moves it to the output callback through a 1-slot ring.
+  The callback adds the signal to the mix after the looper and records the
+  bridged input on the same frames; when the record buffer is full it moves
+  the job back (nothing is allocated or freed on the audio thread).
+- **Detect** on the control thread (`calibration::detect`, ~0.1 s CPU), emit
+  `calibration { result | error, applied }`; with `apply` a successful result
+  is sent as `setInputLatency` (saved). Timeout: recording length + 3 s →
+  `aborted`.
+- **Caveat:** an underrun after calibration changes the bridge fill; the UI
+  should offer re-calibration when `output.bridge.discontinuities` grows.
+
+### Review suspicions (HW_REVIEW.md), verified
+
+- **Startup warnings vs frontend listener — confirmed.** Tauri runs the
+  `setup` hook before the webview loads, so events emitted there are lost.
+  Fixed: warnings raised while applying settings are kept and returned by the
+  `startup_warnings` command (still also emitted).
+- **Direction-only changes under an unchanged name — plausible on CoreAudio**
+  (an aggregate device keeps its name/ID when reconfigured; CPAL's
+  `supports_input` then returns false). Closed without per-poll AudioUnit
+  probing: a stream whose callbacks stop for 1.5 s is reported `deviceLost`,
+  which covers a lost direction, a vanished device, and any silent stall.
+  Not covered: an *inactive* device's direction change does not emit
+  `devicesChanged` (the list must be re-fetched).
 
 ## Limitations
 
@@ -260,8 +288,8 @@ Keep the ring fill at a fixed target by consuming input at a ratio
   the looper, never recorded, gain-slewed and limited.
 - **D-022 Host-clock anchors are the cross-clock time base.** MIDI, input
   analysis, and transport map through `clock.rs` anchors.
-- **D-023 Drift correction by fill-controlled resampling** (design above);
-  frame dropping stays only as a counted last resort.
+- **D-023 Drift correction by fill-controlled resampling** (implemented);
+  skipping stays only as a counted last resort.
 - **D-024 Settings are host-supplied paths;** saved devices fall back to the
   default with a warning, never a hard failure at startup.
 
@@ -274,7 +302,9 @@ Keep the ring fill at a fixed target by consuming input at a ratio
   (expected) and whether CPAL's input `set_sample_rate` disturbs a running
   H4n output stream at a different rate (the engine avoids this by
   negotiating one rate).
-- PENDING: implement the resampling bridge and calibration wiring (designs above).
+- PENDING: hardware verification of the bridge with two clocks (H4n in + Mac out, 30 min:
+  `output.bridge.discontinuities` stays 0, `ratioPpm` ≈ the measured `driftPpm`) and of calibration with a cable.
+- PENDING: `InputDiscontinuity` processor hook (exact change above).
 - PENDING: `kAudioHardwarePropertyRunLoop` for headless hot-plug.
 - PENDING: whether `start_audio` should auto-run at launch when settings
   exist (currently no: microphone prompt should follow a user action).

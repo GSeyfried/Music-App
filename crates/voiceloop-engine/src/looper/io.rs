@@ -5,8 +5,10 @@
 //! SPSC ring. The two devices have independent clocks; [`InputBridge`]
 //! (unit-tested in `bridge.rs`) handles priming, underruns, and drift.
 //!
-//! Per callback this also: publishes a clock anchor carrying the transport
-//! frame (`StreamStats`, used to map MIDI and input times onto the transport),
+//! Per callback this also: publishes a clock anchor (stamped at the block's
+//! end) carrying the transport frame and the bridge's input position, ratio,
+//! and epoch (`StreamStats`, used to map MIDI and input times onto the transport),
+//! runs a loopback calibration when one is handed in (`CalibrationJob`),
 //! counts timestamp discontinuities (xruns), mixes in the live input when
 //! monitoring is enabled (opt-in, default off, gain slewed to avoid clicks),
 //! and writes the mono mix only to the channels the [`OutputRoute`] selects
@@ -21,8 +23,8 @@ use cpal::{FromSample, SizedSample};
 use rtrb::Consumer;
 use serde::Serialize;
 
-use super::bridge::InputBridge;
-use super::{soft_limit, IoCounters, LooperConfig, LooperCore, LooperHandles};
+use super::bridge::{BridgeInfo, BridgeStats, InputBridge};
+use super::{soft_limit, IoCounters, LooperConfig, LooperCore, LooperHandles, RunState};
 use crate::clock::{self, add_saturating, Anchor, StreamStats, XrunDetector};
 use crate::devices;
 use crate::error::EngineError;
@@ -54,6 +56,71 @@ pub struct OutputInfo {
     /// Callback timestamp jumps that mean the device skipped output (xruns).
     pub discontinuities: u64,
     pub lost_frames: u64,
+    /// Input→output drift bridge: correction ratio, mean fill (its delay), breaks.
+    pub bridge: BridgeInfo,
+}
+
+/// A loopback calibration run travelling between the control thread and the
+/// output callback. Buffers are allocated (and freed) on the control thread;
+/// the callback only moves the box through rings and writes into it.
+#[derive(Debug)]
+pub struct CalibrationJob {
+    pub signal: Box<[f32]>,
+    pub record: Box<[f32]>,
+    pub played: usize,
+    pub recorded: usize,
+}
+
+impl CalibrationJob {
+    pub fn new(signal: &[f32], record_frames: usize) -> Self {
+        Self { signal: signal.into(), record: vec![0.0; record_frames].into_boxed_slice(), played: 0, recorded: 0 }
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.recorded >= self.record.len()
+    }
+
+    /// One block: add the next test-signal samples to `out` (soft-limited) and
+    /// record `input` (the bridged input the looper sees) at the same frames,
+    /// so the lag between them is exactly the looper's round trip. Realtime-safe.
+    #[inline]
+    pub fn process(&mut self, out: &mut [f32], input: &[f32]) {
+        for (o, &i) in out.iter_mut().zip(input) {
+            if let Some(&s) = self.signal.get(self.played) {
+                *o = soft_limit(*o + s);
+                self.played += 1;
+            }
+            if let Some(slot) = self.record.get_mut(self.recorded) {
+                *slot = i;
+                self.recorded += 1;
+            }
+        }
+    }
+}
+
+/// The output anchor for a callback that started at `host_start_ns` and
+/// processed `frames`: stamped at the block's **end**, after the looper has
+/// applied this block's commands, so play/pause/stop at a block boundary are
+/// reflected and MIDI events in or after the block map in the right direction.
+#[allow(clippy::too_many_arguments)]
+pub fn block_end_anchor(
+    host_start_ns: u64,
+    frames: usize,
+    sample_rate: u32,
+    frames_out_end: u64,
+    transport_end: i64,
+    running: bool,
+    bridge: &InputBridge,
+) -> Anchor {
+    Anchor {
+        host_ns: host_start_ns + (frames as u64 * 1_000_000_000) / sample_rate.max(1) as u64,
+        frame: frames_out_end,
+        transport_frame: transport_end,
+        transport_running: running,
+        input_pos: bridge.input_position(),
+        ratio: bridge.ratio(),
+        epoch: bridge.epoch(),
+    }
 }
 
 /// A running output stream with the looper inside. Dropping it stops audio
@@ -70,6 +137,9 @@ pub struct LooperPlayback {
     route: Arc<RouteCell>,
     monitor: Arc<MonitorCell>,
     monitor_config: MonitorConfig,
+    pub bridge: Arc<BridgeStats>,
+    calibration_tx: rtrb::Producer<CalibrationJob>,
+    calibration_rx: Consumer<CalibrationJob>,
 }
 
 /// Default output device and its default configuration.
@@ -82,11 +152,13 @@ pub fn default_output() -> Result<(cpal::Device, cpal::SupportedStreamConfig), E
 }
 
 /// Output-side choices made when audio starts.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct OutputOptions {
     pub buffer_size: Option<u32>,
     pub route: OutputRoute,
     pub monitor: MonitorConfig,
+    /// The input stream's stats: its anchor gives the bridge a burst-free fill measure.
+    pub input_clock: Option<Arc<StreamStats>>,
 }
 
 impl LooperPlayback {
@@ -110,9 +182,16 @@ impl LooperPlayback {
         let stats = Arc::new(StreamStats::default());
         let route_cell = Arc::new(RouteCell::output(route));
         let monitor = Arc::new(MonitorCell::new(options.monitor));
+        let bridge = Arc::new(BridgeStats::default());
+        let (calibration_tx, cal_in) = rtrb::RingBuffer::<CalibrationJob>::new(1);
+        let (cal_out, calibration_rx) = rtrb::RingBuffer::<CalibrationJob>::new(1);
         clock::init_epoch();
 
         let parts = Parts {
+            input_clock: options.input_clock,
+            bridge: bridge.clone(),
+            cal_in,
+            cal_out,
             core,
             input_rx,
             counters: counters.clone(),
@@ -151,12 +230,16 @@ impl LooperPlayback {
                 reported_latency_frames: None,
                 discontinuities: 0,
                 lost_frames: 0,
+                bridge: bridge.info(),
             },
             memory_bytes,
             stats,
             route: route_cell,
             monitor,
             monitor_config: options.monitor,
+            bridge,
+            calibration_tx,
+            calibration_rx,
         })
     }
 
@@ -171,8 +254,19 @@ impl LooperPlayback {
             reported_latency_frames: s.reported_latency_frames(self.info.sample_rate),
             discontinuities: s.discontinuities.load(Relaxed),
             lost_frames: s.lost_frames.load(Relaxed),
+            bridge: self.bridge.info(),
             ..self.info.clone()
         }
+    }
+
+    /// Hand a calibration run to the output callback. `Busy` if one is in flight.
+    pub fn start_calibration(&mut self, job: CalibrationJob) -> Result<(), EngineError> {
+        self.calibration_tx.push(job).map_err(|_| EngineError::Busy("a calibration is already running".into()))
+    }
+
+    /// The finished calibration run, once the callback has filled its record buffer.
+    pub fn take_calibration(&mut self) -> Option<CalibrationJob> {
+        self.calibration_rx.pop().ok()
     }
 
     /// Change the output channels while running. Returns the route applied and
@@ -200,6 +294,11 @@ impl LooperPlayback {
 }
 
 struct Parts {
+    /// The input stream's stats (its anchor gives a burst-free fill measure).
+    input_clock: Option<Arc<StreamStats>>,
+    bridge: Arc<BridgeStats>,
+    cal_in: Consumer<CalibrationJob>,
+    cal_out: rtrb::Producer<CalibrationJob>,
     core: LooperCore,
     input_rx: Consumer<f32>,
     counters: Arc<IoCounters>,
@@ -238,7 +337,18 @@ fn build<T>(device: &cpal::Device, config: &cpal::StreamConfig, parts: Parts) ->
 where
     T: SizedSample + FromSample<f32>,
 {
-    let Parts { mut core, mut input_rx, counters, stats, route, monitor } = parts;
+    let Parts {
+        input_clock,
+        bridge: bridge_stats,
+        mut cal_in,
+        mut cal_out,
+        mut core,
+        mut input_rx,
+        counters,
+        stats,
+        route,
+        monitor,
+    } = parts;
     let channels = (config.channels as usize).max(1);
     let sample_rate = config.sample_rate.0;
     let mut bridge = InputBridge::new(sample_rate, input_rx.buffer().capacity());
@@ -249,8 +359,9 @@ where
     let mut xrun = XrunDetector::default();
     let mut origin: Option<cpal::StreamInstant> = None;
     let mut frames_out: u64 = 0;
-    let mut prev_t = core.transport_frame();
     let mut monitor_gain = 0.0f32;
+    let mut calibration: Option<CalibrationJob> = None;
+    let mut overrun_seen: u64 = 0;
     let err_stats = stats.clone();
 
     let stream = device.build_output_stream(
@@ -261,15 +372,7 @@ where
             let ts = info.timestamp();
             let origin = *origin.get_or_insert(ts.callback);
             let latency_ns = ts.playback.duration_since(&ts.callback).map(|d| d.as_nanos() as u64);
-            let t = core.transport_frame();
-            let anchor = Anchor {
-                host_ns: clock::host_now_ns(),
-                frame: frames_out,
-                transport_frame: t,
-                transport_running: t != prev_t,
-            };
-            prev_t = t;
-            stats.on_block(anchor, frames, latency_ns);
+            let host_start = clock::host_now_ns();
             if let Some(cb) = ts.callback.duration_since(&origin) {
                 if let Some(lost) = xrun.observe(cb.as_nanos() as u64, frames, sample_rate) {
                     stats.on_discontinuity(lost);
@@ -277,6 +380,24 @@ where
             }
             let route = route.output_route();
             let monitor_target = monitor.target_gain();
+            // Input frames lost before the ring (input overrun) break the mapping.
+            let overrun = counters.input_overrun_frames.load(std::sync::atomic::Ordering::Relaxed);
+            if overrun > overrun_seen {
+                bridge.note_input_gap(overrun - overrun_seen);
+                overrun_seen = overrun;
+            }
+            if calibration.is_none() {
+                calibration = cal_in.pop().ok();
+            }
+            // Input frames captured by now, from the input callback's newest anchor
+            // (both streams run at `sample_rate` whenever the looper runs).
+            if let Some(input) = input_clock.as_ref() {
+                let captured = input
+                    .anchor
+                    .read()
+                    .map(|a| a.frame as f64 + (host_start as f64 - a.host_ns as f64) * sample_rate as f64 / 1e9);
+                bridge.set_input_clock(captured);
+            }
 
             let mut done = 0usize;
             while done < frames {
@@ -291,6 +412,9 @@ where
 
                 core.process(&in_buf[..n], &mut out_buf[..n]);
                 monitor_gain = mix_monitor(&mut out_buf[..n], &in_buf[..n], monitor_gain, monitor_target);
+                if let Some(job) = calibration.as_mut() {
+                    job.process(&mut out_buf[..n], &in_buf[..n]);
+                }
 
                 for (f, &v) in out_buf[..n].iter().enumerate() {
                     let sample = <T as FromSample<f32>>::from_sample_(v);
@@ -304,6 +428,20 @@ where
             // A trailing partial frame (never produced by a conforming backend) must not replay stale data.
             data[frames * channels..].fill(T::EQUILIBRIUM);
             frames_out = frames_out.saturating_add(frames as u64);
+
+            // Return a finished calibration (moving the box; nothing is freed here).
+            if calibration.as_ref().is_some_and(CalibrationJob::is_done) {
+                if let Some(job) = calibration.take() {
+                    if let Err(rtrb::PushError::Full(job)) = cal_out.push(job) {
+                        calibration = Some(job);
+                    }
+                }
+            }
+            bridge_stats.publish(&bridge);
+            let running = core.snapshot().run == RunState::Running;
+            let anchor =
+                block_end_anchor(host_start, frames, sample_rate, frames_out, core.transport_frame(), running, &bridge);
+            stats.on_block(anchor, frames, latency_ns);
         },
         move |err| {
             // May run on the realtime thread: store a code only (formatted on the control thread).
@@ -317,6 +455,64 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::looper::LooperCommand;
+
+    /// Run one 256-frame block of a real looper and return its end-of-block anchor.
+    fn block(core: &mut LooperCore, bridge: &InputBridge, index: u64) -> Anchor {
+        let input = [0.0f32; 256];
+        let mut out = [0.0f32; 256];
+        core.process(&input, &mut out);
+        let running = core.snapshot().run == RunState::Running;
+        let host_start = index * 256 * 1_000_000_000 / 48_000;
+        block_end_anchor(host_start, 256, 48_000, (index + 1) * 256, core.transport_frame(), running, bridge)
+    }
+
+    #[test]
+    fn midi_times_inside_play_and_pause_blocks_map_to_the_transport_state_of_that_block() {
+        let (mut core, mut handles) =
+            LooperCore::new(&LooperConfig::default(), TransportState::default(), 48_000).unwrap();
+        let bridge = InputBridge::new(48_000, 24_000);
+        let ns = |frame: u64| frame * 1_000_000_000 / 48_000;
+
+        let a0 = block(&mut core, &bridge, 0);
+        assert!(!a0.transport_running);
+        assert_eq!(a0.transport_frame_at(ns(200), 48_000), 0, "stopped: frozen");
+
+        // Play is applied at the start of block 1 (frames 256..512).
+        handles.commands.push(LooperCommand::Play).unwrap();
+        let a1 = block(&mut core, &bridge, 1);
+        assert!(a1.transport_running, "the block that applied Play is reported running");
+        // A note 100 frames into that block is 100 transport frames after Play.
+        assert_eq!(a1.transport_frame_at(ns(256 + 100), 48_000), 100);
+        // And one 50 frames into the next block extrapolates forward.
+        assert_eq!(a1.transport_frame_at(ns(512 + 50), 48_000), 306);
+
+        let a2 = block(&mut core, &bridge, 2);
+        assert_eq!(a2.transport_frame, 512);
+
+        // Pause applied at the start of block 3: every time in it maps to the pause point.
+        handles.commands.push(LooperCommand::Pause).unwrap();
+        let a3 = block(&mut core, &bridge, 3);
+        assert!(!a3.transport_running, "the block that applied Pause is reported paused");
+        assert_eq!(a3.transport_frame_at(ns(768 + 100), 48_000), 512);
+        assert_eq!(a3.transport_frame_at(ns(1_024 + 100), 48_000), 512);
+    }
+
+    #[test]
+    fn calibration_job_plays_and_records_on_the_same_frames() {
+        let signal = [0.25f32, -0.25, 0.5];
+        let mut job = CalibrationJob::new(&signal, 5);
+        let mut out = [0.0f32; 4];
+        job.process(&mut out, &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(out, [0.25, -0.25, 0.5, 0.0]);
+        assert_eq!((job.played, job.recorded, job.is_done()), (3, 4, false));
+        let mut out = [0.1f32; 4];
+        job.process(&mut out, &[5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(out, [0.1; 4], "nothing more is played");
+        assert_eq!(&*job.record, &[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert!(job.is_done());
+    }
 
     #[test]
     fn monitoring_off_leaves_the_looper_output_bit_exact() {

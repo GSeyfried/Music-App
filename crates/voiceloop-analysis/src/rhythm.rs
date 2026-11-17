@@ -38,7 +38,7 @@ impl Grid {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimingDeviation {
     pub frame: u64,
@@ -50,7 +50,7 @@ pub struct TimingDeviation {
     pub deviation_steps: f32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimingReport {
     pub deviations: Vec<TimingDeviation>,
@@ -102,7 +102,7 @@ pub fn analyze_timing(onsets: &[u64], grid: &Grid, tolerance_ms: f32) -> Option<
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TempoEstimate {
     pub bpm: f64,

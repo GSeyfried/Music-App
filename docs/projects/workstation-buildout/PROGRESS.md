@@ -51,10 +51,25 @@ Lead: orchestrating session. Rules for agents: `AGENT_RULES.md`.
 ## Completed
 
 - Dev branch, user's doc changes committed as-is, formatting baseline, agent rules.
+- Codex: CI workflow (`.github/workflows/macos-build.yml`), `scripts/check-all.sh`, `deny.toml`,
+  `docs/projects/quality/README.md` (`54dd2c9`). Validated syntax only; full checks run after integration.
+- Codex: independent realtime audit `docs/projects/quality/RT_AUDIT.md` (9 confirmed defects, 4 suspicions).
+
+## Interruptions
+
+- 2026-11-16 ~23:30: all five Claude agents stopped on the account's 5-hour usage limit.
+  Resumed after the reset with their partial work intact, plus the audit fixes below.
 
 ## Defects found
 
-- (none recorded yet)
+RT audit findings, assigned:
+- #1 drift correction by frame dropping breaks continuity and latency (hardware I/O; design or adaptive resampler).
+- #2 global Stop truncates takes by the input latency (persistence agent, looper core).
+- #3 Pause leaves recordings active while discarding input (persistence agent).
+- #4 non-finite input poisons layers; #5 error closures allocate on the RT thread;
+  #7 backend xruns not detected; #9 partial frames (hardware I/O agent).
+- #6 configurable bounds allow callback work that guarantees xruns (persistence agent).
+- #8 unchecked counters (split by file owner).
 
 ## Risks
 

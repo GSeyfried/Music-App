@@ -47,7 +47,8 @@ fn main() {
         }
     }
 
-    let engine = Engine::start(Box::new(|event| match event {
+    let engine = Engine::start(Box::new(|event| {
+        match event {
         EngineEvent::Level(l) => {
             let channels: Vec<String> = l.channels.iter().map(|c| format!("{:>6.1}", c.peak_db)).collect();
             println!(
@@ -83,16 +84,18 @@ fn main() {
             }
         }
         EngineEvent::AudioDiagnostics(d) => println!(
-            "diag   in block {:?} lat {:?} xruns {:?} | out block {:?} lat {:?} xruns {:?} | drift {:?} ppm",
+            "diag   in block {:?} lat {:?} xruns {:?} | out block {:?} lat {:?} xruns {:?} | drift {:?} ppm | bridge {:?}",
             d.capture.as_ref().and_then(|c| c.block_frames),
             d.capture.as_ref().and_then(|c| c.reported_latency_frames),
             d.capture.as_ref().map(|c| c.discontinuities),
             d.output.as_ref().and_then(|o| o.block_frames),
             d.output.as_ref().and_then(|o| o.reported_latency_frames),
             d.output.as_ref().map(|o| o.discontinuities),
-            d.drift_ppm
+            d.drift_ppm,
+            d.output.as_ref().map(|o| (o.bridge.ratio_ppm, o.bridge.mean_fill_frames, o.bridge.discontinuities))
         ),
         other => println!("event  {other:?}"),
+    }
     }));
 
     match engine.list_audio_devices() {

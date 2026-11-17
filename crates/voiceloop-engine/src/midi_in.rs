@@ -213,6 +213,8 @@ struct OpenPort {
     conn: midir::MidiInputConnection<()>,
     rx: rtrb::Consumer<RawMidi>,
     mapper: MidiClockMapper,
+    /// Written only by this port's MIDI callback.
+    dropped: Arc<AtomicU64>,
 }
 
 /// What a hot-plug poll found.
@@ -233,7 +235,9 @@ pub struct MidiManager {
     /// Port names the user wants open (reopened after hot-plug, persisted in settings).
     wanted: Vec<String>,
     last_ports: Vec<(String, String)>,
-    dropped: Arc<AtomicU64>,
+    /// Drops counted by ports that have since closed (each open port has its own
+    /// single-writer counter, so concurrent port callbacks never race).
+    closed_dropped: u64,
 }
 
 fn midi_err(e: impl std::fmt::Display) -> EngineError {
@@ -301,7 +305,8 @@ impl MidiManager {
         input.ignore(midir::Ignore::All);
         let port = input.find_port_by_id(id).ok_or_else(|| EngineError::DeviceNotFound(name.into()))?;
         let (mut tx, rx) = rtrb::RingBuffer::<RawMidi>::new(PORT_RING_CAPACITY);
-        let dropped = self.dropped.clone();
+        let dropped = Arc::new(AtomicU64::new(0));
+        let port_dropped = dropped.clone();
         let conn = input
             .connect(
                 &port,
@@ -311,7 +316,7 @@ impl MidiManager {
                     let received_ns = clock::host_now_ns();
                     if let Some(message) = parse(bytes) {
                         if tx.push(RawMidi { message, device_us, received_ns }).is_err() {
-                            add_saturating(&dropped, 1);
+                            add_saturating(&port_dropped, 1);
                         }
                     }
                 },
@@ -324,29 +329,45 @@ impl MidiManager {
             conn,
             rx,
             mapper: MidiClockMapper::default(),
+            dropped,
         });
         Ok(())
     }
 
     /// Close a port by id or name. The port is no longer reopened automatically.
+    /// Close a port by id or name and stop reopening it. Also succeeds for a
+    /// port that is only *wanted* (unplugged, waiting to reopen): that cancels
+    /// the automatic reopen. `invalid` only when neither applies; nothing is
+    /// changed in that case.
     pub fn close(&mut self, id_or_name: &str) -> Result<(), EngineError> {
-        let before = self.open.len();
-        let mut names = Vec::new();
+        let names: Vec<String> =
+            self.open.iter().filter(|o| o.id == id_or_name || o.name == id_or_name).map(|o| o.name.clone()).collect();
+        let wanted_hit = self.wanted.iter().any(|w| w == id_or_name);
+        if names.is_empty() && !wanted_hit {
+            return Err(EngineError::Invalid(format!("MIDI port {id_or_name} is not open")));
+        }
+        let mut closed = 0;
         self.open.retain(|o| {
             let hit = o.id == id_or_name || o.name == id_or_name;
             if hit {
-                names.push(o.name.clone());
+                closed += o.dropped.load(std::sync::atomic::Ordering::Relaxed);
             }
             !hit
         });
+        self.closed_dropped = self.closed_dropped.saturating_add(closed);
         self.wanted.retain(|w| w != id_or_name && !names.contains(w));
-        if self.open.len() == before && names.is_empty() {
-            return Err(EngineError::Invalid(format!("MIDI port {id_or_name} is not open")));
-        }
         Ok(())
     }
 
+    fn total_dropped(&self) -> u64 {
+        self.open
+            .iter()
+            .map(|o| o.dropped.load(std::sync::atomic::Ordering::Relaxed))
+            .fold(self.closed_dropped, u64::saturating_add)
+    }
+
     pub fn close_all(&mut self) {
+        self.closed_dropped = self.total_dropped();
         for port in self.open.drain(..) {
             let _ = port.conn.close();
         }
@@ -373,13 +394,16 @@ impl MidiManager {
         let Ok(ports) = scan() else { return report };
         let present = |id: &str| ports.iter().any(|(pid, _)| pid == id);
         let mut lost = Vec::new();
+        let mut closed = 0;
         self.open.retain(|o| {
             let keep = present(&o.id);
             if !keep {
                 lost.push(o.name.clone());
+                closed += o.dropped.load(std::sync::atomic::Ordering::Relaxed);
             }
             keep
         });
+        self.closed_dropped = self.closed_dropped.saturating_add(closed);
         report.lost = lost;
         let to_reopen: Vec<(String, String)> = ports
             .iter()
@@ -415,7 +439,7 @@ impl MidiManager {
             }
         }
         out.sort_by_key(|e| e.host_time_ns);
-        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
+        self.total_dropped()
     }
 }
 
@@ -485,6 +509,18 @@ mod tests {
         // A device clock reset (offset jumps by > 1 s) is accepted rather than clamped.
         let r = m.map(5, base * 3);
         assert_eq!(r, base * 3);
+    }
+
+    #[test]
+    fn closing_an_unplugged_wanted_port_cancels_its_reopen_and_succeeds() {
+        let mut m = MidiManager::default();
+        let name = "VoiceLoop ghost port that is never connected".to_string();
+        assert_eq!(m.want(std::slice::from_ref(&name)), vec![name.clone()], "missing now, wanted for later");
+        assert_eq!(m.wanted(), std::slice::from_ref(&name));
+        assert!(m.close(&name).is_ok(), "closing a wanted-but-unplugged port is a successful close");
+        assert!(m.wanted().is_empty());
+        assert!(matches!(m.close(&name), Err(EngineError::Invalid(_))), "nothing left to close");
+        assert!(m.wanted().is_empty(), "a failed close changes nothing");
     }
 
     /// End-to-end through CoreMIDI with a virtual source in this process.

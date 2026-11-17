@@ -161,7 +161,7 @@ impl PitchDetector {
         let energy: f32 = frame[..w].iter().map(|&s| s * s).sum();
         let rms = (energy / w as f32).sqrt();
         let rms_db = if rms > 1e-6 { 20.0 * rms.log10() } else { -120.0 };
-        if !(rms_db >= self.config.silence_db) {
+        if rms_db.is_nan() || rms_db < self.config.silence_db {
             return PitchEstimate { hz: None, clarity: 0.0, rms_db, unpitched: Some(Unpitched::Silence) };
         }
 

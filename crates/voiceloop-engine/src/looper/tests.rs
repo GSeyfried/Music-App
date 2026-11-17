@@ -795,3 +795,437 @@ fn looper_state_trims_tracks_and_serialises() {
     let notice = serde_json::to_value(rejected(RejectReason::PoolExhausted)).unwrap();
     assert_eq!(notice, serde_json::json!({"kind": "rejected", "reason": "poolExhausted"}));
 }
+
+// ---- stop / restart / pause with open recordings (RT audit #2, #3) -----------------
+
+/// Free mode, latency 100: a silent 1000-frame base loop, then an overdub
+/// that starts at t = 1200 (phase 200). Returns the rig at t = 1800.
+fn overdub_in_progress(input: impl FnMut(u64) -> f32 + Copy) -> Rig {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::SetInputLatency { frames: 100 });
+    r.send(C::Record { track: 0 });
+    r.silence(1_000);
+    r.send(C::StopRecording { track: 0 }); // tail stays open until t = 1100
+    r.silence(200);
+    r.send(C::Overdub { track: 0 });
+    r.run(600, input);
+    r
+}
+
+/// Performed at 1500 (phase 500) and at 1750 (phase 750, in the last
+/// `latency` frames before the stop at 1800), and at 1810 (after the stop).
+fn late_hits(f: u64) -> f32 {
+    if f == 1_600 || f == 1_850 || f == 1_910 {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+#[test]
+fn stop_collects_the_in_flight_tail_of_an_overdub() {
+    let mut r = overdub_in_progress(late_hits);
+    r.send(C::Stop);
+    r.run(50, late_hits);
+    let s = r.snap();
+    assert_eq!(s.run, RunState::Stopped, "playback stops at once");
+    assert_eq!(s.tracks[0].state, TrackState::Overdubbing, "while the tail is still arriving");
+    r.run(250, late_hits);
+    let s = r.snap();
+    assert_eq!(s.tracks[0].state, TrackState::Stopped);
+    assert_eq!(r.core.transport_frame(), 0, "rewound once the tail was in");
+    assert!(r.out[1_800..].iter().all(|&v| v == 0.0), "nothing plays while draining");
+
+    let b = r.out.len();
+    r.send(C::Play);
+    r.silence(1_000);
+    assert_eq!(nonzero_from(&r.out, b), vec![b + 500, b + 750], "the hit performed after Stop is not recorded");
+}
+
+#[test]
+fn restart_collects_the_tail_then_runs_from_the_loop_start() {
+    let mut r = overdub_in_progress(late_hits);
+    r.send(C::Restart);
+    r.run(1_100, late_hits); // 100 frames of drain, then t = 0..1000
+    assert_eq!(r.snap().run, RunState::Running);
+    assert_eq!(r.core.transport_frame(), 1_000);
+    assert_eq!(nonzero_from(&r.out, 1_800), vec![1_900 + 500, 1_900 + 750]);
+}
+
+#[test]
+fn stop_closes_a_first_take_like_stop_recording() {
+    // Same performance as `first_take_is_latency_compensated_including_its_tail`,
+    // ended by the transport Stop instead of StopRecording.
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::SetInputLatency { frames: 37 });
+    r.send(C::Record { track: 0 });
+    let input = |f: u64| if f == 137 || f == 1_010 { 1.0 } else { 0.0 };
+    r.run(1_000, input);
+    r.send(C::Stop);
+    r.run(100, input);
+    assert_eq!(r.snap().loop_period, Some(1_000.0), "length is press to press");
+    let b = r.out.len();
+    r.send(C::Play);
+    r.silence(2_000);
+    assert_eq!(nonzero_from(&r.out, b), vec![b + 100, b + 973, b + 1_100, b + 1_973]);
+}
+
+#[test]
+fn stop_fade_is_the_same_with_input_latency() {
+    // `transport_stop_fades_a_recording_it_cuts_short` with 5 frames of latency:
+    // half of the fade-out is applied to frames that arrive after Stop.
+    let mut r = Rig::new(config(10), transport(1_000, LoopMode::Free));
+    r.send(C::SetInputLatency { frames: 5 });
+    r.send(C::Record { track: 0 });
+    r.silence(1_000);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1_000); // t = 2000: phase 0
+    r.send(C::Overdub { track: 0 });
+    r.run(300, |_| 0.5);
+    r.send(C::Stop);
+    r.run(10, |_| 0.5);
+    let before = r.out.len();
+    r.send(C::Play);
+    r.silence(400);
+    let cycle = &r.out[before..];
+    assert!((cycle[150] - 0.5).abs() < 1e-6);
+    assert!((cycle[290] - 0.5).abs() < 1e-6, "ten frames before the cut are untouched");
+    assert!((cycle[295] - 0.25).abs() < 1e-6, "{}", cycle[295]);
+    assert!((cycle[299] - 0.05).abs() < 1e-6, "last recorded frame is faded");
+    assert_eq!(cycle[300], 0.0);
+}
+
+#[test]
+fn commands_wait_while_a_stop_drains() {
+    let mut r = overdub_in_progress(late_hits);
+    r.send(C::Stop);
+    r.send(C::Play); // arrives during the drain: applied after it, not dropped
+    r.run(1_100, late_hits);
+    assert_eq!(r.snap().run, RunState::Running);
+    assert!(r.notices().is_empty());
+}
+
+#[test]
+fn pause_is_refused_while_a_track_records() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.silence(100);
+    r.send(C::Pause);
+    r.silence(10);
+    assert_eq!(r.snap().run, RunState::Running);
+    assert_eq!(r.notices(), vec![rejected(RejectReason::TrackBusy)]);
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::Overdub { track: 0 });
+    r.silence(10);
+    r.send(C::Pause);
+    r.silence(10);
+    assert_eq!(r.notices(), vec![rejected(RejectReason::TrackBusy)], "overdubs too");
+    r.send(C::StopRecording { track: 0 });
+    r.silence(10);
+    r.send(C::Pause);
+    r.silence(10);
+    assert_eq!(r.snap().run, RunState::Paused);
+    assert!(r.notices().is_empty());
+}
+
+// ---- realtime bounds (RT audit #6, #8) ---------------------------------------------
+
+#[test]
+fn config_caps_realtime_work() {
+    let ok = config(0);
+    assert!(ok.max_loop_frames(1_000).is_ok());
+    for bad in [
+        LooperConfig { pool_layers: MAX_POOL_LAYERS + 1, max_loop_seconds: 0.1, ..ok },
+        LooperConfig { max_layers_per_track: MAX_LAYERS_PER_TRACK + 1, ..ok },
+        LooperConfig { fade_frames: MAX_FADE_FRAMES + 1, max_loop_seconds: 100.0, ..ok },
+        LooperConfig { fade_frames: 2_501, ..ok }, // more than a quarter of 10_000 frames
+    ] {
+        assert!(matches!(bad.max_loop_frames(1_000), Err(EngineError::Invalid(_))), "{bad:?}");
+    }
+    assert!(LooperConfig { pool_layers: MAX_POOL_LAYERS, max_loop_seconds: 0.1, ..ok }.max_loop_frames(1_000).is_ok());
+}
+
+#[test]
+fn clear_all_releases_a_full_pool_in_one_block() {
+    let mut r = Rig::new(LooperConfig { max_layers_per_track: 3, ..config(0) }, transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, |_| 0.1);
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::Record { track: 1 });
+    r.silence(1_000);
+    for t in 0..2 {
+        for _ in 0..2 {
+            r.send(C::Overdub { track: t as u8 });
+            r.silence(100);
+            r.send(C::StopRecording { track: t as u8 });
+            r.silence(10);
+        }
+    }
+    r.silence(10);
+    let s = r.snap();
+    assert_eq!((s.tracks[0].layers, s.tracks[1].layers, s.free_layers), (3, 3, 0), "the whole pool is in use");
+    r.send(C::ClearAll);
+    r.silence(1); // one callback releases every buffer; the control thread zeroes them
+    assert_eq!(r.snap().free_layers, 6);
+    assert!(r.notices().is_empty());
+}
+
+#[test]
+fn transport_stops_before_its_clock_could_overflow() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Play);
+    r.silence(1);
+    r.core.set_transport_frame(MAX_TRANSPORT_FRAME - 10);
+    r.silence(64);
+    assert_eq!(r.snap().run, RunState::Stopped);
+    assert_eq!(r.core.transport_frame(), 0);
+}
+
+// ---- layer export / import (persistence) -------------------------------------------
+
+use super::transfer::{Captured, Exporter, Importer, LayerSlot, Poll, RestorePlan, TransferError};
+
+fn export(r: &mut Rig) -> Result<Captured, TransferError> {
+    let mut e = Exporter::new();
+    for _ in 0..10_000 {
+        match e.poll(&mut r.h) {
+            Poll::Pending => r.silence(64),
+            Poll::Ready(x) => return x,
+        }
+    }
+    panic!("export did not finish");
+}
+
+fn plan_of(c: &Captured) -> (RestorePlan, Vec<(u8, LayerSlot, Vec<f32>)>) {
+    let mut tracks = c.inventory.tracks;
+    let mut layers = Vec::new();
+    for (t, tr) in c.tracks.iter().enumerate() {
+        tracks[t] = tr.plan;
+        for (i, l) in tr.layers.iter().enumerate() {
+            layers.push((t as u8, LayerSlot::Active(i as u8), l.clone()));
+        }
+        for (i, l) in tr.redo.iter().enumerate() {
+            layers.push((t as u8, LayerSlot::Redo(i as u8), l.clone()));
+        }
+    }
+    let plan = RestorePlan {
+        transport: c.inventory.transport,
+        period: c.inventory.period,
+        latency: c.inventory.latency,
+        tracks,
+    };
+    (plan, layers)
+}
+
+fn import(r: &mut Rig, c: &Captured) -> Result<(), TransferError> {
+    let (plan, layers) = plan_of(c);
+    let mut im = Importer::new(plan, layers);
+    for _ in 0..10_000 {
+        match im.poll(&mut r.h) {
+            Poll::Pending => r.silence(64),
+            Poll::Ready(x) => return x,
+        }
+    }
+    panic!("import did not finish");
+}
+
+/// Deterministic noise in -0.5..0.5.
+fn noise(seed: u64) -> impl FnMut(u64) -> f32 + Copy {
+    move |f| {
+        let x = (f ^ seed).wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        ((x >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+    }
+}
+
+/// Render `frames` from a stopped looper, starting with Play.
+fn render_from_start(r: &mut Rig, frames: usize) -> Vec<f32> {
+    let b = r.out.len();
+    r.send(C::Play);
+    r.silence(frames);
+    let out = r.out[b..].to_vec();
+    r.send(C::Stop);
+    r.silence(1);
+    out
+}
+
+fn session_with_layers(t: TransportState) -> Rig {
+    let mut r = Rig::new(LooperConfig { pool_layers: 8, ..config(16) }, t);
+    r.send(C::SetInputLatency { frames: 7 });
+    r.send(C::Record { track: 0 });
+    r.run(2_300, noise(1));
+    r.send(C::StopRecording { track: 0 });
+    r.run(3_000, noise(2)); // free: closes the take; synced: the take runs to its boundary
+    for seed in [3, 4] {
+        r.send(C::Overdub { track: 0 });
+        r.run(1_700, noise(seed));
+        r.send(C::StopRecording { track: 0 });
+        r.run(2_500, noise(9));
+    }
+    r.send(C::Undo { track: 0 }); // keep one layer in the redo history
+    r.send(C::Record { track: 1 });
+    r.run(4_500, noise(5));
+    r.send(C::SetGain { track: 1, gain: 0.7 });
+    r.send(C::SetGain { track: 0, gain: 1.3 });
+    r.send(C::Stop);
+    r.silence(100);
+    let s = r.snap();
+    assert_eq!((s.tracks[0].layers, s.tracks[0].redo_layers, s.tracks[1].layers), (2, 1, 1), "{s:?}");
+    r
+}
+
+fn assert_round_trip(t: TransportState) {
+    let mut a = session_with_layers(t);
+    let captured = export(&mut a).expect("export");
+    assert!(captured.tracks[0].layers[0].iter().any(|&v| v != 0.0));
+    let original = render_from_start(&mut a, 5_000);
+    assert!(original.iter().any(|&v| v != 0.0));
+
+    // Clear the same looper and load the captured state back.
+    a.send(C::ClearAll);
+    a.silence(64);
+    import(&mut a, &captured).expect("import");
+    assert!(render_from_start(&mut a, 5_000) == original, "bit-identical after clear + import");
+
+    // A fresh looper (the app restarted) plays the same, and redo history survived.
+    let mut wrong_rate = Rig::new(LooperConfig { pool_layers: 8, ..config(16) }, transport(2_000, LoopMode::Free));
+    assert!(matches!(import(&mut wrong_rate, &captured), Err(TransferError::DoesNotFit(_))), "resample first");
+    let mut b = Rig::new(LooperConfig { pool_layers: 8, ..config(16) }, transport(1_000, LoopMode::Free));
+    import(&mut b, &captured).expect("import into a new looper");
+    assert!(render_from_start(&mut b, 5_000) == original, "bit-identical in a fresh looper");
+    let again = export(&mut b).unwrap();
+    assert_eq!(again.tracks, captured.tracks, "export of the import is identical");
+    for r in [&mut a, &mut b] {
+        r.send(C::Redo { track: 0 });
+        r.silence(1);
+    }
+    assert!(render_from_start(&mut a, 3_000) == render_from_start(&mut b, 3_000), "redo layer restored");
+}
+
+#[test]
+fn export_clear_import_is_bit_identical_in_free_mode() {
+    assert_round_trip(transport(1_000, LoopMode::Free));
+}
+
+#[test]
+fn export_clear_import_is_bit_identical_with_a_fractional_metronome_loop() {
+    let mut t = transport(1_000, LoopMode::Synced);
+    t.bpm = 113.0; // 530.97... frames per beat: the loop period is fractional
+    t.loop_length = LoopLength { bars: 1, beats: 0 };
+    assert_round_trip(t);
+}
+
+#[test]
+fn export_is_refused_while_recording_and_import_while_running() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(500, |_| 0.2);
+    assert!(matches!(export(&mut r), Err(TransferError::Busy(_))));
+    r.send(C::StopRecording { track: 0 });
+    r.silence(100);
+    let captured = export(&mut r).expect("export while playing is fine");
+    let period = r.snap().loop_period.unwrap();
+    assert_eq!(captured.inventory.content_frames(), period.ceil() as usize);
+    assert!(matches!(import(&mut r, &captured), Err(TransferError::Busy(_))), "transport is running");
+}
+
+#[test]
+fn import_rejects_content_that_does_not_fit_and_leaves_the_looper_usable() {
+    let mut big = Rig::new(LooperConfig { max_loop_seconds: 5.0, ..config(0) }, transport(1_000, LoopMode::Free));
+    big.send(C::Record { track: 0 });
+    big.run(3_000, |_| 0.2);
+    big.send(C::Stop);
+    big.silence(10);
+    let captured = export(&mut big).unwrap();
+    let mut small = Rig::new(LooperConfig { max_loop_seconds: 2.0, ..config(0) }, transport(1_000, LoopMode::Free));
+    assert!(matches!(import(&mut small, &captured), Err(TransferError::DoesNotFit(_))));
+    small.send(C::Record { track: 0 });
+    small.silence(10);
+    assert_eq!(small.snap().tracks[0].state, TrackState::Recording);
+}
+
+// ---- stream restarts: park and restore (iOS route changes, device changes) ---------
+
+/// Tear the looper down the way a stream stop does and collect what it parked.
+fn park(r: Rig) -> super::transfer::ParkedLooper {
+    let Rig { core, mut h, .. } = r;
+    let rx = h.parked.take().expect("parking channel");
+    drop(core); // the stream (and the core inside it) is dropped
+    rx.try_recv().expect("the core parked its content")
+}
+
+#[test]
+fn loops_survive_a_stream_restart_bit_identically() {
+    for t in [transport(1_000, LoopMode::Free), {
+        let mut t = transport(1_000, LoopMode::Synced);
+        t.bpm = 113.0;
+        t.loop_length = LoopLength { bars: 1, beats: 0 };
+        t
+    }] {
+        let mut a = session_with_layers(t);
+        let original = render_from_start(&mut a, 5_000);
+        let parked = park(a);
+        assert!(parked.has_content());
+        let captured = parked.into_captured();
+        // The new stream: a fresh looper at the same rate.
+        let mut b = Rig::new(LooperConfig { pool_layers: 8, ..config(16) }, transport(1_000, LoopMode::Free));
+        import(&mut b, &captured).expect("restore into the new stream");
+        assert!(render_from_start(&mut b, 5_000) == original, "identical playback after the restart");
+        let s = b.snap();
+        assert_eq!((s.tracks[0].layers, s.tracks[0].redo_layers, s.tracks[1].layers), (2, 1, 1));
+        assert_eq!((s.tracks[1].gain, s.tracks[0].gain), (0.7, 1.3));
+    }
+}
+
+#[test]
+fn a_take_open_at_teardown_is_closed_and_kept() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(800, impulse(300)); // first take still open when the stream dies
+    let parked = park(r);
+    assert_eq!(parked.period, Some(800.0), "closed at the teardown point like Stop");
+    let captured = parked.into_captured();
+    let mut b = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    import(&mut b, &captured).unwrap();
+    let out = render_from_start(&mut b, 1_600);
+    assert_eq!(nonzero_from(&out, 0), vec![300, 1_100]);
+
+    // An overdub open at teardown keeps what was written.
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.silence(1_000);
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::Overdub { track: 0 });
+    r.run(500, impulse(1_200));
+    let captured = park(r).into_captured();
+    assert_eq!(captured.tracks[0].layers.len(), 2);
+    assert_eq!(captured.tracks[0].layers[1][200], 1.0);
+}
+
+#[test]
+fn an_empty_or_loading_looper_parks_nothing_useful() {
+    let r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    assert!(!park(r).has_content());
+    // Mid-restore content is incomplete: nothing is parked (the source is kept by the caller).
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    let mut tracks = [super::transfer::TrackPlan::EMPTY; MAX_TRACKS];
+    tracks[0].layers = 1;
+    let plan = RestorePlan { transport: transport(1_000, LoopMode::Free), period: Some(100.0), latency: 0, tracks };
+    r.h.jobs.push(super::transfer::LayerJob { ticket: 0, kind: super::transfer::JobKind::Restore(plan, None) }).unwrap();
+    r.silence(1);
+    let Rig { core, mut h, .. } = r;
+    let rx = h.parked.take().unwrap();
+    drop(core);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn snapshots_carry_a_content_epoch() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    let e0 = r.snap().epoch;
+    r.send(C::SetGain { track: 0, gain: 0.5 });
+    r.silence(10);
+    assert_eq!(r.snap().epoch, e0, "mixer changes are not content changes");
+    r.send(C::Record { track: 0 });
+    r.silence(100);
+    assert_ne!(r.snap().epoch, e0);
+}

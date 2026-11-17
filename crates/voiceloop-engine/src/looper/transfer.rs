@@ -1,0 +1,538 @@
+//! Realtime-safe layer export and import.
+//!
+//! Layer buffers belong to the audio thread (D-011), so the control thread
+//! cannot read or write them directly. Instead it sends [`LayerJob`]s through
+//! a wait-free ring; the output callback answers at most [`JOBS_PER_BLOCK`]
+//! of them per block and returns each job (with its buffer) on a second ring.
+//!
+//! ```text
+//!  control thread                         output callback (LooperCore::service_jobs)
+//!  Describe ───────────────────────────▶  fills Inventory (layout, gains, epoch)
+//!  Read{slot, offset, buf} ×N ─────────▶  copies ≤ CHUNK_FRAMES into buf, stamps epoch
+//!  Restore{plan} ──────────────────────▶  releases all layers, takes zeroed ones, enters "loading"
+//!  Write{slot, offset, buf} ×N ────────▶  copies buf into the layer
+//!  Finish ─────────────────────────────▶  leaves "loading"
+//! ```
+//!
+//! - **No allocation, freeing, or locking on the audio thread.** Every buffer
+//!   is allocated by the control thread and returned to it to be dropped.
+//! - **Bounded work per callback:** at most `JOBS_PER_BLOCK × CHUNK_FRAMES`
+//!   samples copied (4 × 16 384 floats = 256 KiB, roughly 20-40 µs).
+//! - **Consistency:** the looper bumps an *epoch* whenever layer content or
+//!   the layer stacks change (recording, undo, clear ...). An export is valid
+//!   only if every chunk carries the epoch reported by `Describe`; otherwise
+//!   the user changed something mid-copy and the export is retried.
+//! - **Import** is accepted only while the transport is stopped and nothing
+//!   records; while loading, the looper refuses commands (`trackBusy`), so a
+//!   half-written layer can never be heard.
+//!
+//! [`Exporter`] and [`Importer`] are the control-thread state machines. They
+//! never block: call `poll` repeatedly (the engine does so every few ms).
+
+use std::time::{Duration, Instant};
+
+use rtrb::{Consumer, Producer};
+
+use super::pool::{LayerBuf, LayerRecycler};
+use super::processor::{LooperHandles, RejectReason, RunState};
+use super::MAX_TRACKS;
+use crate::transport::TransportState;
+
+/// Capacity of the job and result rings. The control side keeps at most this
+/// many jobs outstanding, so the audio side can always return them.
+pub const JOB_CAPACITY: usize = 32;
+/// Jobs the audio thread serves per callback.
+pub const JOBS_PER_BLOCK: usize = 4;
+/// Frames copied per Read/Write job.
+pub const CHUNK_FRAMES: usize = 16_384;
+/// A transfer that makes no progress for this long has failed (audio stopped?).
+pub const STALL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// A layer of a track: `Active(i)` is the i-th audible layer (0 = base take),
+/// `Redo(i)` the i-th undone layer (oldest first; Redo restores the last one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerSlot {
+    Active(u8),
+    Redo(u8),
+}
+
+/// Mixer state and layer counts of one track.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackPlan {
+    pub layers: u8,
+    pub redo: u8,
+    pub gain: f32,
+    pub muted: bool,
+    pub solo: bool,
+    pub playing: bool,
+}
+
+impl TrackPlan {
+    pub const EMPTY: Self = Self { layers: 0, redo: 0, gain: 1.0, muted: false, solo: false, playing: true };
+}
+
+/// What the looper holds, as seen by one consistent `Describe`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Inventory {
+    pub epoch: u64,
+    /// Something is recording, draining, or loading: content is changing.
+    pub busy: bool,
+    pub run: RunState,
+    pub transport: TransportState,
+    /// Master loop period in frames (`None` before the first loop exists).
+    pub period: Option<f64>,
+    pub latency: u32,
+    pub max_frames: usize,
+    pub max_layers: usize,
+    pub track_count: u8,
+    pub tracks: [TrackPlan; MAX_TRACKS],
+}
+
+impl Inventory {
+    /// Frames of each layer that can hold audio: `ceil(period)`.
+    pub fn content_frames(&self) -> usize {
+        self.period.map_or(0, |p| (p.ceil().max(0.0) as usize).min(self.max_frames))
+    }
+}
+
+/// Content to load: transport, loop period, latency, and per-track layout.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RestorePlan {
+    pub transport: TransportState,
+    /// Free-mode loop period. Ignored in Metronome mode (derived from the transport).
+    pub period: Option<f64>,
+    pub latency: u32,
+    pub tracks: [TrackPlan; MAX_TRACKS],
+}
+
+#[derive(Debug)]
+pub struct Chunk {
+    pub track: u8,
+    pub slot: LayerSlot,
+    pub offset: usize,
+    pub buf: Box<[f32]>,
+    /// Epoch at the time of the copy (set by the audio thread).
+    pub epoch: u64,
+    pub result: Option<Result<(), RejectReason>>,
+}
+
+#[derive(Debug)]
+pub enum JobKind {
+    Describe(Option<Inventory>),
+    Read(Chunk),
+    Restore(RestorePlan, Option<Result<(), RejectReason>>),
+    Write(Chunk),
+    Finish(Option<Result<(), RejectReason>>),
+}
+
+/// One request; the same value comes back with its result filled in.
+#[derive(Debug)]
+pub struct LayerJob {
+    /// Identifies the transfer, so answers to an abandoned one are ignored.
+    pub ticket: u32,
+    pub kind: JobKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TransferError {
+    /// Recording, draining or loading in progress, or content changed mid-copy.
+    Busy(&'static str),
+    Rejected(RejectReason),
+    /// The plan does not fit this looper (tracks, layers, length).
+    DoesNotFit(String),
+    /// No answer from the audio thread.
+    Stalled,
+}
+
+impl std::fmt::Display for TransferError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy(why) => write!(f, "looper is busy: {why}"),
+            Self::Rejected(r) => write!(f, "looper rejected the transfer: {r:?}"),
+            Self::DoesNotFit(why) => write!(f, "{why}"),
+            Self::Stalled => write!(f, "the audio thread stopped answering"),
+        }
+    }
+}
+
+pub enum Poll<T> {
+    Pending,
+    Ready(Result<T, TransferError>),
+}
+
+/// Audio copied out of the looper.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedTrack {
+    pub plan: TrackPlan,
+    /// Audible layers, base take first. Each is `content_frames` long.
+    pub layers: Vec<Vec<f32>>,
+    /// Undone layers, oldest first.
+    pub redo: Vec<Vec<f32>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Captured {
+    pub inventory: Inventory,
+    pub tracks: Vec<CapturedTrack>,
+}
+
+fn next_ticket() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static T: AtomicU32 = AtomicU32::new(1);
+    T.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Sends queued jobs while keeping at most `JOB_CAPACITY` outstanding.
+struct Pipe {
+    ticket: u32,
+    queue: std::collections::VecDeque<JobKind>,
+    outstanding: usize,
+    last_progress: Instant,
+}
+
+impl Pipe {
+    fn new() -> Self {
+        Self { ticket: next_ticket(), queue: Default::default(), outstanding: 0, last_progress: Instant::now() }
+    }
+
+    fn pump(&mut self, jobs: &mut Producer<LayerJob>) {
+        while self.outstanding < JOB_CAPACITY && jobs.slots() > 0 {
+            let Some(kind) = self.queue.pop_front() else { break };
+            match jobs.push(LayerJob { ticket: self.ticket, kind }) {
+                Ok(()) => self.outstanding += 1,
+                Err(rtrb::PushError::Full(job)) => {
+                    self.queue.push_front(job.kind);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Next answer belonging to this transfer.
+    fn recv(&mut self, results: &mut Consumer<LayerJob>) -> Option<JobKind> {
+        while let Ok(job) = results.pop() {
+            if job.ticket == self.ticket {
+                self.outstanding = self.outstanding.saturating_sub(1);
+                self.last_progress = Instant::now();
+                return Some(job.kind);
+            }
+        }
+        None
+    }
+
+    fn stalled(&self) -> bool {
+        self.last_progress.elapsed() > STALL_TIMEOUT
+    }
+}
+
+/// Copies every layer out of a running looper.
+pub struct Exporter {
+    pipe: Pipe,
+    inventory: Option<Inventory>,
+    out: Vec<CapturedTrack>,
+    remaining: usize,
+}
+
+impl Default for Exporter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Exporter {
+    pub fn new() -> Self {
+        let mut pipe = Pipe::new();
+        pipe.queue.push_back(JobKind::Describe(None));
+        Self { pipe, inventory: None, out: Vec::new(), remaining: 0 }
+    }
+
+    fn plan_reads(&mut self, inv: Inventory) {
+        let frames = inv.content_frames();
+        for (t, &plan) in inv.tracks.iter().enumerate().take(inv.track_count as usize) {
+            let mut track = CapturedTrack { plan, layers: Vec::new(), redo: Vec::new() };
+            for (count, redo) in [(plan.layers, false), (plan.redo, true)] {
+                for i in 0..count {
+                    let v = vec![0.0f32; frames];
+                    if redo {
+                        track.redo.push(v);
+                    } else {
+                        track.layers.push(v);
+                    }
+                    let slot = if redo { LayerSlot::Redo(i) } else { LayerSlot::Active(i) };
+                    let mut offset = 0;
+                    while offset < frames {
+                        let len = CHUNK_FRAMES.min(frames - offset);
+                        self.pipe.queue.push_back(JobKind::Read(Chunk {
+                            track: t as u8,
+                            slot,
+                            offset,
+                            buf: vec![0.0; len].into_boxed_slice(),
+                            epoch: 0,
+                            result: None,
+                        }));
+                        self.remaining += 1;
+                        offset += len;
+                    }
+                }
+            }
+            self.out.push(track);
+        }
+    }
+
+    pub fn poll(&mut self, h: &mut LooperHandles) -> Poll<Captured> {
+        self.pipe.pump(&mut h.jobs);
+        while let Some(kind) = self.pipe.recv(&mut h.job_results) {
+            match kind {
+                JobKind::Describe(Some(inv)) => {
+                    if inv.busy {
+                        return Poll::Ready(Err(TransferError::Busy("finish recording before saving")));
+                    }
+                    self.inventory = Some(inv);
+                    self.plan_reads(inv);
+                }
+                JobKind::Read(chunk) => {
+                    let Some(inv) = self.inventory else { continue };
+                    if let Some(Err(r)) = chunk.result {
+                        return Poll::Ready(Err(TransferError::Rejected(r)));
+                    }
+                    if chunk.epoch != inv.epoch {
+                        return Poll::Ready(Err(TransferError::Busy("loop content changed while it was being copied")));
+                    }
+                    let track = &mut self.out[chunk.track as usize];
+                    let dst = match chunk.slot {
+                        LayerSlot::Active(i) => &mut track.layers[i as usize],
+                        LayerSlot::Redo(i) => &mut track.redo[i as usize],
+                    };
+                    dst[chunk.offset..chunk.offset + chunk.buf.len()].copy_from_slice(&chunk.buf);
+                    self.remaining -= 1;
+                }
+                _ => {}
+            }
+            self.pipe.pump(&mut h.jobs);
+        }
+        match self.inventory {
+            Some(inv) if self.remaining == 0 => {
+                Poll::Ready(Ok(Captured { inventory: inv, tracks: std::mem::take(&mut self.out) }))
+            }
+            _ if self.pipe.stalled() => Poll::Ready(Err(TransferError::Stalled)),
+            _ => Poll::Pending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportStage {
+    Describing,
+    Restoring,
+    Writing,
+    Finishing,
+}
+
+/// Loads layers into a stopped looper.
+pub struct Importer {
+    pipe: Pipe,
+    plan: RestorePlan,
+    /// (track, slot, samples)
+    layers: Vec<(u8, LayerSlot, Vec<f32>)>,
+    stage: ImportStage,
+    remaining: usize,
+    restore_attempts: u32,
+    /// A write failed: finish loading (so the looper is usable) and then report this.
+    failed: Option<TransferError>,
+}
+
+impl Importer {
+    /// `layers` holds every layer named by `plan` (any order). Samples beyond
+    /// the looper's layer length are an error, shorter layers are zero-padded.
+    pub fn new(plan: RestorePlan, layers: Vec<(u8, LayerSlot, Vec<f32>)>) -> Self {
+        let mut pipe = Pipe::new();
+        pipe.queue.push_back(JobKind::Describe(None));
+        Self { pipe, plan, layers, stage: ImportStage::Describing, remaining: 0, restore_attempts: 0, failed: None }
+    }
+
+    fn check_fit(&self, inv: &Inventory) -> Result<(), TransferError> {
+        if inv.busy || inv.run != RunState::Stopped {
+            return Err(TransferError::Busy("stop the transport before opening a project"));
+        }
+        if self.plan.transport.sample_rate != inv.transport.sample_rate {
+            return Err(TransferError::DoesNotFit(format!(
+                "content is at {} Hz but the looper runs at {} Hz (resample before importing)",
+                self.plan.transport.sample_rate, inv.transport.sample_rate
+            )));
+        }
+        for (t, tp) in self.plan.tracks.iter().enumerate() {
+            let used = tp.layers > 0 || tp.redo > 0;
+            if used && t >= inv.track_count as usize {
+                return Err(TransferError::DoesNotFit(format!(
+                    "the project uses track {} but the looper has {} tracks",
+                    t + 1,
+                    inv.track_count
+                )));
+            }
+            if tp.layers as usize > inv.max_layers || tp.redo as usize > inv.max_layers {
+                return Err(TransferError::DoesNotFit(format!(
+                    "track {} has more layers than the looper allows ({})",
+                    t + 1,
+                    inv.max_layers
+                )));
+            }
+        }
+        if let Some(p) = self.plan.period {
+            if !(p.is_finite() && p >= 1.0) || p.ceil() as usize > inv.max_frames {
+                return Err(TransferError::DoesNotFit(format!(
+                    "the loop is {p:.0} frames but the looper holds at most {} (raise maxLoopSeconds)",
+                    inv.max_frames
+                )));
+            }
+        }
+        if let Some((_, _, v)) = self.layers.iter().find(|(_, _, v)| v.len() > inv.max_frames) {
+            return Err(TransferError::DoesNotFit(format!(
+                "a layer is {} frames but the looper holds at most {}",
+                v.len(),
+                inv.max_frames
+            )));
+        }
+        Ok(())
+    }
+
+    fn plan_writes(&mut self) {
+        for (track, slot, data) in &self.layers {
+            let mut offset = 0;
+            while offset < data.len() {
+                let len = CHUNK_FRAMES.min(data.len() - offset);
+                self.pipe.queue.push_back(JobKind::Write(Chunk {
+                    track: *track,
+                    slot: *slot,
+                    offset,
+                    buf: data[offset..offset + len].to_vec().into_boxed_slice(),
+                    epoch: 0,
+                    result: None,
+                }));
+                self.remaining += 1;
+                offset += len;
+            }
+        }
+        if self.remaining == 0 {
+            self.pipe.queue.push_back(JobKind::Finish(None));
+            self.stage = ImportStage::Finishing;
+        }
+    }
+
+    pub fn poll(&mut self, h: &mut LooperHandles) -> Poll<()> {
+        self.pipe.pump(&mut h.jobs);
+        while let Some(kind) = self.pipe.recv(&mut h.job_results) {
+            match (self.stage, kind) {
+                (ImportStage::Describing, JobKind::Describe(Some(inv))) => {
+                    if let Err(e) = self.check_fit(&inv) {
+                        return Poll::Ready(Err(e));
+                    }
+                    self.stage = ImportStage::Restoring;
+                    self.pipe.queue.push_back(JobKind::Restore(self.plan, None));
+                }
+                (ImportStage::Restoring, JobKind::Restore(_, result)) => match result {
+                    Some(Ok(())) => {
+                        self.stage = ImportStage::Writing;
+                        self.plan_writes();
+                    }
+                    // Old layers were released but are not zeroed yet: zero them and retry.
+                    Some(Err(RejectReason::PoolExhausted)) if self.restore_attempts < 50 => {
+                        self.restore_attempts += 1;
+                        recycle(&mut h.recycler);
+                        self.pipe.queue.push_back(JobKind::Restore(self.plan, None));
+                    }
+                    Some(Err(r)) => return Poll::Ready(Err(TransferError::Rejected(r))),
+                    None => return Poll::Ready(Err(TransferError::Stalled)),
+                },
+                (ImportStage::Writing, JobKind::Write(chunk)) => {
+                    if let Some(Err(r)) = chunk.result {
+                        self.pipe.queue.clear();
+                        self.pipe.queue.push_back(JobKind::Finish(None));
+                        self.stage = ImportStage::Finishing;
+                        self.failed = Some(TransferError::Rejected(r));
+                        continue;
+                    }
+                    self.remaining -= 1;
+                    if self.remaining == 0 {
+                        self.stage = ImportStage::Finishing;
+                        self.pipe.queue.push_back(JobKind::Finish(None));
+                    }
+                }
+                (ImportStage::Finishing, JobKind::Finish(result)) => {
+                    return Poll::Ready(match (self.failed.take(), result) {
+                        (Some(e), _) => Err(e),
+                        (None, Some(Err(r))) => Err(TransferError::Rejected(r)),
+                        _ => Ok(()),
+                    });
+                }
+                _ => {}
+            }
+            self.pipe.pump(&mut h.jobs);
+        }
+        if self.pipe.stalled() {
+            return Poll::Ready(Err(TransferError::Stalled));
+        }
+        Poll::Pending
+    }
+}
+
+fn recycle(recycler: &mut LayerRecycler) {
+    recycler.service();
+}
+
+/// One track of a parked looper.
+#[derive(Debug)]
+pub struct ParkedTrack {
+    pub plan: TrackPlan,
+    pub layers: Vec<LayerBuf>,
+    pub redo: Vec<LayerBuf>,
+}
+
+/// Everything a looper held when its stream was torn down: the layer
+/// buffers themselves (moved, full `max_frames` length), mixer state,
+/// transport, loop and latency. Restore it with [`ParkedLooper::into_captured`]
+/// and an [`Importer`] (resampling first if the new stream runs at another rate).
+#[derive(Debug)]
+pub struct ParkedLooper {
+    pub transport: TransportState,
+    pub period: Option<f64>,
+    pub latency: u32,
+    pub max_frames: usize,
+    pub max_layers: usize,
+    pub tracks: Vec<ParkedTrack>,
+}
+
+impl ParkedLooper {
+    pub fn has_content(&self) -> bool {
+        self.tracks.iter().any(|t| !t.layers.is_empty() || !t.redo.is_empty())
+    }
+
+    /// The same shape an export produces: layers trimmed to `ceil(period)`.
+    pub fn into_captured(self) -> Captured {
+        let mut tracks_plan = [TrackPlan::EMPTY; MAX_TRACKS];
+        for (slot, t) in tracks_plan.iter_mut().zip(self.tracks.iter()) {
+            *slot = t.plan;
+        }
+        let inventory = Inventory {
+            epoch: 0,
+            busy: false,
+            run: RunState::Stopped,
+            transport: self.transport,
+            period: self.period,
+            latency: self.latency,
+            max_frames: self.max_frames,
+            max_layers: self.max_layers,
+            track_count: self.tracks.len().min(MAX_TRACKS) as u8,
+            tracks: tracks_plan,
+        };
+        let frames = inventory.content_frames();
+        let cut = |bufs: Vec<LayerBuf>| -> Vec<Vec<f32>> {
+            bufs.into_iter().map(|b| b.get(..frames).unwrap_or(&b[..]).to_vec()).collect()
+        };
+        let tracks = self
+            .tracks
+            .into_iter()
+            .map(|t| CapturedTrack { plan: t.plan, layers: cut(t.layers), redo: cut(t.redo) })
+            .collect();
+        Captured { inventory, tracks }
+    }
+}

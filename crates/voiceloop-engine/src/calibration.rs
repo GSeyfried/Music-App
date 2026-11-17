@@ -95,6 +95,8 @@ pub enum CalibrationFailure {
     NotDetected(String),
     /// Chirps were found but disagree, e.g. acoustic echoes or dropouts.
     Inconsistent(String),
+    /// The run did not complete (audio stopped, or the output never played it).
+    Aborted(String),
 }
 
 /// Find the lag of each chirp in `recorded` (which starts at the same output

@@ -14,6 +14,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 voiceloop-analysis = { path = "../voiceloop-analysis" }
+voiceloop-project = { path = "../voiceloop-project" }
 
 [dev-dependencies]
 serde_json = { workspace = true }

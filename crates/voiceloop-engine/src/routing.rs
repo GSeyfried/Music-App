@@ -67,6 +67,28 @@ impl Default for MonitorConfig {
 }
 
 impl MonitorConfig {
+    /// Reject a gain that is not finite or outside `0..=MAX_MONITOR_GAIN`, so
+    /// what status and settings report is exactly what the callback applies.
+    pub fn validate(self) -> Result<Self, crate::error::EngineError> {
+        if self.gain.is_finite() && (0.0..=MAX_MONITOR_GAIN).contains(&self.gain) {
+            Ok(self)
+        } else {
+            Err(crate::error::EngineError::Invalid(format!(
+                "monitor gain must be between 0 and {MAX_MONITOR_GAIN}, got {}",
+                self.gain
+            )))
+        }
+    }
+
+    /// Clamp an untrusted (e.g. hand-edited, persisted) value into range; non-finite becomes 1 and disabled.
+    pub fn normalized(self) -> Self {
+        if self.gain.is_finite() {
+            Self { gain: self.gain.clamp(0.0, MAX_MONITOR_GAIN), ..self }
+        } else {
+            Self { enabled: false, gain: 1.0 }
+        }
+    }
+
     /// Gain the output callback should apply (0 when disabled or invalid).
     pub fn effective_gain(&self) -> f32 {
         if self.enabled && self.gain.is_finite() {
@@ -315,6 +337,16 @@ mod tests {
         assert_eq!(cell.target_gain(), MAX_MONITOR_GAIN);
         cell.set(MonitorConfig { enabled: true, gain: f32::NAN });
         assert_eq!(cell.target_gain(), 0.0);
+    }
+
+    #[test]
+    fn monitor_gain_is_validated_or_normalised_never_silently_different() {
+        assert!(MonitorConfig { enabled: true, gain: 2.0 }.validate().is_ok());
+        assert!(MonitorConfig { enabled: true, gain: 9.0 }.validate().is_err());
+        assert!(MonitorConfig { enabled: true, gain: -0.1 }.validate().is_err());
+        assert!(MonitorConfig { enabled: true, gain: f32::NAN }.validate().is_err());
+        assert_eq!(MonitorConfig { enabled: true, gain: 9.0 }.normalized(), MonitorConfig { enabled: true, gain: 2.0 });
+        assert_eq!(MonitorConfig { enabled: true, gain: f32::INFINITY }.normalized(), MonitorConfig::default());
     }
 
     #[test]

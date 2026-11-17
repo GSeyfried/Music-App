@@ -13,12 +13,13 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::analysis::AnalysisWorker;
+use crate::calibration::{self, CalibrationFailure, CalibrationResult, TestSignal};
 use crate::capture::{CaptureInfo, CaptureRequest, InputCapture, InputTaps, LooperFeed};
-use crate::clock::{self, DriftEstimator, STREAM_DEVICE_LOST};
+use crate::clock::{self, DriftEstimator, StreamStats, STREAM_DEVICE_LOST};
 use crate::devices::{self, RateCaps, RateChoice};
 use crate::engine::{EngineEvent, EngineWarning};
 use crate::error::EngineError;
-use crate::looper::io::{LooperPlayback, OutputInfo, OutputOptions};
+use crate::looper::io::{CalibrationJob, LooperPlayback, OutputInfo, OutputOptions};
 use crate::looper::{IoCounters, LooperConfig};
 use crate::midi_in::{MidiBatch, MidiManager, MidiPortInfo};
 use crate::model::DeviceDirection;
@@ -53,6 +54,41 @@ pub struct AudioDiagnostics {
     /// (positive = input faster). `None` until 10 s of data, or without a looper.
     pub drift_ppm: Option<f64>,
     pub drift_window_seconds: Option<f64>,
+}
+
+/// A stream whose callbacks stopped for this long is treated as lost.
+pub const STALL_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+/// Outcome of a loopback calibration (`calibration` event).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationOutcome {
+    pub result: Option<CalibrationResult>,
+    pub error: Option<CalibrationFailure>,
+    /// The result was sent to the looper as `setInputLatency` (and saved).
+    pub applied: bool,
+}
+
+struct PendingCalibration {
+    signal: TestSignal,
+    started: Instant,
+    apply: bool,
+}
+
+/// The first active device (input, then output) missing from `present`, by name.
+/// Checked on every poll, independent of any earlier snapshot.
+pub fn missing_active<'a>(present: &[String], active: &[&'a str]) -> Option<&'a str> {
+    active.iter().copied().find(|a| !present.iter().any(|p| p == a))
+}
+
+/// Whether a stream with this newest anchor time has stalled: no callback for
+/// [`STALL_TIMEOUT`], or none at all within `2 × STALL_TIMEOUT` of starting.
+pub fn stalled(last_anchor_ns: Option<u64>, now_ns: u64, started_ns: u64) -> bool {
+    let limit = STALL_TIMEOUT.as_nanos() as u64;
+    match last_anchor_ns {
+        Some(t) => now_ns.saturating_sub(t) > limit,
+        None => now_ns.saturating_sub(started_ns) > 2 * limit,
+    }
 }
 
 /// Streams opened for a config.
@@ -99,6 +135,8 @@ pub fn open_audio(
     };
 
     let counters = Arc::new(IoCounters::default());
+    // Shared so the output bridge can read the input clock anchor.
+    let input_stats = Arc::new(StreamStats::default());
     let mut playback: Option<LooperPlayback> = None;
     let mut feed: Option<LooperFeed> = None;
     let mut rate: Option<u32> = None;
@@ -117,6 +155,7 @@ pub fn open_audio(
                             buffer_size: config.buffer_size,
                             route: config.output_route,
                             monitor: config.monitor,
+                            input_clock: Some(input_stats.clone()),
                         };
                         LooperPlayback::start(
                             out.device.clone(),
@@ -159,6 +198,7 @@ pub fn open_audio(
             config: cfg,
             buffer_size: config.buffer_size,
             route: config.input_route,
+            stats: Some(input_stats.clone()),
         })
     };
     let (analysis_feed, analysis_rx, analysis_dropped) = AnalysisWorker::ring();
@@ -217,6 +257,12 @@ pub struct Hardware {
     last_poll: Instant,
     last_diagnostics: Instant,
     drift: DriftEstimator,
+    /// Host time audio last started (for stall detection).
+    audio_started_ns: u64,
+    /// Warnings raised while loading settings at startup, kept for the frontend
+    /// (the webview is not listening yet when the Tauri setup hook runs).
+    startup_warnings: Vec<EngineWarning>,
+    calibration: Option<PendingCalibration>,
 }
 
 impl Default for Hardware {
@@ -231,6 +277,9 @@ impl Default for Hardware {
             last_poll: Instant::now(),
             last_diagnostics: Instant::now(),
             drift: DriftEstimator::default(),
+            audio_started_ns: 0,
+            startup_warnings: Vec::new(),
+            calibration: None,
         }
     }
 }
@@ -258,24 +307,120 @@ impl Hardware {
 
     /// Use `path` for settings: load and apply it if present (devices fall back
     /// to defaults when missing; saved MIDI ports open now or when plugged in).
+    ///
+    /// A file that cannot be read or parsed never blocks startup: it is moved
+    /// aside to `<name>.bad` (so the next auto-save cannot destroy it), safe
+    /// defaults are used, and a `settingsProblem` warning is raised. Warnings
+    /// raised here are also kept for [`Hardware::startup_warnings`].
     pub fn use_settings_file(&mut self, path: PathBuf, sink: Sink<'_>) -> Result<AudioSettings, EngineError> {
         let loaded = settings::load(&path);
-        self.settings_path = Some(path);
-        let Some(saved) = loaded? else { return Ok(self.settings()) };
-        self.config = AudioConfig { missing_device: MissingDevicePolicy::UseDefault, ..saved.audio };
+        self.settings_path = Some(path.clone());
+        let saved = match loaded {
+            Ok(Some(saved)) => saved,
+            Ok(None) => return Ok(self.settings()),
+            Err(e) => {
+                let backup = path.with_extension("json.bad");
+                let moved = std::fs::rename(&path, &backup).is_ok();
+                let message = if moved {
+                    format!("{e}. Using defaults; the unreadable file was kept as {}", backup.display())
+                } else {
+                    format!("{e}. Using defaults; the file will not be overwritten this session")
+                };
+                if !moved {
+                    // Never overwrite a file we could not read and could not move aside.
+                    self.settings_path = None;
+                }
+                self.warn_at_startup(EngineWarning::SettingsProblem(message), sink);
+                return Ok(self.settings());
+            }
+        };
+        self.config = AudioConfig {
+            missing_device: MissingDevicePolicy::UseDefault,
+            monitor: saved.audio.monitor.normalized(),
+            ..saved.audio
+        };
         self.input_latency = saved.input_latency_frames;
         let missing = self.midi.want(&saved.midi_inputs);
         if !missing.is_empty() {
-            sink(EngineEvent::Warning(EngineWarning::DeviceFallback(format!(
-                "saved MIDI input(s) not connected: {}; they will open when plugged in",
-                missing.join(", ")
-            ))));
+            self.warn_at_startup(
+                EngineWarning::DeviceFallback(format!(
+                    "saved MIDI input(s) not connected: {}; they will open when plugged in",
+                    missing.join(", ")
+                )),
+                sink,
+            );
         }
         Ok(self.settings())
     }
 
+    fn warn_at_startup(&mut self, warning: EngineWarning, sink: Sink<'_>) {
+        self.startup_warnings.push(warning.clone());
+        sink(EngineEvent::Warning(warning));
+    }
+
+    /// Warnings raised while applying the settings file (for a frontend that
+    /// subscribed after they were emitted). Not cleared by reading.
+    pub fn startup_warnings(&self) -> Vec<EngineWarning> {
+        self.startup_warnings.clone()
+    }
+
+    /// Start a loopback calibration on the running output stream.
+    pub fn start_calibration(
+        &mut self,
+        playback: Option<&mut LooperPlayback>,
+        looper_idle: bool,
+        apply: bool,
+    ) -> Result<(), EngineError> {
+        let Some(p) = playback else {
+            return Err(EngineError::Invalid("start audio (with a working output) before calibrating".into()));
+        };
+        if self.calibration.is_some() {
+            return Err(EngineError::Busy("a calibration is already running".into()));
+        }
+        if p.monitor().enabled {
+            return Err(EngineError::Invalid(
+                "turn input monitoring off while calibrating (it would feed back)".into(),
+            ));
+        }
+        if !looper_idle {
+            return Err(EngineError::Invalid("stop the transport before calibrating".into()));
+        }
+        let signal = TestSignal::new(p.info.sample_rate);
+        p.start_calibration(CalibrationJob::new(&signal.samples, signal.record_frames()))?;
+        self.calibration = Some(PendingCalibration { signal, started: Instant::now(), apply });
+        Ok(())
+    }
+
+    /// Finish a calibration when its recording is back. Returns the latency to
+    /// apply (when requested and successful).
+    pub fn poll_calibration(&mut self, playback: Option<&mut LooperPlayback>, sink: Sink<'_>) -> Option<u32> {
+        let pending = self.calibration.as_ref()?;
+        let outcome = match playback {
+            None => Some(Err(CalibrationFailure::Aborted("audio stopped during calibration".into()))),
+            Some(p) => match p.take_calibration() {
+                Some(job) => Some(calibration::detect(&pending.signal, &job.record)),
+                None => {
+                    let limit = pending.signal.record_frames() as f64 / pending.signal.sample_rate as f64 + 3.0;
+                    (pending.started.elapsed().as_secs_f64() > limit)
+                        .then(|| Err(CalibrationFailure::Aborted("the output stream did not run the test".into())))
+                }
+            },
+        }?;
+        let apply = pending.apply;
+        self.calibration = None;
+        let (result, error) = match outcome {
+            Ok(r) => (Some(r), None),
+            Err(e) => (None, Some(e)),
+        };
+        let applied = apply && result.is_some();
+        let latency = result.as_ref().filter(|_| applied).map(|r| r.latency_frames);
+        sink(EngineEvent::Calibration(CalibrationOutcome { result, error, applied }));
+        latency
+    }
+
     /// Restart drift measurement (new streams).
     pub fn reset_clock(&mut self) {
+        self.audio_started_ns = clock::host_now_ns();
         self.drift.reset();
         self.last_diagnostics = Instant::now();
     }
@@ -329,17 +474,32 @@ impl Hardware {
                 if previous != &names {
                     let added = names.iter().filter(|n| !previous.contains(n)).cloned().collect();
                     let removed: Vec<String> = previous.iter().filter(|n| !names.contains(n)).cloned().collect();
-                    let active =
-                        capture.map(|c| &c.info.device_id).into_iter().chain(playback.map(|p| &p.info.device_id));
-                    for device in active {
-                        if removed.contains(device) {
-                            lost = Some(EngineError::DeviceLost(format!("\"{device}\" was disconnected")));
-                        }
-                    }
                     sink(EngineEvent::DevicesChanged(DevicesChanged { names: names.clone(), added, removed }));
                 }
             }
+            // Every poll checks the active devices against the current list, so
+            // an unplug before the first poll is caught too.
+            let active: Vec<&str> = capture
+                .map(|c| c.info.device_id.as_str())
+                .into_iter()
+                .chain(playback.map(|p| p.info.device_id.as_str()))
+                .collect();
+            if let Some(device) = missing_active(&names, &active) {
+                lost = Some(EngineError::DeviceLost(format!("\"{device}\" was disconnected")));
+            }
             self.device_names = Some(names);
+        }
+        // A stream whose callbacks stopped (device gone without an error, or a
+        // device that lost its input/output direction but kept its name).
+        let now = clock::host_now_ns();
+        let streams = capture
+            .map(|c| (c.stats.anchor.read(), "input", &c.info.device_id))
+            .into_iter()
+            .chain(playback.map(|p| (p.stats.anchor.read(), "output", &p.info.device_id)));
+        for (anchor, what, device) in streams {
+            if lost.is_none() && stalled(anchor.map(|a| a.host_ns), now, self.audio_started_ns) {
+                lost = Some(EngineError::DeviceLost(format!("{what} device \"{device}\" stopped delivering audio")));
+            }
         }
         let midi = self.midi.poll_hotplug();
         for name in &midi.lost {
@@ -439,6 +599,55 @@ mod tests {
         );
         let w = EngineEvent::Warning(EngineWarning::DeviceFallback("x".into()));
         assert_eq!(serde_json::to_value(w).unwrap()["payload"]["kind"], "deviceFallback");
+    }
+
+    #[test]
+    fn an_active_device_missing_from_the_first_poll_is_lost_without_a_baseline() {
+        let present = vec!["MacBook Pro Speakers".to_string()];
+        assert_eq!(missing_active(&present, &["H4n Pro", "MacBook Pro Speakers"]), Some("H4n Pro"));
+        assert_eq!(missing_active(&present, &["MacBook Pro Speakers"]), None);
+        assert_eq!(missing_active(&present, &[]), None);
+    }
+
+    #[test]
+    fn stalled_streams_are_detected_after_the_timeout() {
+        let s = 1_000_000_000u64;
+        assert!(!stalled(Some(10 * s), 10 * s + s, 0), "1 s without a callback is tolerated");
+        assert!(stalled(Some(10 * s), 12 * s, 0));
+        assert!(!stalled(None, 2 * s, 0), "a stream gets 3 s to deliver its first callback");
+        assert!(stalled(None, 4 * s, 0));
+    }
+
+    #[test]
+    fn an_unreadable_settings_file_warns_keeps_defaults_and_is_preserved() {
+        let dir = std::env::temp_dir().join(format!("voiceloop-hw-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(settings::SETTINGS_FILE_NAME);
+        std::fs::write(&path, "{ not json").unwrap();
+        let events = std::cell::RefCell::new(Vec::new());
+        let mut hw = Hardware::default();
+        let applied = hw.use_settings_file(path.clone(), &|e| events.borrow_mut().push(e)).unwrap();
+        assert_eq!(applied, AudioSettings::default(), "safe defaults");
+        assert!(matches!(&events.borrow()[..], [EngineEvent::Warning(EngineWarning::SettingsProblem(_))]));
+        assert!(matches!(&hw.startup_warnings()[..], [EngineWarning::SettingsProblem(_)]), "kept for the frontend");
+        assert_eq!(std::fs::read_to_string(path.with_extension("json.bad")).unwrap(), "{ not json");
+        hw.autosave(&|e| panic!("{e:?}"));
+        assert_eq!(settings::load(&path).unwrap(), Some(AudioSettings::default()), "a fresh file replaces it");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn calibration_needs_a_running_output() {
+        let mut hw = Hardware::default();
+        assert!(matches!(hw.start_calibration(None, true, true), Err(EngineError::Invalid(_))));
+        assert_eq!(hw.poll_calibration(None, &|e| panic!("{e:?}")), None, "nothing pending");
+        let outcome =
+            CalibrationOutcome { result: None, error: Some(CalibrationFailure::Aborted("x".into())), applied: false };
+        assert_eq!(
+            serde_json::to_value(EngineEvent::Calibration(outcome)).unwrap(),
+            serde_json::json!({"type": "calibration", "payload": {"result": null,
+                "error": {"kind": "aborted", "message": "x"}, "applied": false}})
+        );
     }
 
     #[test]

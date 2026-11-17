@@ -12,7 +12,9 @@
 //! than wait; recording and looping are never affected.
 //!
 //! Frame numbers in the results are on the input clock (frames since capture
-//! started), the same clock as the level meter.
+//! started), the same clock as the level meter and the input stream's clock
+//! anchors. Input dropped because this thread fell behind is skipped over
+//! ([`AnalysisOutput::Gap`]), so the numbering never slips.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
@@ -61,6 +63,59 @@ pub enum AnalysisOutput {
     /// A note that has just ended.
     Note(NoteEvent),
     Onset(Onset),
+    /// The input callback dropped `frames` of input (the analysis ring was
+    /// full) just before input-clock frame `at + frames`. Frame numbers stay
+    /// on the true input clock (they jump over the gap), any note in progress
+    /// was closed, and pitch history was reset. Timing near `at` is uncertain
+    /// by up to one input callback block.
+    Gap {
+        at: u64,
+        frames: u64,
+    },
+}
+
+/// Places input the callback dropped onto the input clock.
+///
+/// The callback drops analysis samples only while the ring is full, and only
+/// this thread frees space. So frames counted as dropped since the previous
+/// look came *after* everything buffered in the ring now: the gap starts once
+/// those buffered frames are consumed. (A drop can straddle a read that frees
+/// space mid-callback, so the placement is exact to within one callback block.)
+#[derive(Debug, Default)]
+pub struct GapPlacer {
+    seen: u64,
+    /// (input frame where the gap starts, dropped frames), in order.
+    pending: std::collections::VecDeque<(u64, u64)>,
+}
+
+impl GapPlacer {
+    /// `dropped_total`: the callback's cumulative counter; `buffered`: frames
+    /// in the ring right now; `position`: input frame of the next frame to read.
+    pub fn observe(&mut self, dropped_total: u64, buffered: usize, position: u64) {
+        if dropped_total > self.seen {
+            self.pending.push_back((position + buffered as u64, dropped_total - self.seen));
+            self.seen = dropped_total;
+        }
+    }
+
+    /// Frames that may be read from `position` before the next gap (at most `wanted`).
+    pub fn readable(&self, position: u64, wanted: usize) -> usize {
+        match self.pending.front() {
+            Some(&(at, _)) => wanted.min(at.saturating_sub(position) as usize),
+            None => wanted,
+        }
+    }
+
+    /// The gap starting at `position`, if any.
+    pub fn take(&mut self, position: u64) -> Option<u64> {
+        match self.pending.front() {
+            Some(&(at, frames)) if at <= position => {
+                self.pending.pop_front();
+                Some(frames)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// The analysis chain for one mono stream. Pure: no threads, no I/O.
@@ -133,6 +188,7 @@ impl AnalysisWorker {
         let (config_tx, config_rx) = mpsc::channel::<AnalysisConfig>();
         let (results_tx, results) = mpsc::channel();
         let stop_flag = stop.clone();
+        let dropped_counter = dropped.clone();
 
         let thread = std::thread::Builder::new()
             .name("voiceloop-analysis".into())
@@ -141,6 +197,7 @@ impl AnalysisWorker {
                 let mut scratch = vec![0.0f32; MAX_CHUNK];
                 // Input-clock frame of the next sample to be read.
                 let mut position = 0u64;
+                let mut gaps = GapPlacer::default();
                 while !stop_flag.load(Ordering::Relaxed) {
                     while let Ok(new) = config_rx.try_recv() {
                         // A bad configuration keeps the previous analyzer running.
@@ -153,7 +210,18 @@ impl AnalysisWorker {
                             enabled = new.enabled;
                         }
                     }
-                    let n = input.slots().min(MAX_CHUNK);
+                    let buffered = input.slots();
+                    gaps.observe(dropped_counter.load(Ordering::Relaxed), buffered, position);
+                    // Jump over input the callback dropped, so frame numbers
+                    // stay on the true input clock (D-018: no invented data).
+                    while let Some(frames) = gaps.take(position) {
+                        analyzer.reset(position + frames, |out| {
+                            let _ = results_tx.send(out);
+                        });
+                        let _ = results_tx.send(AnalysisOutput::Gap { at: position, frames });
+                        position += frames;
+                    }
+                    let n = gaps.readable(position, buffered.min(MAX_CHUNK));
                     if n == 0 {
                         std::thread::sleep(IDLE_SLEEP);
                         continue;
@@ -328,5 +396,50 @@ mod tests {
         let first_pitch =
             outputs.iter().find_map(|o| if let AnalysisOutput::Pitch(f) = o { Some(f.frame) } else { None });
         assert_eq!(first_pitch, Some(audio.len() as u64 + 480));
+    }
+
+    #[test]
+    fn gap_placer_puts_drops_after_the_buffered_input() {
+        let mut g = GapPlacer::default();
+        // 1000 frames read so far, 300 buffered, nothing dropped.
+        g.observe(0, 300, 1_000);
+        assert_eq!(g.readable(1_000, 8_192), 8_192);
+        // The ring filled up and 500 frames were dropped: they follow the 300 buffered.
+        g.observe(500, 300, 1_000);
+        assert_eq!(g.readable(1_000, 8_192), 300);
+        assert_eq!(g.take(1_200), None);
+        assert_eq!(g.take(1_300), Some(500));
+        assert_eq!(g.take(1_300), None);
+        // Two drops seen at different times stay in order.
+        g.observe(600, 50, 1_800);
+        g.observe(650, 80, 1_820);
+        assert_eq!(g.readable(1_800, 1_000), 50);
+        assert_eq!(g.take(1_850), Some(100));
+        assert_eq!(
+            g.readable(1_950, 1_000),
+            0,
+            "the second gap starts where the first ended (1820 + 80 = 1900 < 1950)"
+        );
+        assert_eq!(g.take(1_950), Some(50));
+    }
+
+    #[test]
+    fn worker_skips_over_dropped_input_so_frames_stay_on_the_input_clock() {
+        let (mut feed, rx, dropped) = AnalysisWorker::ring();
+        // Pretend the callback dropped 48 000 frames before any audio arrived.
+        dropped.store(48_000, Ordering::Relaxed);
+        let worker = AnalysisWorker::start(AnalysisConfig::default(), SR, rx, dropped).unwrap();
+        // With nothing buffered, the drop is placed at frame 0 (wait for it so
+        // the audio below is unambiguously after the drop).
+        let gap = worker.results.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(gap, AnalysisOutput::Gap { at: 0, frames: 48_000 });
+        for &s in &two_notes() {
+            feed.tx.push(s).unwrap();
+        }
+        let outputs = collect(&worker, |outs| summarise(outs).0.len() == 2);
+        let first_pitch =
+            outputs.iter().find_map(|o| if let AnalysisOutput::Pitch(f) = o { Some(f.frame) } else { None });
+        assert_eq!(first_pitch, Some(48_000 + 480));
+        assert_eq!(summarise(&outputs).0, vec![69, 76]);
     }
 }

@@ -13,9 +13,12 @@
 //! performed note is *extra*. The pairing minimises total timing and pitch
 //! distance, so one skipped or added note does not shift every later match.
 //!
-//! **Assumptions.** Same tempo as the reference (the performance is sung
-//! with the loop or click). A different key is handled by
-//! `allow_transposition`; tempo scaling is not handled.
+//! **Tolerances.** By default the performance is assumed to be at the
+//! reference tempo and in its key. `allow_transposition` compares intervals
+//! (a constant key shift is measured and reported, not penalised), and
+//! `tempo_tolerant` fits a constant tempo ratio (reported, not penalised).
+//! Gradual tempo changes within a take are not modelled: they show up as
+//! growing onset errors.
 
 use serde::{Deserialize, Serialize};
 
@@ -92,8 +95,19 @@ pub struct CompareConfig {
     pub onset_tolerance_ms: f32,
     /// Ignore whole-octave differences (a low voice singing a high melody).
     pub octave_invariant: bool,
-    /// Allow the whole performance to be in another key (constant semitone shift).
+    /// Allow the whole performance to be in another key (constant semitone
+    /// shift). The shift is the median interval between matched notes, so
+    /// what is compared is the melody's intervals; it is reported, not penalised.
     pub allow_transposition: bool,
+    /// Performance frames per reference frame (1 = same tempo; 2 = the
+    /// performance is twice as slow). With `tempo_tolerant` it is only the
+    /// starting guess.
+    pub tempo_ratio: f64,
+    /// Fit the tempo ratio to the performance (a constant tempo change is
+    /// reported, not penalised). Bounded by `max_tempo_deviation`.
+    pub tempo_tolerant: bool,
+    /// Largest fitted tempo change as a fraction (0.35 allows 0.74x..1.35x).
+    pub max_tempo_deviation: f64,
 }
 
 impl Default for CompareConfig {
@@ -105,11 +119,14 @@ impl Default for CompareConfig {
             onset_tolerance_ms: 100.0,
             octave_invariant: false,
             allow_transposition: false,
+            tempo_ratio: 1.0,
+            tempo_tolerant: false,
+            max_tempo_deviation: 0.35,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Verdict {
     Correct,
@@ -122,7 +139,7 @@ pub enum Verdict {
     Extra,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteComparison {
     pub reference_index: Option<usize>,
@@ -130,13 +147,14 @@ pub struct NoteComparison {
     pub verdict: Verdict,
     /// Performed minus reference, cents (positive = sharp), after transposition/octave handling.
     pub pitch_error_cents: Option<f32>,
-    /// Performed minus reference onset, ms (positive = late).
+    /// Performed minus expected onset, ms (positive = late). The expected
+    /// onset is `origin_frame + tempo_ratio × reference onset`.
     pub onset_error_ms: Option<f32>,
-    /// Performed duration divided by reference duration.
+    /// Performed duration divided by the expected (tempo-scaled) reference duration.
     pub duration_ratio: Option<f32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComparisonReport {
     /// One entry per reference note and per extra note, in time order.
@@ -155,11 +173,25 @@ pub struct ComparisonReport {
     pub transposition_semitones: i32,
     /// Performance frame taken as the reference's time zero.
     pub origin_frame: f64,
+    /// Performance frames per reference frame that was used (1 unless set or fitted).
+    pub tempo_ratio: f64,
     /// `100 × correct / (reference notes + extra notes)`.
     pub score: f32,
 }
 
 const GAP_COST: f32 = 1.0;
+/// Pairs used for the robust tempo fit (Theil–Sen is quadratic in this).
+const MAX_FIT_PAIRS: usize = 256;
+
+/// How the reference maps onto the performance: expected performance frame of
+/// reference frame `r` is `origin + scale × r`; pitches are compared after
+/// subtracting `shift` semitones from the performance.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Params {
+    origin: f64,
+    scale: f64,
+    shift: f32,
+}
 
 struct Aligned {
     /// (reference index, performed index) pairs, either side absent for a gap.
@@ -180,8 +212,7 @@ fn pitch_diff(performed: f32, reference: f32, shift: f32, octave_invariant: bool
 fn align(
     reference: &[MelodyNote],
     performed: &[NoteEvent],
-    origin: f64,
-    shift: f32,
+    p: Params,
     ms_per_frame: f64,
     cfg: &CompareConfig,
 ) -> Aligned {
@@ -201,7 +232,7 @@ fn align(
                 best = best.min(cost[i * width + j - 1] + GAP_COST);
             }
             if i > 0 && j > 0 {
-                if let Some(c) = match_cost(&reference[i - 1], &performed[j - 1], origin, shift, ms_per_frame, cfg) {
+                if let Some(c) = match_cost(&reference[i - 1], &performed[j - 1], p, ms_per_frame, cfg) {
                     best = best.min(cost[(i - 1) * width + j - 1] + c);
                 }
             }
@@ -214,7 +245,7 @@ fn align(
     while i > 0 || j > 0 {
         let here = cost[i * width + j];
         let matched = (i > 0 && j > 0)
-            .then(|| match_cost(&reference[i - 1], &performed[j - 1], origin, shift, ms_per_frame, cfg))
+            .then(|| match_cost(&reference[i - 1], &performed[j - 1], p, ms_per_frame, cfg))
             .flatten()
             .is_some_and(|c| (cost[(i - 1) * width + j - 1] + c - here).abs() <= 1e-5);
         if matched {
@@ -234,19 +265,13 @@ fn align(
 }
 
 /// Cost in 0..2 of pairing two notes, or `None` if they are too far apart in time.
-fn match_cost(
-    r: &MelodyNote,
-    p: &NoteEvent,
-    origin: f64,
-    shift: f32,
-    ms_per_frame: f64,
-    cfg: &CompareConfig,
-) -> Option<f32> {
-    let onset_ms = ((p.start_frame as f64 - origin - r.start_frame as f64) * ms_per_frame).abs() as f32;
+fn match_cost(r: &MelodyNote, p: &NoteEvent, params: Params, ms_per_frame: f64, cfg: &CompareConfig) -> Option<f32> {
+    let expected = params.origin + params.scale * r.start_frame as f64;
+    let onset_ms = ((p.start_frame as f64 - expected) * ms_per_frame).abs() as f32;
     if onset_ms > cfg.match_window_ms {
         return None;
     }
-    let semitones = pitch_diff(p.midi, r.midi, shift, cfg.octave_invariant).abs();
+    let semitones = pitch_diff(p.midi, r.midi, params.shift, cfg.octave_invariant).abs();
     // Strictly cheaper than a miss plus an extra, so notes in the window always pair.
     Some(0.95 * onset_ms / cfg.match_window_ms.max(1e-3) + 0.95 * semitones.min(12.0) / 12.0)
 }
@@ -256,7 +281,45 @@ fn median(values: &mut [f64]) -> f64 {
     values[values.len() / 2]
 }
 
+/// Robust line fit `y = a + b·x` (Theil–Sen: median of pairwise slopes, then
+/// median intercept). One badly timed note cannot tilt it. `None` with fewer
+/// than two distinct x values.
+fn theil_sen(points: &[(f64, f64)]) -> Option<(f64, f64)> {
+    let pts = &points[..points.len().min(MAX_FIT_PAIRS)];
+    let mut slopes = Vec::with_capacity(pts.len() * pts.len() / 2);
+    for (k, a) in pts.iter().enumerate() {
+        for b in &pts[k + 1..] {
+            if (b.0 - a.0).abs() > 1e-9 {
+                slopes.push((b.1 - a.1) / (b.0 - a.0));
+            }
+        }
+    }
+    if slopes.is_empty() {
+        return None;
+    }
+    let slope = median(&mut slopes);
+    let mut intercepts: Vec<f64> = pts.iter().map(|(x, y)| y - slope * x).collect();
+    Some((median(&mut intercepts), slope))
+}
+
+fn tempo_bounds(cfg: &CompareConfig) -> (f64, f64) {
+    let base = if cfg.tempo_ratio.is_finite() && cfg.tempo_ratio > 0.0 { cfg.tempo_ratio } else { 1.0 };
+    let dev = cfg.max_tempo_deviation.clamp(0.0, 0.9);
+    if cfg.tempo_tolerant {
+        (base * (1.0 - dev), base * (1.0 + dev))
+    } else {
+        (base, base)
+    }
+}
+
 /// Compare a performance with a reference melody. Both use `reference.sample_rate`.
+///
+/// Procedure: (1) an initial key shift from the median pitches when
+/// transposition is allowed; (2) a dynamic-programming alignment for each
+/// candidate (tempo, origin) pair, keeping the cheapest; (3) up to two
+/// refinement passes that re-estimate the shift (median matched interval),
+/// the origin (median matched offset, Auto only) and the tempo (Theil–Sen
+/// fit, tempo-tolerant only) from the matched pairs and re-align.
 pub fn compare(reference: &ReferenceMelody, performed: &[NoteEvent], cfg: &CompareConfig) -> ComparisonReport {
     let ms_per_frame = 1_000.0 / reference.sample_rate.max(1) as f64;
     let mut performed: Vec<NoteEvent> = performed.to_vec();
@@ -264,49 +327,106 @@ pub fn compare(reference: &ReferenceMelody, performed: &[NoteEvent], cfg: &Compa
     let mut ref_notes = reference.notes.clone();
     ref_notes.sort_by_key(|n| n.start_frame);
 
-    let shift = if cfg.allow_transposition && !ref_notes.is_empty() && !performed.is_empty() {
+    let initial_shift = if cfg.allow_transposition && !ref_notes.is_empty() && !performed.is_empty() {
         let mut p: Vec<f64> = performed.iter().map(|e| e.midi as f64).collect();
         let mut r: Vec<f64> = ref_notes.iter().map(|n| n.midi as f64).collect();
-        (median(&mut p) - median(&mut r)).round() as f32
+        let d = (median(&mut p) - median(&mut r)) as f32;
+        if cfg.octave_invariant {
+            pitch_diff(d, 0.0, 0.0, true).round()
+        } else {
+            d.round()
+        }
     } else {
         0.0
     };
 
-    // Candidate origins: fixed, or anchored on pairings of the first few notes.
-    let mut origins: Vec<f64> = Vec::new();
-    match cfg.alignment {
-        Alignment::Fixed { origin_frame } => origins.push(origin_frame as f64),
-        Alignment::Auto => {
-            for (i, j) in [(0, 0), (0, 1), (0, 2), (1, 0), (2, 0)] {
-                if let (Some(r), Some(p)) = (ref_notes.get(i), performed.get(j)) {
-                    origins.push(p.start_frame as f64 - r.start_frame as f64);
+    // Candidate tempo ratios: the configured one, and (tempo-tolerant) the
+    // ratio of the two spans, which is right when first and last notes match.
+    let (lo, hi) = tempo_bounds(cfg);
+    let mut scales = vec![lo.max(cfg.tempo_ratio.clamp(lo, hi))];
+    if cfg.tempo_tolerant && ref_notes.len() >= 2 && performed.len() >= 2 {
+        let ref_span = (ref_notes[ref_notes.len() - 1].start_frame - ref_notes[0].start_frame) as f64;
+        let perf_span = (performed[performed.len() - 1].start_frame - performed[0].start_frame) as f64;
+        if ref_span > 0.0 {
+            let s = perf_span / ref_span;
+            if s >= lo && s <= hi {
+                scales.push(s);
+            }
+        }
+    }
+
+    let mut best: Option<(Aligned, Params)> = None;
+    for &scale in &scales {
+        let mut origins: Vec<f64> = Vec::new();
+        match cfg.alignment {
+            Alignment::Fixed { origin_frame } => origins.push(origin_frame as f64),
+            Alignment::Auto => {
+                for (i, j) in [(0, 0), (0, 1), (0, 2), (1, 0), (2, 0)] {
+                    if let (Some(r), Some(p)) = (ref_notes.get(i), performed.get(j)) {
+                        origins.push(p.start_frame as f64 - scale * r.start_frame as f64);
+                    }
+                }
+                if origins.is_empty() {
+                    origins.push(0.0);
                 }
             }
-            if origins.is_empty() {
-                origins.push(0.0);
+        }
+        for origin in origins {
+            let params = Params { origin, scale, shift: initial_shift };
+            let aligned = align(&ref_notes, &performed, params, ms_per_frame, cfg);
+            if best.as_ref().is_none_or(|(b, _)| aligned.cost < b.cost) {
+                best = Some((aligned, params));
             }
         }
     }
-    let mut best: Option<(Aligned, f64)> = None;
-    for origin in origins {
-        let aligned = align(&ref_notes, &performed, origin, shift, ms_per_frame, cfg);
-        if best.as_ref().map_or(true, |(b, _)| aligned.cost < b.cost) {
-            best = Some((aligned, origin));
-        }
-    }
-    let (aligned, mut origin) = best.expect("at least one candidate origin");
+    let (mut aligned, mut params) = best.expect("at least one candidate");
 
-    // In Auto mode the anchor pair would read as exactly on time. Re-centre on
-    // the median offset of all matched pairs so no single note is privileged.
-    if cfg.alignment == Alignment::Auto {
-        let mut offsets: Vec<f64> = aligned
-            .pairs
-            .iter()
-            .filter_map(|&(r, p)| Some(performed[p?].start_frame as f64 - ref_notes[r?].start_frame as f64))
-            .collect();
-        if !offsets.is_empty() {
-            origin = median(&mut offsets);
+    // Refinement from the matched pairs. In Auto mode this also re-centres on
+    // the median offset, so the anchor pair is not privileged as "on time".
+    for _ in 0..2 {
+        let pairs: Vec<(&MelodyNote, &NoteEvent)> =
+            aligned.pairs.iter().filter_map(|&(r, p)| Some((&ref_notes[r?], &performed[p?]))).collect();
+        if pairs.is_empty() {
+            break;
         }
+        let mut next = params;
+        if cfg.allow_transposition {
+            let mut d: Vec<f64> =
+                pairs.iter().map(|(r, p)| pitch_diff(p.midi, r.midi, 0.0, cfg.octave_invariant) as f64).collect();
+            next.shift = median(&mut d).round() as f32;
+        }
+        let points: Vec<(f64, f64)> = pairs.iter().map(|(r, p)| (r.start_frame as f64, p.start_frame as f64)).collect();
+        match cfg.alignment {
+            Alignment::Auto => {
+                if cfg.tempo_tolerant {
+                    if let Some((a, b)) = theil_sen(&points) {
+                        if b >= lo && b <= hi {
+                            next.origin = a;
+                            next.scale = b;
+                        }
+                    }
+                }
+                let s = next.scale;
+                let mut offsets: Vec<f64> = points.iter().map(|(r, p)| p - s * r).collect();
+                next.origin = median(&mut offsets);
+            }
+            Alignment::Fixed { origin_frame } => {
+                if cfg.tempo_tolerant {
+                    // Ratio of each note's distance from the fixed origin.
+                    let o = origin_frame as f64;
+                    let mut ratios: Vec<f64> =
+                        points.iter().filter(|(r, _)| *r > 0.0).map(|(r, p)| (p - o) / r).collect();
+                    if !ratios.is_empty() {
+                        next.scale = median(&mut ratios).clamp(lo, hi);
+                    }
+                }
+            }
+        }
+        if next == params {
+            break;
+        }
+        params = next;
+        aligned = align(&ref_notes, &performed, params, ms_per_frame, cfg);
     }
 
     let mut notes = Vec::with_capacity(aligned.pairs.len());
@@ -316,8 +436,9 @@ pub fn compare(reference: &ReferenceMelody, performed: &[NoteEvent], cfg: &Compa
         let entry = match (r, p) {
             (Some(ri), Some(pi)) => {
                 let (rn, pn) = (&ref_notes[ri], &performed[pi]);
-                let cents = pitch_diff(pn.midi, rn.midi, shift, cfg.octave_invariant) * 100.0;
-                let onset_ms = ((pn.start_frame as f64 - origin - rn.start_frame as f64) * ms_per_frame) as f32;
+                let cents = pitch_diff(pn.midi, rn.midi, params.shift, cfg.octave_invariant) * 100.0;
+                let expected = params.origin + params.scale * rn.start_frame as f64;
+                let onset_ms = ((pn.start_frame as f64 - expected) * ms_per_frame) as f32;
                 let verdict = if cents.abs() > cfg.pitch_tolerance_cents {
                     Verdict::WrongPitch
                 } else if onset_ms < -cfg.onset_tolerance_ms {
@@ -340,7 +461,7 @@ pub fn compare(reference: &ReferenceMelody, performed: &[NoteEvent], cfg: &Compa
                     pitch_error_cents: Some(cents),
                     onset_error_ms: Some(onset_ms),
                     duration_ratio: (rn.duration_frames > 0)
-                        .then(|| pn.duration_frames() as f32 / rn.duration_frames as f32),
+                        .then(|| (pn.duration_frames() as f64 / (params.scale * rn.duration_frames as f64)) as f32),
                 }
             }
             (Some(_), None) => {
@@ -381,8 +502,9 @@ pub fn compare(reference: &ReferenceMelody, performed: &[NoteEvent], cfg: &Compa
         mean_abs_pitch_error_cents: pitch_abs / m,
         mean_onset_error_ms: onset_sum / m,
         mean_abs_onset_error_ms: onset_abs / m,
-        transposition_semitones: shift as i32,
-        origin_frame: origin,
+        transposition_semitones: params.shift as i32,
+        origin_frame: params.origin,
+        tempo_ratio: params.scale,
         score: 100.0 * correct as f32 / denominator,
     }
 }
@@ -556,5 +678,60 @@ mod tests {
         assert_eq!((r.matched, r.missed, r.extra, r.score), (0, 0, 7, 0.0));
         let r = compare(&empty, &[], &CompareConfig::default());
         assert!(r.notes.is_empty());
+    }
+
+    #[test]
+    fn tempo_tolerant_alignment_fits_a_slower_performance() {
+        // The same melody 20% slower, starting 3 s in, with one note 90 ms late.
+        let mut slow: Vec<NoteEvent> = [60.0, 60.0, 67.0, 67.0, 69.0, 69.0, 67.0]
+            .iter()
+            .enumerate()
+            .map(|(i, &m)| sung(3_000 + i as u64 * 600, 480, m))
+            .collect();
+        slow[3].start_frame += 90 * 48;
+        let strict = compare(&reference(), &slow, &CompareConfig::default());
+        assert!(strict.correct < 7, "a fixed tempo cannot fit every note: {}", strict.correct);
+
+        let cfg = CompareConfig { tempo_tolerant: true, ..CompareConfig::default() };
+        let r = compare(&reference(), &slow, &cfg);
+        assert!((r.tempo_ratio - 1.2).abs() < 0.01, "{}", r.tempo_ratio);
+        assert_eq!((r.matched, r.missed, r.extra), (7, 0, 0));
+        let late = r.notes[3].onset_error_ms.unwrap();
+        assert!((late - 90.0).abs() < 2.0, "the one late note stands out: {late}");
+        for (i, n) in r.notes.iter().enumerate().filter(|(i, _)| *i != 3) {
+            assert!(n.onset_error_ms.unwrap().abs() < 2.0, "note {i}: {:?}", n.onset_error_ms);
+            assert!((n.duration_ratio.unwrap() - 1.0).abs() < 0.01, "durations are tempo-scaled");
+        }
+    }
+
+    #[test]
+    fn transposition_is_measured_from_matched_intervals() {
+        // Down a minor third, with one wrong note (a semitone off) that must not move the shift.
+        let mut lower: Vec<NoteEvent> =
+            twinkle(0).into_iter().map(|e| sung(e.start_frame / 48, 400, e.midi - 3.0)).collect();
+        lower[4].midi += 1.0;
+        let cfg = CompareConfig { allow_transposition: true, ..CompareConfig::default() };
+        let r = compare(&reference(), &lower, &cfg);
+        assert_eq!(r.transposition_semitones, -3);
+        assert_eq!(r.correct, 6);
+        assert!((r.notes[4].pitch_error_cents.unwrap() - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn fixed_alignment_with_a_known_tempo_ratio() {
+        // A performance at half speed placed 1 s in: given the ratio, errors are absolute.
+        let half: Vec<NoteEvent> = [60.0, 60.0, 67.0, 67.0, 69.0, 69.0, 67.0]
+            .iter()
+            .enumerate()
+            .map(|(i, &m)| sung(1_000 + 25 + i as u64 * 1_000, 800, m))
+            .collect();
+        let cfg = CompareConfig {
+            alignment: Alignment::Fixed { origin_frame: 48_000 },
+            tempo_ratio: 2.0,
+            ..CompareConfig::default()
+        };
+        let r = compare(&reference(), &half, &cfg);
+        assert_eq!(r.correct, 7);
+        assert!(r.notes.iter().all(|n| (n.onset_error_ms.unwrap() - 25.0).abs() < 0.01));
     }
 }

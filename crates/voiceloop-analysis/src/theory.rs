@@ -33,7 +33,8 @@ pub fn interval_between(from_midi: f32, to_midi: f32) -> Interval {
     let semitones = (exact.abs() + 0.5).floor().copysign(exact) as i32;
     let size = semitones.unsigned_abs();
     // An exact octave is "P8", not "P1 plus an octave".
-    let (simple, octaves) = if size > 0 && size % 12 == 0 { (12, size / 12 - 1) } else { (size % 12, size / 12) };
+    let (simple, octaves) =
+        if size > 0 && size.is_multiple_of(12) { (12, size / 12 - 1) } else { (size % 12, size / 12) };
     Interval {
         semitones,
         name: INTERVAL_NAMES[simple as usize],
@@ -129,7 +130,7 @@ impl Scale {
 const MAJOR_PROFILE: [f32; 12] = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
 const MINOR_PROFILE: [f32; 12] = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyEstimate {
     pub scale: Scale,

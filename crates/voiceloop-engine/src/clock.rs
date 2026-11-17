@@ -32,17 +32,32 @@ pub fn init_epoch() {
     let _ = host_now_ns();
 }
 
-/// One published anchor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// One published anchor: "at host time `host_ns` this stream was at `frame`".
+///
+/// The input stream anchors at callback start. The output stream anchors at
+/// the **end** of each callback (host time at callback start + block
+/// duration), after the looper has applied that block's commands, so the
+/// transport frame and running state describe the block that just ran and
+/// extrapolate correctly into the next one (see `looper/io.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Anchor {
-    /// Host time at the start of the callback that wrote this anchor.
     pub host_ns: u64,
-    /// Frames this stream had processed before that callback.
+    /// Frames this stream had processed at `host_ns`.
     pub frame: u64,
-    /// Output stream only: looper transport frame at the start of the callback.
+    /// Output stream only: looper transport frame at `host_ns`.
     pub transport_frame: i64,
-    /// Output stream only: the transport advanced during the previous callback.
+    /// Output stream only: the transport is running (advancing one per frame).
     pub transport_running: bool,
+    /// Output stream only: input position (input-clock frames, fractional) the
+    /// drift bridge will deliver at output frame `frame`. Maps input frames to
+    /// output/transport frames: `out = frame + (input − input_pos) / ratio`.
+    pub input_pos: f64,
+    /// Output stream only: input frames consumed per output frame (1 ± drift).
+    pub ratio: f64,
+    /// Output stream only: increments at every input discontinuity the bridge
+    /// could not conceal (underrun, overflow skip, input overrun). Mappings made
+    /// with an older epoch must be re-anchored.
+    pub epoch: u64,
 }
 
 /// Single-writer seqlock around an [`Anchor`]. The writer (an audio callback)
@@ -54,6 +69,9 @@ pub struct ClockAnchor {
     frame: AtomicU64,
     transport: AtomicU64,
     running: AtomicU64,
+    input_pos: AtomicU64,
+    ratio: AtomicU64,
+    epoch: AtomicU64,
 }
 
 impl ClockAnchor {
@@ -67,6 +85,9 @@ impl ClockAnchor {
         self.frame.store(a.frame, Ordering::Relaxed);
         self.transport.store(a.transport_frame as u64, Ordering::Relaxed);
         self.running.store(a.transport_running as u64, Ordering::Relaxed);
+        self.input_pos.store(a.input_pos.to_bits(), Ordering::Relaxed);
+        self.ratio.store(a.ratio.to_bits(), Ordering::Relaxed);
+        self.epoch.store(a.epoch, Ordering::Relaxed);
         self.seq.store(s.wrapping_add(2), Ordering::Release);
     }
 
@@ -86,6 +107,9 @@ impl ClockAnchor {
                 frame: self.frame.load(Ordering::Relaxed),
                 transport_frame: self.transport.load(Ordering::Relaxed) as i64,
                 transport_running: self.running.load(Ordering::Relaxed) != 0,
+                input_pos: f64::from_bits(self.input_pos.load(Ordering::Relaxed)),
+                ratio: f64::from_bits(self.ratio.load(Ordering::Relaxed)),
+                epoch: self.epoch.load(Ordering::Relaxed),
             };
             fence(Ordering::Acquire);
             if self.seq.load(Ordering::Relaxed) == s1 {
@@ -104,6 +128,20 @@ impl Anchor {
         let delta_ns = host_ns as i128 - self.host_ns as i128;
         let delta_frames = delta_ns * sample_rate as i128 / 1_000_000_000;
         (self.frame as i128 + delta_frames).max(0) as u64
+    }
+
+    /// Output frame (fractional) at which input position `input` is delivered
+    /// to the looper, valid while the epoch is unchanged.
+    pub fn output_frame_for_input(&self, input: f64) -> f64 {
+        let ratio = if self.ratio > 0.0 { self.ratio } else { 1.0 };
+        self.frame as f64 + (input - self.input_pos) / ratio
+    }
+
+    /// Transport frame (fractional) at which input position `input` reaches the
+    /// looper. Subtract the calibrated input latency to get the frame at which
+    /// it was performed. Only meaningful while the transport runs.
+    pub fn transport_frame_for_input(&self, input: f64) -> f64 {
+        self.transport_frame as f64 + (self.output_frame_for_input(input) - self.frame as f64)
     }
 
     /// Transport frame at `host_ns`: extrapolated while the transport runs,
@@ -317,14 +355,28 @@ mod tests {
     fn anchor_round_trips_and_is_none_before_the_first_write() {
         let a = ClockAnchor::default();
         assert_eq!(a.read(), None);
-        let v = Anchor { host_ns: 5, frame: 7, transport_frame: -3, transport_running: true };
+        let v = Anchor {
+            host_ns: 5,
+            frame: 7,
+            transport_frame: -3,
+            transport_running: true,
+            input_pos: 12.25,
+            ratio: 1.0001,
+            epoch: 2,
+        };
         a.write(v);
         assert_eq!(a.read(), Some(v));
     }
 
     #[test]
     fn frame_extrapolation_uses_the_sample_rate_in_both_directions() {
-        let a = Anchor { host_ns: 1_000_000_000, frame: 48_000, transport_frame: 100, transport_running: true };
+        let a = Anchor {
+            host_ns: 1_000_000_000,
+            frame: 48_000,
+            transport_frame: 100,
+            transport_running: true,
+            ..Anchor::default()
+        };
         assert_eq!(a.frame_at(1_010_000_000, 48_000), 48_480);
         assert_eq!(a.frame_at(990_000_000, 48_000), 47_520);
         assert_eq!(a.frame_at(0, 48_000), 0);

@@ -21,11 +21,16 @@
 //! **Realtime rules.** `process` and everything it calls: no allocation, no
 //! locks, no I/O, no panics on bad input (indices are bounds-checked with `get`).
 
+use std::sync::mpsc;
+
 use rtrb::{Consumer, Producer, RingBuffer};
 use serde::{Deserialize, Serialize};
 
 use super::click::{accent_for, db_to_gain, ClickVoice};
 use super::pool::{self, LayerBuf, LayerRecycler, LayerSource};
+use super::transfer::{ParkedLooper, ParkedTrack, 
+    Chunk, Inventory, JobKind, LayerJob, LayerSlot, RestorePlan, TrackPlan, JOBS_PER_BLOCK, JOB_CAPACITY,
+};
 use super::{LooperConfig, MAX_TRACKS};
 use crate::error::EngineError;
 use crate::model::LoopMode;
@@ -34,6 +39,11 @@ use crate::transport::{first_grid_index_at_or_after, grid_frame, MusicalPosition
 const COMMAND_CAPACITY: usize = 64;
 const SNAPSHOT_CAPACITY: usize = 8;
 const NOTICE_CAPACITY: usize = 32;
+
+/// The transport stops itself here instead of approaching `i64` overflow.
+/// 2^52 frames is ~2,900 years at 48 kHz, and every frame below it is exact
+/// in `f64`, which the grid and loop arithmetic rely on.
+pub const MAX_TRANSPORT_FRAME: i64 = 1 << 52;
 
 /// Commands from the control thread. `Copy`, so sending never allocates.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -200,6 +210,8 @@ pub struct LooperSnapshot {
     pub free_layers: u32,
     pub latency_frames: u32,
     pub frames_processed: u64,
+    /// Changes whenever layer content or layer stacks change (unsaved-work tracking).
+    pub epoch: u64,
 }
 
 /// Control-thread ends of the looper's rings.
@@ -208,6 +220,14 @@ pub struct LooperHandles {
     pub snapshots: Consumer<LooperSnapshot>,
     pub notices: Consumer<LooperNotice>,
     pub recycler: LayerRecycler,
+    /// Layer export/import requests (see [`super::transfer`]); at most
+    /// [`JOBS_PER_BLOCK`] are served per callback.
+    pub jobs: Producer<LayerJob>,
+    /// Answered jobs come back here, carrying their buffers.
+    pub job_results: Consumer<LayerJob>,
+    /// Receives the looper's content when the `LooperCore` is dropped (the
+    /// output stream was torn down). Take it *before* stopping the stream.
+    pub parked: Option<mpsc::Receiver<ParkedLooper>>,
 }
 
 /// The shared loop: phase 0 at `origin`, exact `period` in frames.
@@ -234,6 +254,18 @@ impl Master {
         }
         (cycle, (frame - self.cycle_start(cycle)) as usize)
     }
+}
+
+/// A transport stop waiting for in-flight input: the performer stopped at
+/// transport frame `t` (where this counter starts), but with input latency the last frames they
+/// played arrive up to `lat` frames later. Arrival frame `t` keeps counting
+/// (without playback) until every open recording has received its tail;
+/// then the transport rewinds and enters `then`.
+#[derive(Debug, Clone, Copy)]
+struct Drain {
+    t: i64,
+    left: u64,
+    then: RunState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +355,17 @@ pub struct LooperCore {
     click_next_index: i64,
     click_next_frame: i64,
     pool: LayerSource,
+    /// Set while a stop waits for in-flight input (commands wait meanwhile).
+    drain: Option<Drain>,
+    /// Bumped whenever layer content or the layer stacks change; exports
+    /// compare it across chunks to prove they copied one consistent state.
+    epoch: u64,
+    /// A project restore is filling layers: nothing may play or record.
+    loading: bool,
+    job_rx: Consumer<LayerJob>,
+    job_tx: Producer<LayerJob>,
+    /// Where the content goes when this core is dropped (see `Drop`).
+    park_tx: Option<mpsc::Sender<ParkedLooper>>,
     cmd_rx: Consumer<LooperCommand>,
     snap_tx: Producer<LooperSnapshot>,
     notice_tx: Producer<LooperNotice>,
@@ -352,6 +395,9 @@ impl LooperCore {
         let (cmd_tx, cmd_rx) = RingBuffer::new(COMMAND_CAPACITY);
         let (snap_tx, snap_rx) = RingBuffer::new(SNAPSHOT_CAPACITY);
         let (notice_tx, notice_rx) = RingBuffer::new(NOTICE_CAPACITY);
+        let (jobs_tx, job_rx) = RingBuffer::new(JOB_CAPACITY);
+        let (job_tx, results_rx) = RingBuffer::new(JOB_CAPACITY);
+        let (park_tx, park_rx) = mpsc::channel();
 
         let mut transport = transport;
         transport.sample_rate = sample_rate;
@@ -397,6 +443,12 @@ impl LooperCore {
             click_next_index: 0,
             click_next_frame: 0,
             pool,
+            drain: None,
+            epoch: 0,
+            loading: false,
+            job_rx,
+            job_tx,
+            park_tx: Some(park_tx),
             cmd_rx,
             snap_tx,
             notice_tx,
@@ -405,7 +457,15 @@ impl LooperCore {
             // Publish on the first block so the UI sees state immediately.
             frames_since_snapshot: u64::MAX / 2,
         };
-        let handles = LooperHandles { commands: cmd_tx, snapshots: snap_rx, notices: notice_rx, recycler };
+        let handles = LooperHandles {
+            commands: cmd_tx,
+            snapshots: snap_rx,
+            notices: notice_rx,
+            recycler,
+            jobs: jobs_tx,
+            job_results: results_rx,
+            parked: Some(park_rx),
+        };
         Ok((core, handles))
     }
 
@@ -421,9 +481,16 @@ impl LooperCore {
         self.frames_processed
     }
 
+    /// Test hook: jump the transport clock (used to exercise the overflow guard).
+    #[cfg(test)]
+    pub(crate) fn set_transport_frame(&mut self, t: i64) {
+        self.t = t;
+    }
+
     /// Process one block of mono input into mono output. Realtime-safe.
     pub fn process(&mut self, input: &[f32], out: &mut [f32]) {
         self.drain_commands();
+        self.service_jobs();
         let n = input.len().min(out.len());
         self.resync_click();
         for i in 0..n {
@@ -443,8 +510,15 @@ impl LooperCore {
                     self.tick_click(self.t, false);
                     y += self.render(x);
                     self.t += 1;
+                    if self.t >= MAX_TRANSPORT_FRAME {
+                        self.stop(RunState::Stopped);
+                    }
                 }
-                RunState::Stopped | RunState::Paused => {}
+                RunState::Stopped | RunState::Paused => {
+                    if self.drain.is_some() {
+                        self.drain_frame(x);
+                    }
+                }
             }
             y += self.click.next_sample();
             out[i] = soft_limit(y);
@@ -452,7 +526,10 @@ impl LooperCore {
         for o in out.iter_mut().skip(n) {
             *o = 0.0;
         }
-        self.frames_processed += n as u64;
+        if self.drain.is_some() || self.any_recording() {
+            self.touch(); // recorded samples changed layer content
+        }
+        self.frames_processed = self.frames_processed.saturating_add(n as u64);
         self.frames_since_snapshot = self.frames_since_snapshot.saturating_add(n as u64);
         if self.frames_since_snapshot >= self.snapshot_interval {
             self.frames_since_snapshot = 0;
@@ -540,7 +617,13 @@ impl LooperCore {
         g.max(0.0)
     }
 
+    /// Mark layer content or layer stacks as changed.
+    fn touch(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
     fn complete_recording(&mut self, ti: usize) {
+        self.touch();
         if let Some(tr) = self.tracks.get_mut(ti) {
             tr.rec = None;
             tr.playing = true;
@@ -556,6 +639,7 @@ impl LooperCore {
     /// and reaches those frames only a full period later.
     fn finish_first_take(&mut self, ti: usize, end: i64, keep_tail: bool) {
         let Some(rec) = self.tracks.get(ti).and_then(|tr| tr.rec) else { return };
+        self.touch();
         let len = (end - rec.start).max(0) as usize;
         if len < self.min_loop_frames {
             self.discard_recording(ti);
@@ -587,27 +671,53 @@ impl LooperCore {
         }
     }
 
-    /// A recording is being cut short at performance frame `tp_end` (transport
-    /// stop). If it is still a single pass over a zeroed layer, fade the last
-    /// frames written so the cut does not click. Multi-pass overdubs are left
-    /// alone: scaling them would also scale earlier passes.
-    fn fade_cut(&mut self, ti: usize, rec: Recording, tp_end: i64) {
+    /// The transport stops while a recording is open: end it at performance
+    /// frame `end` (the stop point). Frames already in the layer that fall in
+    /// the last `fade_frames` before `end` are faded now; frames still in
+    /// flight get the same curve from [`Self::ramp`] when they arrive, so the
+    /// fade is identical with or without input latency. Multi-pass overdubs
+    /// are not faded retroactively: scaling would also scale earlier passes.
+    fn cut_recording(&mut self, ti: usize, rec: Recording, end: i64) {
+        self.touch();
+        if let Some(r) = self.tracks.get_mut(ti).and_then(|tr| tr.rec.as_mut()) {
+            r.end = Some(end);
+        }
         let Some(m) = self.master else { return };
-        let written = tp_end - rec.start;
-        if self.fade_frames == 0 || written <= 0 || written as f64 > m.period.floor() {
+        let span = end - rec.start;
+        if self.fade_frames == 0 || span <= 0 || span as f64 > m.period.floor() {
             return;
         }
         let fade = self.fade_frames as i64;
+        let written_end = (self.t - rec.lat).min(end);
         let Some(layer) = self.tracks.get_mut(ti).and_then(|tr| tr.layers.last_mut()) else { return };
-        for k in 0..fade.min(written) {
-            let (_, idx) = m.locate(tp_end - 1 - k);
+        for tp in (end - fade).max(rec.start)..written_end {
+            let (_, idx) = m.locate(tp);
             if let Some(s) = layer.get_mut(idx) {
-                *s *= (k + 1) as f32 / fade as f32;
+                *s *= (end - tp) as f32 / fade as f32;
             }
         }
     }
 
+    /// One arrival frame while a stop drains in-flight input.
+    fn drain_frame(&mut self, x: f32) {
+        let Some(mut d) = self.drain else { return };
+        for ti in 0..self.tracks.len() {
+            if let Some(rec) = self.tracks[ti].rec {
+                self.advance_recording(ti, rec, x, d.t);
+            }
+        }
+        d.t += 1;
+        d.left = d.left.saturating_sub(1);
+        if d.left == 0 || !self.any_recording() {
+            self.drain = None;
+            self.finish_stop(d.then);
+        } else {
+            self.drain = Some(d);
+        }
+    }
+
     fn discard_recording(&mut self, ti: usize) {
+        self.touch();
         if let Some(tr) = self.tracks.get_mut(ti) {
             if tr.rec.take().is_some() {
                 if let Some(buf) = tr.layers.pop() {
@@ -649,7 +759,7 @@ impl LooperCore {
         if pos == self.click_next_frame {
             let accent = accent_for(self.click_next_index, &self.transport);
             self.click.trigger(accent, db_to_gain(self.transport.metronome.gain_db));
-            self.click_next_index += 1;
+            self.click_next_index = self.click_next_index.saturating_add(1);
             self.click_next_frame = grid_frame(self.click_next_index, step);
         }
     }
@@ -657,7 +767,14 @@ impl LooperCore {
     // ---- commands -----------------------------------------------------------
 
     fn drain_commands(&mut self) {
+        if self.drain.is_some() {
+            return; // a stop is collecting its tail: later commands wait (at most `latency` frames)
+        }
         while let Ok(cmd) = self.cmd_rx.pop() {
+            if self.loading {
+                let _ = self.notice_tx.push(LooperNotice::Rejected { reason: RejectReason::TrackBusy });
+                continue;
+            }
             if let Err(reason) = self.apply(cmd) {
                 let _ = self.notice_tx.push(LooperNotice::Rejected { reason });
             }
@@ -673,13 +790,10 @@ impl LooperCore {
                 Ok(())
             }
             C::Stop => {
-                self.stop();
+                self.stop(RunState::Stopped);
                 Ok(())
             }
-            C::Pause => {
-                self.pause();
-                Ok(())
-            }
+            C::Pause => self.pause(),
             C::Resume => {
                 if self.run == RunState::Paused {
                     self.run = RunState::Running;
@@ -687,9 +801,7 @@ impl LooperCore {
                 Ok(())
             }
             C::Restart => {
-                self.stop();
-                self.run = RunState::Running;
-                self.resync_click();
+                self.stop(RunState::Running);
                 Ok(())
             }
             C::Record { track } => self.record(track as usize),
@@ -776,33 +888,71 @@ impl LooperCore {
         self.resync_click();
     }
 
-    fn pause(&mut self) {
+    /// Pause is refused while any track records or is armed: a paused
+    /// recording would either lose the input that arrives during the pause or
+    /// splice it in at the wrong loop phase. Stop recording (or Stop) first.
+    fn pause(&mut self) -> Result<(), RejectReason> {
         match self.run {
+            RunState::Running if self.any_recording() => return Err(RejectReason::TrackBusy),
             RunState::Running => self.run = RunState::Paused,
-            RunState::CountIn => self.stop(),
+            RunState::CountIn => self.stop(RunState::Stopped),
             RunState::Stopped | RunState::Paused => {}
         }
+        Ok(())
     }
 
-    fn stop(&mut self) {
+    /// Stop the transport (`then` = Stopped) or restart it from the loop start
+    /// (`then` = Running). Open recordings end at the performer's stop point
+    /// `t`, exactly like `StopRecording` at that frame: armed takes are
+    /// cancelled, a free first take sets the loop to press-to-press length,
+    /// other takes are cut with a fade-out. With input latency their last
+    /// frames are still in flight, so playback stops now but the rewind waits
+    /// (at most `latency` frames) until those frames have been recorded.
+    fn stop(&mut self, then: RunState) {
         let t = self.t;
+        let mut drain = 0i64;
         for ti in 0..self.tracks.len() {
-            if let Some(rec) = self.tracks[ti].rec {
-                if t <= rec.start {
-                    self.discard_recording(ti);
-                } else if rec.kind == RecKind::FirstTake {
-                    // The transport stops now, so frames still in flight never arrive.
-                    self.finish_first_take(ti, t, false);
-                } else {
-                    let tp = t - rec.lat;
-                    if rec.end.map_or(true, |end| tp < end) {
-                        self.fade_cut(ti, rec, tp);
+            let Some(rec) = self.tracks[ti].rec else { continue };
+            if t <= rec.start {
+                self.discard_recording(ti);
+                continue;
+            }
+            match rec.kind {
+                RecKind::FirstTake => self.finish_first_take(ti, t, true),
+                RecKind::NewLoop | RecKind::Overdub => {
+                    if rec.end.is_none_or(|end| t < end) {
+                        self.cut_recording(ti, rec, t);
                     }
+                }
+            }
+            if let Some(r) = self.tracks[ti].rec {
+                // Frames with performance time < end arrive until t' = end + lat.
+                let pending = r.end.unwrap_or(t) + r.lat - t;
+                if pending > 0 {
+                    drain = drain.max(pending);
+                } else {
                     self.complete_recording(ti);
                 }
             }
         }
-        self.run = RunState::Stopped;
+        self.count_in_left = 0;
+        self.count_in_total = 0;
+        if drain > 0 {
+            self.run = RunState::Stopped;
+            self.drain = Some(Drain { t, left: drain as u64, then });
+        } else {
+            self.finish_stop(then);
+        }
+    }
+
+    /// Rewind to the loop start once no input is in flight.
+    fn finish_stop(&mut self, then: RunState) {
+        for ti in 0..self.tracks.len() {
+            if self.tracks[ti].rec.is_some() {
+                self.complete_recording(ti);
+            }
+        }
+        self.run = then;
         self.t = 0;
         self.count_in_left = 0;
         self.count_in_total = 0;
@@ -855,6 +1005,7 @@ impl LooperCore {
 
     fn begin(&mut self, ti: usize, rec: Recording) -> Result<(), RejectReason> {
         let buf = self.pool.acquire().ok_or(RejectReason::PoolExhausted)?;
+        self.touch();
         let tr = &mut self.tracks[ti];
         // A new take invalidates this track's redo history.
         Self::release_redo(&mut self.pool, tr);
@@ -957,6 +1108,7 @@ impl LooperCore {
         if tr.layers.len() < 2 {
             return Err(RejectReason::NothingToUndo);
         }
+        self.epoch = self.epoch.wrapping_add(1);
         if let Some(buf) = tr.layers.pop() {
             if tr.redo.len() < tr.redo.capacity() {
                 tr.redo.push(buf);
@@ -977,11 +1129,13 @@ impl LooperCore {
         }
         let buf = tr.redo.pop().ok_or(RejectReason::NothingToRedo)?;
         tr.layers.push(buf);
+        self.touch();
         Ok(())
     }
 
     fn clear(&mut self, ti: usize) -> Result<(), RejectReason> {
         let tr = self.tracks.get_mut(ti).ok_or(RejectReason::NoSuchTrack)?;
+        self.epoch = self.epoch.wrapping_add(1);
         tr.rec = None;
         tr.playing = true;
         while let Some(buf) = tr.layers.pop() {
@@ -991,6 +1145,169 @@ impl LooperCore {
         if self.transport.mode == LoopMode::Free && !self.has_content() && !self.any_recording() {
             self.master = None;
         }
+        Ok(())
+    }
+
+    // ---- layer export / import (see `transfer.rs`) ------------------------------
+
+    /// Answer at most `JOBS_PER_BLOCK` transfer jobs. Realtime-safe: copies are
+    /// bounded by `CHUNK_FRAMES`, buffers travel back to the control thread.
+    fn service_jobs(&mut self) {
+        for _ in 0..JOBS_PER_BLOCK {
+            let Ok(mut job) = self.job_rx.pop() else { return };
+            job.kind = match job.kind {
+                JobKind::Describe(_) => JobKind::Describe(Some(self.inventory())),
+                JobKind::Read(mut c) => {
+                    c.epoch = self.epoch;
+                    c.result = Some(self.read_chunk(&mut c));
+                    JobKind::Read(c)
+                }
+                JobKind::Write(mut c) => {
+                    c.result = Some(self.write_chunk(&c));
+                    JobKind::Write(c)
+                }
+                JobKind::Restore(plan, _) => JobKind::Restore(plan, Some(self.restore(&plan))),
+                JobKind::Finish(_) => {
+                    self.loading = false;
+                    self.touch();
+                    JobKind::Finish(Some(Ok(())))
+                }
+            };
+            if let Err(rtrb::PushError::Full(job)) = self.job_tx.push(job) {
+                // Unreachable: the control side keeps at most JOB_CAPACITY jobs
+                // outstanding. Never free on the audio thread.
+                std::mem::forget(job);
+            }
+        }
+    }
+
+    fn inventory(&self) -> Inventory {
+        let mut tracks = [TrackPlan::EMPTY; MAX_TRACKS];
+        for (slot, tr) in tracks.iter_mut().zip(self.tracks.iter()) {
+            *slot = TrackPlan {
+                layers: tr.layers.len().min(u8::MAX as usize) as u8,
+                redo: tr.redo.len().min(u8::MAX as usize) as u8,
+                gain: tr.gain,
+                muted: tr.muted,
+                solo: tr.solo,
+                playing: tr.playing,
+            };
+        }
+        Inventory {
+            epoch: self.epoch,
+            busy: self.loading || self.drain.is_some() || self.any_recording(),
+            run: self.run,
+            transport: self.transport,
+            period: self.master.map(|m| m.period),
+            latency: self.latency as u32,
+            max_frames: self.max_frames,
+            max_layers: self.max_layers,
+            track_count: self.tracks.len().min(MAX_TRACKS) as u8,
+            tracks,
+        }
+    }
+
+    fn layer(&self, c: &Chunk) -> Option<&LayerBuf> {
+        let tr = self.tracks.get(c.track as usize)?;
+        match c.slot {
+            LayerSlot::Active(i) => tr.layers.get(i as usize),
+            LayerSlot::Redo(i) => tr.redo.get(i as usize),
+        }
+    }
+
+    fn read_chunk(&self, c: &mut Chunk) -> Result<(), RejectReason> {
+        let layer = self.layer(c).ok_or(RejectReason::TrackEmpty)?;
+        let src = layer.get(c.offset..c.offset + c.buf.len()).ok_or(RejectReason::LoopTooLong)?;
+        c.buf.copy_from_slice(src);
+        Ok(())
+    }
+
+    fn write_chunk(&mut self, c: &Chunk) -> Result<(), RejectReason> {
+        if !self.loading {
+            return Err(RejectReason::TrackBusy);
+        }
+        let tr = self.tracks.get_mut(c.track as usize).ok_or(RejectReason::NoSuchTrack)?;
+        let layer = match c.slot {
+            LayerSlot::Active(i) => tr.layers.get_mut(i as usize),
+            LayerSlot::Redo(i) => tr.redo.get_mut(i as usize),
+        }
+        .ok_or(RejectReason::TrackEmpty)?;
+        let dst = layer.get_mut(c.offset..c.offset + c.buf.len()).ok_or(RejectReason::LoopTooLong)?;
+        dst.copy_from_slice(&c.buf);
+        self.touch();
+        Ok(())
+    }
+
+    /// Replace all content with zeroed layers laid out as `plan` and enter
+    /// loading mode. Releases at most `pool_layers` buffers (bounded work).
+    fn restore(&mut self, plan: &RestorePlan) -> Result<(), RejectReason> {
+        if self.run != RunState::Stopped || self.drain.is_some() || self.any_recording() {
+            return Err(RejectReason::TrackBusy);
+        }
+        let mut transport = plan.transport;
+        transport.sample_rate = self.sample_rate;
+        transport.position = 0;
+        transport.play_state = Default::default();
+        validate_transport(&transport, self.max_frames)?;
+        let master = match transport.mode {
+            LoopMode::Synced => Self::synced_master(&transport),
+            LoopMode::Free => match plan.period {
+                Some(p) if p.is_finite() && p >= 1.0 && p.ceil() as usize <= self.max_frames => {
+                    Some(Master { origin: 0, period: p })
+                }
+                Some(_) => return Err(RejectReason::LoopTooLong),
+                None => None,
+            },
+        };
+        let mut needed = 0usize;
+        for (t, tp) in plan.tracks.iter().enumerate() {
+            let n = tp.layers as usize + tp.redo as usize;
+            if n > 0 && t >= self.tracks.len() {
+                return Err(RejectReason::NoSuchTrack);
+            }
+            if tp.layers as usize > self.max_layers || tp.redo as usize > self.max_layers {
+                return Err(RejectReason::LayerLimit);
+            }
+            if n > 0 && master.is_none() {
+                return Err(RejectReason::InvalidTransport);
+            }
+            needed += n;
+        }
+        for ti in 0..self.tracks.len() {
+            let _ = self.clear(ti);
+        }
+        if self.pool.available() < needed {
+            return Err(RejectReason::PoolExhausted);
+        }
+        for (tr, tp) in self.tracks.iter_mut().zip(plan.tracks.iter()) {
+            for _ in 0..tp.layers {
+                if let Some(buf) = self.pool.acquire() {
+                    tr.layers.push(buf);
+                }
+            }
+            for _ in 0..tp.redo {
+                if let Some(buf) = self.pool.acquire() {
+                    tr.redo.push(buf);
+                }
+            }
+            tr.gain = if tp.gain.is_finite() { tp.gain.clamp(0.0, 2.0) } else { 1.0 };
+            tr.muted = tp.muted;
+            tr.solo = tp.solo;
+            tr.playing = tp.playing;
+        }
+        self.any_solo = self.tracks.iter().any(|tr| tr.solo);
+        // Start at the target level: nothing ramps in when playback begins.
+        let any_solo = self.any_solo;
+        for tr in &mut self.tracks {
+            tr.level = tr.target_level(any_solo);
+        }
+        self.transport = transport;
+        self.master = master;
+        self.latency = (plan.latency as i64).min(self.max_frames as i64 / 2);
+        self.t = 0;
+        self.loading = true;
+        self.touch();
+        self.resync_click();
         Ok(())
     }
 
@@ -1030,6 +1347,7 @@ impl LooperCore {
             free_layers: self.pool.available() as u32,
             latency_frames: self.latency as u32,
             frames_processed: self.frames_processed,
+            epoch: self.epoch,
         }
     }
 
@@ -1054,5 +1372,52 @@ impl LooperCore {
             record_start: tr.rec.map(|r| r.start),
             record_end: tr.rec.and_then(|r| r.end),
         }
+    }
+}
+
+/// The stream hosting this core is being torn down (device change, rate
+/// change, hot-plug, iOS route change, stop). This runs on the thread that
+/// drops the stream, never inside an audio callback. Open takes are closed as
+/// a transport Stop would close them (input still in flight is lost with the
+/// stream), and the layer buffers are *moved* (not copied) to whoever holds
+/// `LooperHandles::parked`. A core in the middle of a restore parks nothing:
+/// its content is incomplete and the restore's source still exists.
+impl Drop for LooperCore {
+    fn drop(&mut self) {
+        let Some(tx) = self.park_tx.take() else { return };
+        if self.loading {
+            return;
+        }
+        if self.drain.is_some() || self.any_recording() {
+            if self.drain.is_none() {
+                self.stop(RunState::Stopped);
+            }
+            self.drain = None;
+            self.finish_stop(RunState::Stopped);
+        }
+        let tracks = self
+            .tracks
+            .iter_mut()
+            .map(|tr| ParkedTrack {
+                plan: TrackPlan {
+                    layers: tr.layers.len().min(u8::MAX as usize) as u8,
+                    redo: tr.redo.len().min(u8::MAX as usize) as u8,
+                    gain: tr.gain,
+                    muted: tr.muted,
+                    solo: tr.solo,
+                    playing: tr.playing,
+                },
+                layers: std::mem::take(&mut tr.layers),
+                redo: std::mem::take(&mut tr.redo),
+            })
+            .collect();
+        let _ = tx.send(ParkedLooper {
+            transport: self.transport,
+            period: self.master.map(|m| m.period),
+            latency: self.latency as u32,
+            max_frames: self.max_frames,
+            max_layers: self.max_layers,
+            tracks,
+        });
     }
 }

@@ -24,6 +24,7 @@
 //! - [`clock`]     stream clock anchors, xrun detection, drift estimation
 //! - [`midi_in`]   USB-MIDI input (midir), timestamp mapping
 //! - [`settings`]  persisted hardware settings
+//! - [`practice`]  Practice Lab: reference/attempt takes, input→transport clock mapping, scoring
 //! - [`hardware`]  control-thread side of devices, MIDI, diagnostics
 //! - [`calibration`] loopback latency test signal and detector
 
@@ -39,6 +40,8 @@ pub mod looper;
 pub mod meter;
 pub mod midi_in;
 pub mod model;
+pub mod practice;
+pub mod project;
 pub mod routing;
 pub mod settings;
 pub mod transport;
@@ -47,5 +50,6 @@ pub use analysis::AnalysisConfig;
 pub use engine::{Engine, EngineEvent, EngineStatus, EngineWarning, EventSink, PitchUpdate};
 pub use error::EngineError;
 pub use looper::{LooperCommand, LooperConfig, LooperState};
+pub use project::{ProjectEvent, ProjectReply, ProjectRequest};
 pub use routing::{AudioConfig, InputRoute, MonitorConfig, OutputRoute};
 pub use settings::AudioSettings;

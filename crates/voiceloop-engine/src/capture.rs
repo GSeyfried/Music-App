@@ -79,6 +79,8 @@ pub struct CaptureRequest {
     /// Frames per callback to request; `None` = device default.
     pub buffer_size: Option<u32>,
     pub route: InputRoute,
+    /// Stats to publish into (shared with the output bridge); `None` = new.
+    pub stats: Option<Arc<StreamStats>>,
 }
 
 /// A running input stream. Dropping it stops capture and releases the device.
@@ -99,7 +101,7 @@ pub struct InputCapture {
 impl InputCapture {
     /// Open and start an input stream.
     pub fn open(request: CaptureRequest, taps: InputTaps) -> Result<Self, EngineError> {
-        let CaptureRequest { device, config: supported, buffer_size, route } = request;
+        let CaptureRequest { device, config: supported, buffer_size, route, stats } = request;
         let sample_format = supported.sample_format();
         let (buffer, _clamped) = devices::buffer_size_for(buffer_size, supported.buffer_size());
         let mut config: cpal::StreamConfig = supported.into();
@@ -108,7 +110,7 @@ impl InputCapture {
 
         let window = (config.sample_rate.0 / METER_WINDOWS_PER_SECOND).max(1);
         let (producer, consumer) = rtrb::RingBuffer::<MeterFrame>::new(METER_RING_CAPACITY);
-        let stats = Arc::new(StreamStats::default());
+        let stats = stats.unwrap_or_default();
         let cell = Arc::new(RouteCell::input(route));
         clock::init_epoch();
 
@@ -160,7 +162,7 @@ impl InputCapture {
             Some(r) => devices::config_at_rate(&device, crate::model::DeviceDirection::Input, r)?,
             None => devices::default_config(&device, crate::model::DeviceDirection::Input)?,
         };
-        Self::open(CaptureRequest { device, config, buffer_size: None, route: InputRoute::MixAll }, taps)
+        Self::open(CaptureRequest { device, config, buffer_size: None, route: InputRoute::MixAll, stats: None }, taps)
     }
 
     /// Current facts, including live block size, latency report, and counters.

@@ -14,16 +14,20 @@ Every command rejects with an `EngineError` (`{ kind, message? }`).
 | `stop_input` | none | `EngineStatus` | Unchanged. |
 | `set_input_route` | `{ route: InputRoute }` | `EngineStatus` | Live while running (no restart, no gap); remembered and saved. |
 | `set_output_route` | `{ route: OutputRoute }` | `EngineStatus` | Live while running; remembered and saved. |
-| `set_monitor` | `{ monitor: MonitorConfig }` | `EngineStatus` | Live (gain slews over ~11 ms); remembered and saved. Also emits `status`. |
+| `set_monitor` | `{ monitor: MonitorConfig }` | `EngineStatus` | Live (gain slews over ~11 ms); remembered and saved. Also emits `status`. **`invalid`** if `gain` is not finite or outside 0..2 (nothing changes). `start_audio` validates `config.monitor` the same way. |
 | `list_midi_inputs` | none | `MidiPortInfo[]` | |
 | `open_midi_input` | `{ portId: string }` | `MidiPortInfo` | `portId` may also be a port name. Opening an open port is a no-op. Remembered: reopens after unplug/replug and at next app start. |
-| `close_midi_input` | `{ portId: string }` | `null` | Error `invalid` if it is not open. Forgets the port. |
+| `close_midi_input` | `{ portId: string }` | `null` | Closes and forgets the port (no auto-reopen; saved). Also succeeds for a remembered port that is currently unplugged — that is how to cancel its auto-reopen. Error `invalid` (and no change) only if it is neither open nor remembered. |
 | `get_audio_settings` | none | `AudioSettings` | What is in effect (and on disk). |
 | `save_audio_settings` | none | `null` | Settings are auto-saved after every change; this forces a write. |
+| `startup_warnings` | none | `{ kind, message }[]` | Warnings raised while loading the settings file at app start (`settingsProblem`, `deviceFallback` for saved MIDI ports). **Call once after subscribing to `engine://event`**: they were emitted before the webview listened. Not cleared by reading. |
+| `start_latency_calibration` | `{ apply: boolean }` | `null` | Loopback calibration (output → cable/speaker → input). Needs audio running with the looper output, transport **stopped**, monitoring **off** (else `invalid`); one at a time (`busy`). Plays 8 short chirps at −12 dBFS (~2 s). Result arrives as a `calibration` event ~2.5 s later. With `apply: true` a successful result is sent as `setInputLatency` (and saved). |
 | `looper_command` | `{ command: { type: "setInputLatency", frames } }` | `null` | **Changed:** now accepted while audio is stopped; the value is remembered, re-applied on every start, and saved. |
 
 Settings are loaded automatically at app start from
-`<app config dir>/audio-settings.json`: saved MIDI ports open immediately,
+`<app config dir>/audio-settings.json`. An unreadable/invalid/newer file is
+moved to `audio-settings.json.bad`, defaults are used, and a `settingsProblem`
+warning is raised (retrieve it with `startup_warnings`). Saved MIDI ports open immediately,
 and the next `start_input`/`start_audio` uses the saved devices (falling back
 to system defaults with a `deviceFallback` warning when one is missing).
 Audio is **not** started automatically (microphone permission prompt).
@@ -107,6 +111,14 @@ export interface CaptureInfo {
   nonFiniteSamples: number;        // NaN/Inf samples replaced by silence
 }
 
+export interface BridgeInfo {
+  ratioPpm: number;                // drift correction: input frames per output frame = 1 + ppm·1e-6
+  meanFillFrames: number;          // the bridge's delay: input frames captured but not yet delivered
+                                   // (part of round-trip latency; constant once targetFillFrames is set)
+  targetFillFrames: number | null; // null while (re)measuring, ~1 s after start or a discontinuity
+  discontinuities: number;         // underruns, overflow skips, input overruns
+}
+
 export interface OutputInfo {
   deviceId: string;
   sampleRate: number;
@@ -119,6 +131,29 @@ export interface OutputInfo {
   reportedLatencyFrames: number | null;
   discontinuities: number;
   lostFrames: number;
+  bridge: BridgeInfo;              // live in audioDiagnostics; zeros in the first status
+}
+
+export interface CalibrationResult {
+  latencyFrames: number;           // value for setInputLatency
+  latencyMs: number;
+  sampleRate: number;
+  confidence: number;              // 0..1; < 0.5 → suggest re-running with a cable
+  detected: number;                // chirps found (of `repeats`)
+  repeats: number;
+  spreadFrames: number;            // disagreement between chirps
+  inverted: boolean;               // polarity flip in the chain (hint only)
+}
+
+export type CalibrationFailure =
+  | { kind: "notDetected"; message: string }   // no loopback / muted / wrong input route
+  | { kind: "inconsistent"; message: string }  // echoes or dropouts
+  | { kind: "aborted"; message: string };      // audio stopped / output did not run
+
+export interface CalibrationOutcome {
+  result: CalibrationResult | null;
+  error: CalibrationFailure | null;
+  applied: boolean;                // sent as setInputLatency (and saved)
 }
 
 export interface EngineStatus {
@@ -157,7 +192,8 @@ export type MidiEvent = MidiMessage & {
   portId: string;
   hostTimeNs: number;              // engine host clock (ns since engine start)
   outputFrame: number | null;      // output-stream frame being processed then (audio running)
-  transportFrame: number | null;   // looper transport frame then (frozen while stopped)
+  transportFrame: number | null;   // looper transport frame then (frozen while stopped/paused; correct
+                                   // also for notes in the block where play/pause took effect)
   inputFrame: number | null;       // input clock (same clock as level/pitch/onset frames)
 };
 
@@ -182,8 +218,9 @@ export interface AudioDiagnostics {
 | `devicesChanged` | `DevicesChanged` | Audio device set changed (polled every 2 s). Re-call `list_audio_devices` if needed. |
 | `midiPorts` | `MidiPortInfo[]` | MIDI port list changed (polled every 2 s). |
 | `midi` | `MidiBatch` | MIDI received; ≤ 100 Hz batches while a port is open. |
-| `audioDiagnostics` | `AudioDiagnostics` | 1 Hz while audio runs. |
-| `error` | `EngineError` | New kind `deviceLost` (active device unplugged; audio has been stopped and a `status` follows). |
+| `audioDiagnostics` | `AudioDiagnostics` | 1 Hz while audio runs. `output.bridge` carries the drift correction. |
+| `calibration` | `CalibrationOutcome` | A `start_latency_calibration` run finished or failed. |
+| `error` | `EngineError` | New kind `deviceLost`: an active device is no longer listed, or its stream stopped delivering callbacks for 1.5 s (checked every 2 s, from the first poll). Audio has been stopped and a `status` follows. |
 | `warning` | `{ kind, message }` | New kinds below. |
 
 New `EngineError.kind` values: `deviceLost`, `midi`, `io` (settings file).

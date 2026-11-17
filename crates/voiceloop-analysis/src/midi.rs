@@ -41,6 +41,8 @@ pub struct MidiEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MidiOptions {
+    /// Tempo in *quarter notes* per minute (what a Standard MIDI File stores).
+    /// For a transport whose BPM counts another beat unit, use [`MidiOptions::for_meter`].
     pub bpm: f64,
     /// Ticks per quarter note (the file's time division). 480 is conventional.
     pub ticks_per_beat: u16,
@@ -52,6 +54,11 @@ pub struct MidiOptions {
     pub bend_range_semitones: f32,
     /// Frame that maps to tick 0 (e.g. the loop start).
     pub origin_frame: u64,
+    /// Time signature written to the file (without it DAWs assume 4/4).
+    pub time_signature_numerator: u8,
+    /// Power of two, 1..=64 (4 = quarter-note beats, 8 = eighths). Anything
+    /// else is written as 4.
+    pub time_signature_denominator: u8,
 }
 
 impl Default for MidiOptions {
@@ -64,7 +71,31 @@ impl Default for MidiOptions {
             pitch_bend: false,
             bend_range_semitones: 2.0,
             origin_frame: 0,
+            time_signature_numerator: 4,
+            time_signature_denominator: 4,
         }
+    }
+}
+
+impl MidiOptions {
+    /// Options for a meter whose tempo counts beats of the denominator (as the
+    /// transport does: 7/8 at 210 BPM means 210 eighths per minute).
+    pub fn for_meter(bpm: f64, numerator: u8, denominator: u8) -> Self {
+        let denominator = valid_denominator(denominator);
+        Self {
+            bpm: bpm * 4.0 / denominator as f64,
+            time_signature_numerator: numerator.max(1),
+            time_signature_denominator: denominator,
+            ..Self::default()
+        }
+    }
+}
+
+fn valid_denominator(d: u8) -> u8 {
+    if d.is_power_of_two() && d <= 64 {
+        d
+    } else {
+        4
     }
 }
 
@@ -129,12 +160,28 @@ fn write_vlq(out: &mut Vec<u8>, mut value: u32) {
 }
 
 /// Serialise events (sorted by tick) as a format-0 Standard MIDI File with a
-/// tempo of `options.bpm`.
+/// tempo of `options.bpm` (quarter notes per minute) and the time signature
+/// in `options`.
 pub fn write_smf(events: &[MidiEvent], options: &MidiOptions) -> Vec<u8> {
     let mut track = Vec::with_capacity(events.len() * 4 + 16);
     // Tempo meta event: microseconds per quarter note, 24 bits.
     let micros = (60_000_000.0 / options.bpm.max(1.0)).round().clamp(1.0, 16_777_215.0) as u32;
     track.extend_from_slice(&[0x00, 0xFF, 0x51, 0x03, (micros >> 16) as u8, (micros >> 8) as u8, micros as u8]);
+    // Time signature meta event: numerator, log2(denominator), MIDI clocks
+    // per metronome click (one beat of the denominator; 24 per quarter note),
+    // and 8 thirty-second notes per quarter note.
+    let denominator = valid_denominator(options.time_signature_denominator);
+    let clocks_per_click = (96 / denominator as u32).max(1) as u8;
+    track.extend_from_slice(&[
+        0x00,
+        0xFF,
+        0x58,
+        0x04,
+        options.time_signature_numerator.max(1),
+        denominator.trailing_zeros() as u8,
+        clocks_per_click,
+        8,
+    ]);
 
     let mut last_tick = 0u32;
     for event in events {
@@ -271,13 +318,36 @@ mod tests {
         #[rustfmt::skip]
         let expected: Vec<u8> = vec![
             b'M', b'T', b'h', b'd', 0, 0, 0, 6, 0, 0, 0, 1, 0x01, 0xE0, // header: format 0, 1 track, 480 ticks
-            b'M', b'T', b'r', b'k', 0, 0, 0, 24,                        // track chunk, 24 bytes
+            b'M', b'T', b'r', b'k', 0, 0, 0, 32,                        // track chunk, 32 bytes
             0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20,                   // tempo: 500000 us per beat (120 BPM)
+            0x00, 0xFF, 0x58, 0x04, 4, 2, 24, 8,                        // time signature 4/4, click = quarter
             0x00, 0x90, 60, 96,                                         // note on
             0x83, 0x60, 0x80, 60, 0x40,                                 // delta 480, note off
             0x00, 0xE1, 0x00, 0x40,                                     // channel 2 bend, centre = 0x2000
             0x00, 0xFF, 0x2F, 0x00,                                     // end of track
         ];
         assert_eq!(file, expected);
+    }
+
+    #[test]
+    fn time_signature_and_tempo_follow_the_meter() {
+        // 7/8 at 210 eighths per minute = 105 quarters per minute.
+        let o = MidiOptions::for_meter(210.0, 7, 8);
+        assert_eq!((o.bpm, o.time_signature_numerator, o.time_signature_denominator), (105.0, 7, 8));
+        let file = write_smf(&[], &o);
+        let track = &file[22..];
+        let micros = (60_000_000.0f64 / 105.0).round() as u32;
+        assert_eq!(&track[..7], &[0x00, 0xFF, 0x51, 0x03, (micros >> 16) as u8, (micros >> 8) as u8, micros as u8]);
+        assert_eq!(&track[7..15], &[0x00, 0xFF, 0x58, 0x04, 7, 3, 12, 8], "7/8, click every eighth (12 clocks)");
+        // 3/2 with half-note beats; an invalid denominator falls back to quarters.
+        let file = write_smf(&[], &MidiOptions::for_meter(60.0, 3, 2));
+        assert_eq!(&file[22 + 7..22 + 15], &[0x00, 0xFF, 0x58, 0x04, 3, 1, 48, 8]);
+        let odd = MidiOptions { time_signature_denominator: 3, ..MidiOptions::default() };
+        assert_eq!(&write_smf(&[], &odd)[22 + 7..22 + 15], &[0x00, 0xFF, 0x58, 0x04, 4, 2, 24, 8]);
+        // Notes are placed in quarter-note ticks at the converted tempo: one
+        // eighth at 210 eighths/min lasts 60/210 s and is 240 ticks.
+        let n = note(0, (48_000.0f64 * 60.0 / 210.0).round() as u64, 60, 0.0);
+        let events = notes_to_midi(&[n], SR, &o);
+        assert_eq!(events.last().unwrap().tick, 240);
     }
 }
