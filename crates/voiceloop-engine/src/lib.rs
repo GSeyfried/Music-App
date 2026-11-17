@@ -20,18 +20,32 @@
 //! - [`engine`]    control thread, command handling, event delivery
 //! - [`transport`] musical-time arithmetic (bars/beats/subdivisions ↔ frames)
 //! - [`model`]     shared domain types (serialisable)
+//! - [`routing`]   audio config, input/output channel routes, monitoring
+//! - [`clock`]     stream clock anchors, xrun detection, drift estimation
+//! - [`midi_in`]   USB-MIDI input (midir), timestamp mapping
+//! - [`settings`]  persisted hardware settings
+//! - [`hardware`]  control-thread side of devices, MIDI, diagnostics
+//! - [`calibration`] loopback latency test signal and detector
 
 pub mod analysis;
+pub mod calibration;
 pub mod capture;
+pub mod clock;
 pub mod devices;
 pub mod engine;
 pub mod error;
+pub mod hardware;
 pub mod looper;
 pub mod meter;
+pub mod midi_in;
 pub mod model;
+pub mod routing;
+pub mod settings;
 pub mod transport;
 
 pub use analysis::AnalysisConfig;
 pub use engine::{Engine, EngineEvent, EngineStatus, EngineWarning, EventSink, PitchUpdate};
 pub use error::EngineError;
 pub use looper::{LooperCommand, LooperConfig, LooperState};
+pub use routing::{AudioConfig, InputRoute, MonitorConfig, OutputRoute};
+pub use settings::AudioSettings;

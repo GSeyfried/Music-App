@@ -7,8 +7,17 @@ use serde::Serialize;
 pub enum EngineError {
     #[error("no input device is available")]
     NoInputDevice,
-    #[error("input device not found: {0}")]
+    #[error("audio device not found: {0}")]
     DeviceNotFound(String),
+    /// A device in use disappeared (unplugged, powered off, or taken exclusively).
+    #[error("audio device disconnected: {0}")]
+    DeviceLost(String),
+    /// MIDI port enumeration, open, or close failed.
+    #[error("MIDI error: {0}")]
+    Midi(String),
+    /// Reading or writing a settings file failed.
+    #[error("file error: {0}")]
+    Io(String),
     #[error("microphone access was denied or the device is unavailable: {0}")]
     PermissionOrUnavailable(String),
     #[error("unsupported sample format: {0}")]
@@ -55,5 +64,18 @@ impl From<cpal::PlayStreamError> for EngineError {
             cpal::PlayStreamError::DeviceNotAvailable => EngineError::PermissionOrUnavailable(e.to_string()),
             other => EngineError::Backend(other.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hardware_errors_serialise_with_their_kind() {
+        let json = serde_json::to_value(EngineError::DeviceLost("H4n Pro".into())).unwrap();
+        assert_eq!(json, serde_json::json!({"kind": "deviceLost", "message": "H4n Pro"}));
+        assert_eq!(serde_json::to_value(EngineError::Midi("x".into())).unwrap()["kind"], "midi");
+        assert_eq!(serde_json::to_value(EngineError::Io("x".into())).unwrap()["kind"], "io");
     }
 }

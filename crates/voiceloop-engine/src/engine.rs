@@ -23,13 +23,17 @@ use serde::Serialize;
 use voiceloop_analysis::{NoteEvent, Onset, PitchFrame};
 
 use crate::analysis::{AnalysisConfig, AnalysisOutput, AnalysisWorker};
-use crate::capture::{CaptureInfo, InputCapture, InputTaps, LooperFeed};
+use crate::capture::{CaptureInfo, InputCapture};
 use crate::devices;
 use crate::error::EngineError;
-use crate::looper::io::{self as looper_io, LooperPlayback, OutputInfo};
-use crate::looper::{IoCounters, LooperCommand, LooperConfig, LooperNotice, LooperSnapshot, LooperState};
+use crate::hardware::{self, AudioDiagnostics, DevicesChanged, Hardware};
+use crate::looper::io::{LooperPlayback, OutputInfo};
+use crate::looper::{LooperCommand, LooperConfig, LooperNotice, LooperSnapshot, LooperState};
 use crate::meter::{amplitude_to_db, MeterFrame};
+use crate::midi_in::{MidiBatch, MidiPortInfo};
 use crate::model::AudioDevice;
+use crate::routing::{AudioConfig, InputRoute, MonitorConfig, OutputRoute};
+use crate::settings::AudioSettings;
 use crate::transport::TransportState;
 
 /// Interval between level/looper events delivered to the sink (~30 Hz).
@@ -38,10 +42,13 @@ pub const LEVEL_EVENT_INTERVAL: Duration = Duration::from_millis(33);
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LevelReading {
+    /// Level of the routed signal (what the engine records and analyses).
     pub rms: f32,
     pub peak: f32,
     pub rms_db: f32,
     pub peak_db: f32,
+    /// Every device input channel on its own (up to 32), index = channel.
+    pub channels: Vec<crate::meter::ChannelLevel>,
     /// Input-clock frame at the end of the most recent window.
     pub frame: u64,
     /// Meter frames dropped because the ring was full (diagnostic).
@@ -52,7 +59,7 @@ pub struct LevelReading {
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatus {
     pub capturing: bool,
-    /// Input monitoring (input → speakers). Always false: not implemented.
+    /// Input monitoring (input → speakers) is active. Opt-in, off by default.
     pub monitoring: bool,
     pub capture: Option<CaptureInfo>,
     /// Output stream hosting the looper, when running.
@@ -60,6 +67,8 @@ pub struct EngineStatus {
     pub looper: bool,
     /// The analysis thread is running (pitch, note, and onset events may arrive).
     pub analysis: bool,
+    /// The configuration `startInput` uses (devices, routes, rate, buffer, monitor).
+    pub audio_config: AudioConfig,
 }
 
 /// Pitch frames produced since the previous update (about three per event at
@@ -90,6 +99,14 @@ pub enum EngineEvent {
     Note(NoteEvent),
     /// An attack was detected in the input.
     Onset(Onset),
+    /// The set of audio devices changed (hot-plug).
+    DevicesChanged(DevicesChanged),
+    /// The MIDI input port list changed.
+    MidiPorts(Vec<MidiPortInfo>),
+    /// MIDI messages received since the last batch (≤ 100 Hz while a port is open).
+    Midi(MidiBatch),
+    /// Stream facts and clock drift, 1 Hz while audio runs.
+    AudioDiagnostics(AudioDiagnostics),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -102,6 +119,14 @@ pub enum EngineWarning {
     LooperUnavailable(String),
     /// Audio runs but the pitch-analysis thread could not start.
     AnalysisUnavailable(String),
+    /// A saved or requested device is missing; the system default was used.
+    DeviceFallback(String),
+    /// A route or buffer size did not fit the device and was adjusted.
+    ConfigAdjusted(String),
+    /// An open MIDI input disappeared (it reopens automatically when it returns).
+    MidiPortLost(String),
+    /// The settings file could not be read or written.
+    SettingsProblem(String),
 }
 
 /// Exact-zero input for this long triggers [`EngineWarning::SilentInput`].
@@ -120,6 +145,17 @@ enum Command {
     Looper(LooperCommand, Reply<()>),
     SetLooperConfig(LooperConfig, Reply<()>),
     SetAnalysisConfig(AnalysisConfig, Reply<()>),
+    ListAudioDevices(Reply<devices::DeviceList>),
+    StartAudio(AudioConfig, Reply<EngineStatus>),
+    SetInputRoute(InputRoute, Reply<EngineStatus>),
+    SetOutputRoute(OutputRoute, Reply<EngineStatus>),
+    SetMonitor(MonitorConfig, Reply<EngineStatus>),
+    ListMidiInputs(Reply<Vec<MidiPortInfo>>),
+    OpenMidiInput(String, Reply<MidiPortInfo>),
+    CloseMidiInput(String, Reply<()>),
+    UseSettingsFile(std::path::PathBuf, Reply<AudioSettings>),
+    GetAudioSettings(Reply<AudioSettings>),
+    SaveAudioSettings(Reply<()>),
     Shutdown,
 }
 
@@ -195,6 +231,62 @@ impl Engine {
         self.request(|r| Command::SetAnalysisConfig(config, r))
     }
 
+    /// Every input and output device with its supported configurations.
+    /// Also serves as an explicit re-scan.
+    pub fn list_audio_devices(&self) -> Result<devices::DeviceList, EngineError> {
+        self.request(Command::ListAudioDevices)
+    }
+
+    /// Start audio with an explicit configuration (devices, rate, buffer,
+    /// routes, monitoring). Restarts if already running. The config becomes
+    /// the default for `start_input` and is saved when a settings file is set.
+    pub fn start_audio(&self, config: AudioConfig) -> Result<EngineStatus, EngineError> {
+        self.request(|r| Command::StartAudio(config, r))
+    }
+
+    /// Change which input channel(s) feed the engine; live when running.
+    pub fn set_input_route(&self, route: InputRoute) -> Result<EngineStatus, EngineError> {
+        self.request(|r| Command::SetInputRoute(route, r))
+    }
+
+    /// Change which output channels carry the engine's mix; live when running.
+    pub fn set_output_route(&self, route: OutputRoute) -> Result<EngineStatus, EngineError> {
+        self.request(|r| Command::SetOutputRoute(route, r))
+    }
+
+    /// Input monitoring (input → output). Off by default; live when running.
+    pub fn set_monitor(&self, monitor: MonitorConfig) -> Result<EngineStatus, EngineError> {
+        self.request(|r| Command::SetMonitor(monitor, r))
+    }
+
+    pub fn list_midi_inputs(&self) -> Result<Vec<MidiPortInfo>, EngineError> {
+        self.request(Command::ListMidiInputs)
+    }
+
+    /// Open a MIDI input by port id (or name). Events arrive as `midi` events.
+    pub fn open_midi_input(&self, port_id: String) -> Result<MidiPortInfo, EngineError> {
+        self.request(|r| Command::OpenMidiInput(port_id, r))
+    }
+
+    pub fn close_midi_input(&self, port_id: String) -> Result<(), EngineError> {
+        self.request(|r| Command::CloseMidiInput(port_id, r))
+    }
+
+    /// Use `path` for hardware settings: load and apply them if the file
+    /// exists, and save there after every change. Returns the settings in effect.
+    pub fn use_settings_file(&self, path: std::path::PathBuf) -> Result<AudioSettings, EngineError> {
+        self.request(|r| Command::UseSettingsFile(path, r))
+    }
+
+    pub fn audio_settings(&self) -> Result<AudioSettings, EngineError> {
+        self.request(Command::GetAudioSettings)
+    }
+
+    /// Write the current settings to the settings file now.
+    pub fn save_audio_settings(&self) -> Result<(), EngineError> {
+        self.request(Command::SaveAudioSettings)
+    }
+
     /// Stop audio, release devices and buffers, and join the control thread.
     pub fn shutdown(&self) {
         let _ = self.inner.tx.send(Command::Shutdown);
@@ -216,10 +308,11 @@ struct ControlLoop {
     analysis_config: AnalysisConfig,
     /// Pitch frames waiting for the next ~30 Hz event.
     pitch_pending: Vec<PitchFrame>,
-    stream_err_tx: mpsc::Sender<String>,
-    stream_err_rx: mpsc::Receiver<String>,
+    /// Devices, routes, MIDI, settings, diagnostics (see `hardware.rs`).
+    hw: Hardware,
     latest: Option<MeterFrame>,
     peak_since_emit: f32,
+    channel_peaks: [f32; crate::meter::MAX_METER_CHANNELS],
     last_end_frame: u64,
     dropped: u64,
     last_emit: Instant,
@@ -230,7 +323,7 @@ struct ControlLoop {
 
 impl ControlLoop {
     fn new(sink: EventSink) -> Self {
-        let (stream_err_tx, stream_err_rx) = mpsc::channel();
+        hardware::init();
         Self {
             sink,
             capture: None,
@@ -241,10 +334,10 @@ impl ControlLoop {
             analysis: None,
             analysis_config: AnalysisConfig::default(),
             pitch_pending: Vec::with_capacity(64),
-            stream_err_tx,
-            stream_err_rx,
+            hw: Hardware::default(),
             latest: None,
             peak_since_emit: 0.0,
+            channel_peaks: [0.0; crate::meter::MAX_METER_CHANNELS],
             last_end_frame: 0,
             dropped: 0,
             last_emit: Instant::now(),
@@ -256,11 +349,12 @@ impl ControlLoop {
     fn status(&self) -> EngineStatus {
         EngineStatus {
             capturing: self.capture.is_some(),
-            monitoring: false,
-            capture: self.capture.as_ref().map(|c| c.info.clone()),
-            output: self.playback.as_ref().map(|p| p.info.clone()),
+            monitoring: self.playback.as_ref().is_some_and(|p| p.monitor().enabled),
+            capture: self.capture.as_ref().map(|c| c.info()),
+            output: self.playback.as_ref().map(|p| p.output_info()),
             looper: self.playback.is_some(),
             analysis: self.analysis.is_some(),
+            audio_config: self.hw.config.clone(),
         }
     }
 
@@ -271,12 +365,14 @@ impl ControlLoop {
             } else {
                 Duration::from_millis(250)
             };
+            let timeout = self.hw.poll_interval(timeout);
             match rx.recv_timeout(timeout) {
                 Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                 Ok(cmd) => self.handle(cmd),
                 Err(RecvTimeoutError::Timeout) => {}
             }
             self.drain_stream_errors();
+            self.poll_hardware();
             self.drain_meter();
             self.drain_looper();
             self.drain_analysis();
@@ -296,7 +392,8 @@ impl ControlLoop {
                 let _ = reply.send(devices::list_input_devices());
             }
             Command::StartInput(device_id, reply) => {
-                let result = self.start_audio(device_id);
+                let config = AudioConfig { input_device: device_id, ..self.hw.config.clone() };
+                let result = self.start_audio(config);
                 if let Ok(status) = &result {
                     (self.sink)(EngineEvent::Status(status.clone()));
                 }
@@ -331,11 +428,95 @@ impl ControlLoop {
                 }
                 let _ = reply.send(result);
             }
+            Command::ListAudioDevices(reply) => {
+                let _ = reply.send(devices::list_devices());
+            }
+            Command::StartAudio(config, reply) => {
+                let result = self.start_audio(config);
+                if let Ok(status) = &result {
+                    (self.sink)(EngineEvent::Status(status.clone()));
+                }
+                let _ = reply.send(result);
+            }
+            Command::SetInputRoute(route, reply) => {
+                if let Some(c) = self.capture.as_ref() {
+                    let (applied, adjusted) = c.set_route(route);
+                    if adjusted {
+                        (self.sink)(EngineEvent::Warning(EngineWarning::ConfigAdjusted(format!(
+                            "input route {route:?} does not fit this device; using {applied:?}"
+                        ))));
+                    }
+                }
+                self.hw.config.input_route = route;
+                self.hw.autosave(&*self.sink);
+                let _ = reply.send(Ok(self.status()));
+            }
+            Command::SetOutputRoute(route, reply) => {
+                if let Some(p) = self.playback.as_ref() {
+                    let (applied, adjusted) = p.set_route(route);
+                    if adjusted {
+                        (self.sink)(EngineEvent::Warning(EngineWarning::ConfigAdjusted(format!(
+                            "output route {route:?} does not fit this device; using {applied:?}"
+                        ))));
+                    }
+                }
+                self.hw.config.output_route = route;
+                self.hw.autosave(&*self.sink);
+                let _ = reply.send(Ok(self.status()));
+            }
+            Command::SetMonitor(monitor, reply) => {
+                if let Some(p) = self.playback.as_mut() {
+                    p.set_monitor(monitor);
+                }
+                self.hw.config.monitor = monitor;
+                self.hw.autosave(&*self.sink);
+                let status = self.status();
+                (self.sink)(EngineEvent::Status(status.clone()));
+                let _ = reply.send(Ok(status));
+            }
+            Command::ListMidiInputs(reply) => {
+                let _ = reply.send(self.hw.midi_ports());
+            }
+            Command::OpenMidiInput(port, reply) => {
+                let result = self.hw.midi.open(&port);
+                if result.is_ok() {
+                    self.hw.autosave(&*self.sink);
+                }
+                let _ = reply.send(result);
+            }
+            Command::CloseMidiInput(port, reply) => {
+                let result = self.hw.midi.close(&port);
+                if result.is_ok() {
+                    self.hw.autosave(&*self.sink);
+                }
+                let _ = reply.send(result);
+            }
+            Command::UseSettingsFile(path, reply) => {
+                let _ = reply.send(self.hw.use_settings_file(path, &*self.sink));
+            }
+            Command::GetAudioSettings(reply) => {
+                let _ = reply.send(Ok(self.hw.settings()));
+            }
+            Command::SaveAudioSettings(reply) => {
+                let result = match &self.hw.settings_path {
+                    Some(path) => crate::settings::save(path, &self.hw.settings()),
+                    None => Err(EngineError::Invalid("no settings file has been set".into())),
+                };
+                let _ = reply.send(result);
+            }
             Command::Shutdown => unreachable!("handled in run loop"),
         }
     }
 
     fn send_looper(&mut self, command: LooperCommand) -> Result<(), EngineError> {
+        if let LooperCommand::SetInputLatency { frames } = command {
+            // Remembered for the next start and persisted with the hardware settings.
+            self.hw.input_latency = Some(frames);
+            self.hw.autosave(&*self.sink);
+            if self.playback.is_none() {
+                return Ok(());
+            }
+        }
         if let LooperCommand::SetTransport { transport } = command {
             transport.validate().map_err(|e| EngineError::Invalid(e.to_string()))?;
             if self.playback.is_none() {
@@ -351,59 +532,12 @@ impl ControlLoop {
         }
     }
 
-    fn start_audio(&mut self, device_id: Option<String>) -> Result<EngineStatus, EngineError> {
+    fn start_audio(&mut self, config: AudioConfig) -> Result<EngineStatus, EngineError> {
         self.stop_audio();
 
-        let counters = Arc::new(IoCounters::default());
-        let mut playback: Option<LooperPlayback> = None;
-        let mut feed: Option<LooperFeed> = None;
-        let mut rate: Option<u32> = None;
-        let mut looper_problem: Option<String> = None;
-
-        match looper_io::default_output() {
-            Ok((device, supported)) => {
-                let sample_rate = supported.sample_rate().0;
-                let capacity = ((sample_rate / 2) as usize).max(4096);
-                let (tx, rx) = rtrb::RingBuffer::<f32>::new(capacity);
-                match LooperPlayback::start(
-                    device,
-                    supported,
-                    &self.looper_config,
-                    self.transport,
-                    rx,
-                    counters.clone(),
-                    self.stream_err_tx.clone(),
-                ) {
-                    Ok(p) => {
-                        playback = Some(p);
-                        feed = Some(LooperFeed { tx, counters: counters.clone() });
-                        rate = Some(sample_rate);
-                    }
-                    Err(e) => looper_problem = Some(e.to_string()),
-                }
-            }
-            Err(e) => looper_problem = Some(e.to_string()),
-        }
-
-        // The analysis tap is attached to whichever input stream ends up running.
-        let (analysis_feed, analysis_rx, analysis_dropped) = AnalysisWorker::ring();
-        let taps = InputTaps { looper: feed, analysis: Some(analysis_feed) };
-        let (capture, analysis_rx, analysis_dropped) =
-            match InputCapture::start(device_id.as_deref(), rate, taps, self.stream_err_tx.clone()) {
-                Ok(c) => (c, analysis_rx, analysis_dropped),
-                Err(e) if playback.is_some() => {
-                    // e.g. the input device cannot run at the output rate: keep metering, drop the looper.
-                    if let Some(p) = playback.take() {
-                        p.stop();
-                    }
-                    looper_problem = Some(format!("input cannot run with the output device: {e}"));
-                    // The first attempt consumed its taps: make a fresh analysis ring.
-                    let (feed, rx, dropped) = AnalysisWorker::ring();
-                    let taps = InputTaps { looper: None, analysis: Some(feed) };
-                    (InputCapture::start(device_id.as_deref(), None, taps, self.stream_err_tx.clone())?, rx, dropped)
-                }
-                Err(e) => return Err(e),
-            };
+        // Devices, rate, buffer size, routes, and the stream pair: see `hardware::open_audio`.
+        let opened = hardware::open_audio(&config, &self.looper_config, self.transport)?;
+        let hardware::Opened { capture, playback, analysis_rx, analysis_dropped, looper_problem, warnings } = opened;
 
         // Analysis is optional: if its thread cannot start, audio still runs.
         match AnalysisWorker::start(self.analysis_config, capture.info.sample_rate, analysis_rx, analysis_dropped) {
@@ -416,13 +550,24 @@ impl ControlLoop {
         self.latest = None;
         self.latest_snapshot = None;
         self.peak_since_emit = 0.0;
+        self.channel_peaks = [0.0; crate::meter::MAX_METER_CHANNELS];
         self.dropped = 0;
         self.last_end_frame = 0;
         self.silent_since = None;
         self.silence_warned = false;
+        self.hw.reset_clock();
+        for warning in warnings {
+            (self.sink)(EngineEvent::Warning(warning));
+        }
         if let Some(problem) = looper_problem {
             (self.sink)(EngineEvent::Warning(EngineWarning::LooperUnavailable(problem)));
         }
+        // Re-apply the remembered latency compensation to the new looper.
+        if let (Some(frames), Some(p)) = (self.hw.input_latency, self.playback.as_mut()) {
+            let _ = p.handles.commands.push(LooperCommand::SetInputLatency { frames });
+        }
+        self.hw.config = config;
+        self.hw.autosave(&*self.sink);
         Ok(self.status())
     }
 
@@ -441,18 +586,29 @@ impl ControlLoop {
         self.latest_snapshot = None;
     }
 
+    /// Stream error callbacks only store a code (they may run on the realtime
+    /// thread); the message is built here.
     fn drain_stream_errors(&mut self) {
-        let mut failed = None;
-        while let Ok(msg) = self.stream_err_rx.try_recv() {
-            failed = Some(msg);
+        if let Some(error) = Hardware::stream_failure(self.capture.as_ref(), self.playback.as_ref()) {
+            self.stop_audio();
+            (self.sink)(EngineEvent::Error(error));
+            (self.sink)(EngineEvent::Status(self.status()));
         }
-        if let Some(msg) = failed {
+    }
+
+    /// Hot-plug polling, MIDI delivery, drift estimation, diagnostics.
+    fn poll_hardware(&mut self) {
+        let sink = &*self.sink;
+        if let Some(lost) = self.hw.poll_hotplug(self.capture.as_ref(), self.playback.as_ref(), sink) {
             if self.capture.is_some() || self.playback.is_some() {
                 self.stop_audio();
-                (self.sink)(EngineEvent::Error(EngineError::PermissionOrUnavailable(msg)));
+                (self.sink)(EngineEvent::Error(lost));
                 (self.sink)(EngineEvent::Status(self.status()));
             }
         }
+        let sink = &*self.sink;
+        self.hw.drain_midi(self.capture.as_ref(), self.playback.as_ref(), sink);
+        self.hw.diagnostics(self.capture.as_ref(), self.playback.as_ref(), sink);
     }
 
     fn drain_meter(&mut self) {
@@ -465,7 +621,10 @@ impl ControlLoop {
                 self.dropped += (frame.end_frame - expected) / cap.meter_window;
             }
             self.last_end_frame = frame.end_frame;
-            self.peak_since_emit = self.peak_since_emit.max(frame.peak);
+            self.peak_since_emit = self.peak_since_emit.max(frame.routed_peak);
+            for (held, &p) in self.channel_peaks.iter_mut().zip(frame.channel_peak.iter()) {
+                *held = held.max(p);
+            }
             self.latest = Some(frame);
             if frame.peak == 0.0 {
                 self.silent_since.get_or_insert_with(Instant::now);
@@ -531,11 +690,14 @@ impl ControlLoop {
         if let Some(f) = self.latest {
             let peak = self.peak_since_emit;
             self.peak_since_emit = 0.0;
+            let channels = crate::meter::ChannelLevel::list(&f, &self.channel_peaks);
+            self.channel_peaks = [0.0; crate::meter::MAX_METER_CHANNELS];
             (self.sink)(EngineEvent::Level(LevelReading {
-                rms: f.rms,
+                rms: f.routed_rms,
                 peak,
-                rms_db: amplitude_to_db(f.rms),
+                rms_db: amplitude_to_db(f.routed_rms),
                 peak_db: amplitude_to_db(peak),
+                channels,
                 frame: f.end_frame,
                 dropped: self.dropped,
             }));

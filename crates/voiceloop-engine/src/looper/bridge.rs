@@ -89,16 +89,13 @@ impl InputBridge {
 
         let take = if self.primed { available.min(n) } else { 0 };
         if take > 0 {
-            match rx.read_chunk(take) {
-                Ok(chunk) => {
-                    let (a, b) = chunk.as_slices();
-                    dst[..a.len()].copy_from_slice(a);
-                    dst[a.len()..a.len() + b.len()].copy_from_slice(b);
-                    chunk.commit_all();
-                    report.delivered = take;
-                }
-                // Unreachable: `take <= slots()` and this is the only consumer.
-                Err(_) => {}
+            // `read_chunk` cannot fail here: `take <= slots()` and this is the only consumer.
+            if let Ok(chunk) = rx.read_chunk(take) {
+                let (a, b) = chunk.as_slices();
+                dst[..a.len()].copy_from_slice(a);
+                dst[a.len()..a.len() + b.len()].copy_from_slice(b);
+                chunk.commit_all();
+                report.delivered = take;
             }
         }
         dst[report.delivered..].fill(0.0);
