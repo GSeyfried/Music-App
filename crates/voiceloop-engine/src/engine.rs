@@ -20,7 +20,10 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::capture::{CaptureInfo, InputCapture, LooperFeed};
+use voiceloop_analysis::{NoteEvent, Onset, PitchFrame};
+
+use crate::analysis::{AnalysisConfig, AnalysisOutput, AnalysisWorker};
+use crate::capture::{CaptureInfo, InputCapture, InputTaps, LooperFeed};
 use crate::devices;
 use crate::error::EngineError;
 use crate::looper::io::{self as looper_io, LooperPlayback, OutputInfo};
@@ -55,6 +58,20 @@ pub struct EngineStatus {
     /// Output stream hosting the looper, when running.
     pub output: Option<OutputInfo>,
     pub looper: bool,
+    /// The analysis thread is running (pitch, note, and onset events may arrive).
+    pub analysis: bool,
+}
+
+/// Pitch frames produced since the previous update (about three per event at
+/// the default 10 ms hop), oldest first. The last one is the current pitch.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PitchUpdate {
+    pub frames: Vec<PitchFrame>,
+    pub sample_rate: u32,
+    /// Input frames the analysis thread never saw because it fell behind
+    /// (cumulative). Non-zero means pitch timestamps have slipped.
+    pub dropped_input_frames: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -67,6 +84,12 @@ pub enum EngineEvent {
     Warning(EngineWarning),
     Looper(LooperState),
     LooperNotice(LooperNotice),
+    /// ~30 Hz while audio runs and analysis is enabled.
+    Pitch(PitchUpdate),
+    /// A sung or played note has ended (onset, offset, pitch, intonation).
+    Note(NoteEvent),
+    /// An attack was detected in the input.
+    Onset(Onset),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -77,6 +100,8 @@ pub enum EngineWarning {
     SilentInput(String),
     /// Input runs (metering works) but the looper's output stream could not start.
     LooperUnavailable(String),
+    /// Audio runs but the pitch-analysis thread could not start.
+    AnalysisUnavailable(String),
 }
 
 /// Exact-zero input for this long triggers [`EngineWarning::SilentInput`].
@@ -94,6 +119,7 @@ enum Command {
     Status(Reply<EngineStatus>),
     Looper(LooperCommand, Reply<()>),
     SetLooperConfig(LooperConfig, Reply<()>),
+    SetAnalysisConfig(AnalysisConfig, Reply<()>),
     Shutdown,
 }
 
@@ -163,6 +189,12 @@ impl Engine {
         self.request(|r| Command::SetLooperConfig(config, r))
     }
 
+    /// Pitch / note / onset analysis settings. Applies immediately when audio
+    /// is running, otherwise the next time it starts.
+    pub fn set_analysis_config(&self, config: AnalysisConfig) -> Result<(), EngineError> {
+        self.request(|r| Command::SetAnalysisConfig(config, r))
+    }
+
     /// Stop audio, release devices and buffers, and join the control thread.
     pub fn shutdown(&self) {
         let _ = self.inner.tx.send(Command::Shutdown);
@@ -180,6 +212,10 @@ struct ControlLoop {
     transport: TransportState,
     looper_config: LooperConfig,
     latest_snapshot: Option<LooperSnapshot>,
+    analysis: Option<AnalysisWorker>,
+    analysis_config: AnalysisConfig,
+    /// Pitch frames waiting for the next ~30 Hz event.
+    pitch_pending: Vec<PitchFrame>,
     stream_err_tx: mpsc::Sender<String>,
     stream_err_rx: mpsc::Receiver<String>,
     latest: Option<MeterFrame>,
@@ -202,6 +238,9 @@ impl ControlLoop {
             transport: TransportState::default(),
             looper_config: LooperConfig::default(),
             latest_snapshot: None,
+            analysis: None,
+            analysis_config: AnalysisConfig::default(),
+            pitch_pending: Vec::with_capacity(64),
             stream_err_tx,
             stream_err_rx,
             latest: None,
@@ -221,6 +260,7 @@ impl ControlLoop {
             capture: self.capture.as_ref().map(|c| c.info.clone()),
             output: self.playback.as_ref().map(|p| p.info.clone()),
             looper: self.playback.is_some(),
+            analysis: self.analysis.is_some(),
         }
     }
 
@@ -239,10 +279,12 @@ impl ControlLoop {
             self.drain_stream_errors();
             self.drain_meter();
             self.drain_looper();
+            self.drain_analysis();
             if self.capture.is_some() && self.last_emit.elapsed() >= LEVEL_EVENT_INTERVAL {
                 self.last_emit = Instant::now();
                 self.emit_level();
                 self.emit_looper();
+                self.emit_pitch();
             }
         }
         self.stop_audio();
@@ -276,6 +318,17 @@ impl ControlLoop {
                 let result = config.max_loop_frames(48_000).map(|_| {
                     self.looper_config = config;
                 });
+                let _ = reply.send(result);
+            }
+            Command::SetAnalysisConfig(config, reply) => {
+                let result = match self.analysis.as_ref() {
+                    Some(worker) => worker.reconfigure(config),
+                    // Validate against a typical rate now; it is checked again at start.
+                    None => crate::analysis::Analyzer::new(&config, 48_000).map(|_| ()),
+                };
+                if result.is_ok() {
+                    self.analysis_config = config;
+                }
                 let _ = reply.send(result);
             }
             Command::Shutdown => unreachable!("handled in run loop"),
@@ -334,18 +387,31 @@ impl ControlLoop {
             Err(e) => looper_problem = Some(e.to_string()),
         }
 
-        let capture = match InputCapture::start(device_id.as_deref(), rate, feed, self.stream_err_tx.clone()) {
-            Ok(c) => c,
-            Err(e) if playback.is_some() => {
-                // e.g. the input device cannot run at the output rate: keep metering, drop the looper.
-                if let Some(p) = playback.take() {
-                    p.stop();
+        // The analysis tap is attached to whichever input stream ends up running.
+        let (analysis_feed, analysis_rx, analysis_dropped) = AnalysisWorker::ring();
+        let taps = InputTaps { looper: feed, analysis: Some(analysis_feed) };
+        let (capture, analysis_rx, analysis_dropped) =
+            match InputCapture::start(device_id.as_deref(), rate, taps, self.stream_err_tx.clone()) {
+                Ok(c) => (c, analysis_rx, analysis_dropped),
+                Err(e) if playback.is_some() => {
+                    // e.g. the input device cannot run at the output rate: keep metering, drop the looper.
+                    if let Some(p) = playback.take() {
+                        p.stop();
+                    }
+                    looper_problem = Some(format!("input cannot run with the output device: {e}"));
+                    // The first attempt consumed its taps: make a fresh analysis ring.
+                    let (feed, rx, dropped) = AnalysisWorker::ring();
+                    let taps = InputTaps { looper: None, analysis: Some(feed) };
+                    (InputCapture::start(device_id.as_deref(), None, taps, self.stream_err_tx.clone())?, rx, dropped)
                 }
-                looper_problem = Some(format!("input cannot run with the output device: {e}"));
-                InputCapture::start(device_id.as_deref(), None, None, self.stream_err_tx.clone())?
-            }
-            Err(e) => return Err(e),
-        };
+                Err(e) => return Err(e),
+            };
+
+        // Analysis is optional: if its thread cannot start, audio still runs.
+        match AnalysisWorker::start(self.analysis_config, capture.info.sample_rate, analysis_rx, analysis_dropped) {
+            Ok(worker) => self.analysis = Some(worker),
+            Err(e) => (self.sink)(EngineEvent::Warning(EngineWarning::AnalysisUnavailable(e.to_string()))),
+        }
 
         self.capture = Some(capture);
         self.playback = playback;
@@ -370,6 +436,10 @@ impl ControlLoop {
         if let Some(p) = self.playback.take() {
             p.stop();
         }
+        if let Some(worker) = self.analysis.take() {
+            worker.stop();
+        }
+        self.pitch_pending.clear();
         self.latest_snapshot = None;
     }
 
@@ -427,6 +497,38 @@ impl ControlLoop {
         }
     }
 
+    /// Notes and onsets are forwarded at once; pitch frames are batched for `emit_pitch`.
+    fn drain_analysis(&mut self) {
+        let Some(worker) = self.analysis.as_ref() else { return };
+        while let Ok(output) = worker.results.try_recv() {
+            match output {
+                AnalysisOutput::Pitch(frame) => {
+                    // Bounded: if events are not being emitted, keep only the newest frames.
+                    if self.pitch_pending.len() == self.pitch_pending.capacity() {
+                        self.pitch_pending.remove(0);
+                    }
+                    self.pitch_pending.push(frame);
+                }
+                AnalysisOutput::Note(note) => (self.sink)(EngineEvent::Note(note)),
+                AnalysisOutput::Onset(onset) => (self.sink)(EngineEvent::Onset(onset)),
+            }
+        }
+    }
+
+    fn emit_pitch(&mut self) {
+        let Some(worker) = self.analysis.as_ref() else { return };
+        if self.pitch_pending.is_empty() {
+            return;
+        }
+        let update = PitchUpdate {
+            frames: self.pitch_pending.clone(),
+            sample_rate: worker.sample_rate,
+            dropped_input_frames: worker.dropped.load(std::sync::atomic::Ordering::Relaxed),
+        };
+        self.pitch_pending.clear();
+        (self.sink)(EngineEvent::Pitch(update));
+    }
+
     fn emit_level(&mut self) {
         if let Some(f) = self.latest {
             let peak = self.peak_since_emit;
@@ -460,6 +562,7 @@ mod tests {
         let status = engine.status().unwrap();
         assert!(!status.capturing);
         assert!(!status.looper);
+        assert!(!status.analysis);
         assert!(!status.monitoring, "monitoring must be off by default");
         let status = engine.stop_input().unwrap();
         assert!(!status.capturing);
@@ -497,6 +600,56 @@ mod tests {
         assert!(matches!(engine.set_looper_config(huge), Err(EngineError::ResourceLimit(_))));
         assert!(engine.set_looper_config(LooperConfig::default()).is_ok());
         engine.shutdown();
+    }
+
+    #[test]
+    fn analysis_config_is_validated_and_kept_for_the_next_start() {
+        let engine = Engine::start(Box::new(|_| {}));
+        let mut config = AnalysisConfig::default();
+        config.tracker.pitch.min_hz = 80.0;
+        assert!(engine.set_analysis_config(config).is_ok());
+        config.tracker.median_frames = 2;
+        assert!(matches!(engine.set_analysis_config(config), Err(EngineError::Invalid(_))));
+        engine.shutdown();
+    }
+
+    #[test]
+    fn analysis_events_match_the_documented_json() {
+        let frame = PitchFrame {
+            frame: 480,
+            hz: Some(440.0),
+            midi: Some(69.0),
+            note: Some(voiceloop_analysis::NoteReading::from_midi(69.0)),
+            clarity: 0.5,
+            rms_db: -20.0,
+            stability_cents: None,
+            unpitched: None,
+            octave_corrected: false,
+        };
+        let update = PitchUpdate { frames: vec![frame], sample_rate: 48_000, dropped_input_frames: 0 };
+        let json = serde_json::to_value(EngineEvent::Pitch(update)).unwrap();
+        assert_eq!(json["type"], "pitch");
+        assert_eq!(json["payload"]["sampleRate"], 48_000);
+        let f = &json["payload"]["frames"][0];
+        assert_eq!(f["hz"], 440.0);
+        assert_eq!(f["note"], serde_json::json!({"note": 69, "cents": 0.0}));
+        assert_eq!(f["stabilityCents"], serde_json::Value::Null);
+        assert_eq!(f["octaveCorrected"], false);
+
+        let silent = PitchFrame { hz: None, midi: None, note: None, unpitched: Some(voiceloop_analysis::Unpitched::OutOfRange), ..frame };
+        let json = serde_json::to_value(silent).unwrap();
+        assert_eq!((&json["hz"], &json["unpitched"]), (&serde_json::Value::Null, &serde_json::json!("outOfRange")));
+
+        let onset = EngineEvent::Onset(Onset { frame: 960, level_db: -12.0, rise_db: 30.0 });
+        assert_eq!(
+            serde_json::to_value(onset).unwrap(),
+            serde_json::json!({"type": "onset", "payload": {"frame": 960, "levelDb": -12.0, "riseDb": 30.0}})
+        );
+
+        let config: AnalysisConfig = serde_json::from_str(r#"{"tracker":{"pitch":{"minHz":80},"tuning":442}}"#).unwrap();
+        assert_eq!(config.tracker.pitch.min_hz, 80.0);
+        assert_eq!(config.tracker.tuning.a4_hz, 442.0);
+        assert!(config.enabled && config.tracker.pitch.max_hz == 1_400.0, "unspecified fields keep their defaults");
     }
 
     #[test]

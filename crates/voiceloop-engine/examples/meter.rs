@@ -1,5 +1,6 @@
 //! Headless hardware check: lists input devices, captures from the default
-//! input for a few seconds, and prints level readings.
+//! input for a few seconds, and prints level and pitch readings (plus note
+//! and onset events as they occur). Sing or play a note to check pitch tracking.
 //!
 //!   cargo run -p voiceloop-engine --example meter [seconds]
 
@@ -14,6 +15,21 @@ fn main() {
             "level  rms {:>7.1} dBFS  peak {:>7.1} dBFS  frame {}  dropped {}",
             l.rms_db, l.peak_db, l.frame, l.dropped
         ),
+        EngineEvent::Pitch(update) => {
+            // One line per update: the newest frame, as a note name when pitched.
+            if let Some(f) = update.frames.last() {
+                match (f.note, f.hz) {
+                    (Some(note), Some(hz)) => println!(
+                        "pitch  {:<4} {:+6.1} cents  {:7.1} Hz  clarity {:.2}",
+                        note.name(),
+                        note.cents,
+                        hz,
+                        f.clarity
+                    ),
+                    _ => println!("pitch  --   ({:?}, clarity {:.2})", f.unpitched, f.clarity),
+                }
+            }
+        }
         other => println!("event  {other:?}"),
     }));
 

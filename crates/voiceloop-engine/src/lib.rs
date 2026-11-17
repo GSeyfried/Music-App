@@ -16,10 +16,12 @@
 //! - [`capture`]   input stream, realtime metering, mono feed to the looper
 //! - [`meter`]     RMS / peak accumulation (pure, realtime-safe)
 //! - [`looper`]    master clock, metronome, multitrack looper, output stream
+//! - [`analysis`]  live pitch / note / onset analysis thread (DSP in `voiceloop-analysis`)
 //! - [`engine`]    control thread, command handling, event delivery
 //! - [`transport`] musical-time arithmetic (bars/beats/subdivisions ↔ frames)
 //! - [`model`]     shared domain types (serialisable)
 
+pub mod analysis;
 pub mod capture;
 pub mod devices;
 pub mod engine;
@@ -29,6 +31,7 @@ pub mod meter;
 pub mod model;
 pub mod transport;
 
-pub use engine::{Engine, EngineEvent, EngineStatus, EngineWarning, EventSink};
+pub use analysis::AnalysisConfig;
+pub use engine::{Engine, EngineEvent, EngineStatus, EngineWarning, EventSink, PitchUpdate};
 pub use error::EngineError;
 pub use looper::{LooperCommand, LooperConfig, LooperState};

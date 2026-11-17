@@ -1,8 +1,8 @@
 //! Input capture. The closure passed to CPAL here is the realtime callback.
 //! It converts samples to f32 on the fly, feeds the meter accumulator, pushes
-//! completed [`MeterFrame`]s into a wait-free ring and, when the looper is
-//! running, pushes a mono downmix into the looper's input ring. No
-//! allocation, locking, or I/O happens inside it.
+//! completed [`MeterFrame`]s into a wait-free ring, and pushes a mono downmix
+//! into the looper's and the analysis thread's input rings when those are
+//! attached. No allocation, locking, or I/O happens inside it.
 //!
 //! Monitoring (routing input to speakers) is intentionally not implemented;
 //! it is off by default to avoid feedback.
@@ -14,6 +14,7 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 use serde::Serialize;
 
+use crate::analysis::AnalysisFeed;
 use crate::devices;
 use crate::error::EngineError;
 use crate::looper::IoCounters;
@@ -39,6 +40,13 @@ pub struct LooperFeed {
     pub counters: Arc<IoCounters>,
 }
 
+/// Consumers of the mono downmix, fed from the input callback.
+#[derive(Default)]
+pub struct InputTaps {
+    pub looper: Option<LooperFeed>,
+    pub analysis: Option<AnalysisFeed>,
+}
+
 /// A running input stream. Dropping it stops capture and releases the device.
 pub struct InputCapture {
     // Field order matters: the stream must drop (stop callbacks) before the consumer.
@@ -51,11 +59,11 @@ pub struct InputCapture {
 
 impl InputCapture {
     /// Start capturing. `rate` forces a sample rate (the looper's output rate);
-    /// `feed` sends a mono downmix to the looper.
+    /// `taps` receive a mono downmix.
     pub fn start(
         device_id: Option<&str>,
         rate: Option<u32>,
-        feed: Option<LooperFeed>,
+        taps: InputTaps,
         stream_errors: mpsc::Sender<String>,
     ) -> Result<Self, EngineError> {
         let device = devices::find_input_device(device_id)?;
@@ -71,13 +79,13 @@ impl InputCapture {
 
         use cpal::SampleFormat as F;
         let stream = match sample_format {
-            F::F32 => build::<f32>(&device, &config, window, producer, feed, stream_errors),
-            F::I16 => build::<i16>(&device, &config, window, producer, feed, stream_errors),
-            F::U16 => build::<u16>(&device, &config, window, producer, feed, stream_errors),
-            F::I32 => build::<i32>(&device, &config, window, producer, feed, stream_errors),
-            F::I8 => build::<i8>(&device, &config, window, producer, feed, stream_errors),
-            F::U8 => build::<u8>(&device, &config, window, producer, feed, stream_errors),
-            F::F64 => build::<f64>(&device, &config, window, producer, feed, stream_errors),
+            F::F32 => build::<f32>(&device, &config, window, producer, taps, stream_errors),
+            F::I16 => build::<i16>(&device, &config, window, producer, taps, stream_errors),
+            F::U16 => build::<u16>(&device, &config, window, producer, taps, stream_errors),
+            F::I32 => build::<i32>(&device, &config, window, producer, taps, stream_errors),
+            F::I8 => build::<i8>(&device, &config, window, producer, taps, stream_errors),
+            F::U8 => build::<u8>(&device, &config, window, producer, taps, stream_errors),
+            F::F64 => build::<f64>(&device, &config, window, producer, taps, stream_errors),
             other => return Err(EngineError::UnsupportedFormat(other.to_string())),
         }?;
         stream.play()?;
@@ -135,7 +143,7 @@ fn build<T>(
     config: &cpal::StreamConfig,
     window_frames: u32,
     mut producer: rtrb::Producer<MeterFrame>,
-    feed: Option<LooperFeed>,
+    taps: InputTaps,
     stream_errors: mpsc::Sender<String>,
 ) -> Result<cpal::Stream, EngineError>
 where
@@ -145,7 +153,7 @@ where
     let channels = (config.channels as usize).max(1);
     let inv_channels = 1.0 / channels as f32;
     let mut meter = MeterAccumulator::new(config.channels, window_frames);
-    let mut feed = feed;
+    let InputTaps { mut looper, mut analysis } = taps;
     let stream = device.build_input_stream(
         config,
         move |data: &[T], _info: &cpal::InputCallbackInfo| {
@@ -154,19 +162,36 @@ where
                 // If the UI side falls behind, drop the reading rather than block.
                 let _ = producer.push(frame);
             });
-            if let Some(feed) = feed.as_mut() {
-                let mut dropped = 0u64;
+            if looper.is_some() || analysis.is_some() {
+                let (mut looper_dropped, mut analysis_dropped) = (0u64, 0u64);
                 for frame in data.chunks_exact(channels) {
                     let mut sum = 0.0f32;
                     for s in frame {
                         sum += s.to_sample::<f32>();
                     }
-                    if feed.tx.push(sum * inv_channels).is_err() {
-                        dropped += 1;
+                    let mono = sum * inv_channels;
+                    if let Some(feed) = looper.as_mut() {
+                        if feed.tx.push(mono).is_err() {
+                            looper_dropped += 1;
+                        }
+                    }
+                    // Analysis is best effort: a full ring means its thread is
+                    // behind, and dropping here never affects recording.
+                    if let Some(feed) = analysis.as_mut() {
+                        if feed.tx.push(mono).is_err() {
+                            analysis_dropped += 1;
+                        }
                     }
                 }
-                if dropped > 0 {
-                    feed.counters.input_overrun_frames.fetch_add(dropped, Ordering::Relaxed);
+                if looper_dropped > 0 {
+                    if let Some(feed) = looper.as_ref() {
+                        feed.counters.input_overrun_frames.fetch_add(looper_dropped, Ordering::Relaxed);
+                    }
+                }
+                if analysis_dropped > 0 {
+                    if let Some(feed) = analysis.as_ref() {
+                        feed.dropped.fetch_add(analysis_dropped, Ordering::Relaxed);
+                    }
                 }
             }
         },

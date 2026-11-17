@@ -16,3 +16,11 @@ thiserror = "2"
 [profile.dev.package."*"]
 # Optimise dependencies (cpal, DSP) even in dev builds so audio callbacks are not starved.
 opt-level = 2
+
+# `"*"` does not cover workspace members. Unoptimised, the looper callback and
+# pitch analysis are 10-30x slower, which is enough to cause dropouts in `tauri dev`.
+[profile.dev.package.voiceloop-engine]
+opt-level = 2
+
+[profile.dev.package.voiceloop-analysis]
+opt-level = 3

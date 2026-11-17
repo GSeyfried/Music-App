@@ -5,7 +5,7 @@
 
 use tauri::{Emitter, Manager, RunEvent, State};
 use voiceloop_engine::model::AudioDevice;
-use voiceloop_engine::{Engine, EngineError, EngineStatus, LooperCommand};
+use voiceloop_engine::{AnalysisConfig, Engine, EngineError, EngineStatus, LooperCommand};
 
 pub const ENGINE_EVENT: &str = "engine://event";
 
@@ -31,6 +31,13 @@ fn looper_command(engine: State<'_, Engine>, command: LooperCommand) -> Result<(
     engine.looper(command)
 }
 
+/// Pitch / note / onset analysis settings; any omitted field keeps its default.
+/// Results arrive as `pitch`, `note`, and `onset` events.
+#[tauri::command]
+fn set_analysis_config(engine: State<'_, Engine>, config: AnalysisConfig) -> Result<(), EngineError> {
+    engine.set_analysis_config(config)
+}
+
 #[tauri::command]
 fn engine_status(engine: State<'_, Engine>) -> Result<EngineStatus, EngineError> {
     engine.status()
@@ -53,7 +60,8 @@ pub fn run() {
             start_input,
             stop_input,
             engine_status,
-            looper_command
+            looper_command,
+            set_analysis_config
         ])
         .build(tauri::generate_context!())
         .expect("error while building VoiceLoop");

@@ -11,6 +11,7 @@ cpal = "0.16"
 rtrb = "0.3"
 serde = { workspace = true }
 thiserror = { workspace = true }
+voiceloop-analysis = { path = "../voiceloop-analysis" }
 
 [dev-dependencies]
 serde_json = { workspace = true }
