@@ -217,7 +217,9 @@ impl PitchDetector {
             }
             let limit = self.diff[best] + FALLBACK_MARGIN;
             (self.tau_min + 1..best)
-                .find(|&t| self.diff[t] <= limit && self.diff[t] <= self.diff[t - 1] && self.diff[t] <= self.diff[t + 1])
+                .find(|&t| {
+                    self.diff[t] <= limit && self.diff[t] <= self.diff[t - 1] && self.diff[t] <= self.diff[t + 1]
+                })
                 .unwrap_or(best)
         });
 
@@ -276,7 +278,9 @@ mod tests {
         for midi in lo..=hi {
             let hz = hz_of(midi);
             for est in scan(&make(hz, 6_000), sample_rate, PitchConfig::default()) {
-                let got = est.hz.unwrap_or_else(|| panic!("MIDI {midi}: unpitched ({:?}, clarity {})", est.unpitched, est.clarity));
+                let got = est
+                    .hz
+                    .unwrap_or_else(|| panic!("MIDI {midi}: unpitched ({:?}, clarity {})", est.unpitched, est.clarity));
                 assert!(est.clarity > 0.99, "MIDI {midi}: clarity {}", est.clarity);
                 worst = worst.max(cents_between(got, hz as f32).unwrap().abs());
             }

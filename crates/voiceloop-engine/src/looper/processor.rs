@@ -40,7 +40,9 @@ const NOTICE_CAPACITY: usize = 32;
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum LooperCommand {
     /// Replace transport settings. Timing changes are refused while loops exist.
-    SetTransport { transport: TransportState },
+    SetTransport {
+        transport: TransportState,
+    },
     Play,
     /// Stop and rewind to the loop start. Finishes or cancels recordings.
     Stop,
@@ -52,28 +54,54 @@ pub enum LooperCommand {
     /// Record a new loop on an empty track. Free mode: starts now (the first
     /// take sets the loop length). Metronome mode: starts at the next loop boundary
     /// and lasts exactly one loop.
-    Record { track: u8 },
+    Record {
+        track: u8,
+    },
     /// Add a layer on a track that has content. Free mode: starts now.
     /// Metronome mode: starts at the next bar.
-    Overdub { track: u8 },
+    Overdub {
+        track: u8,
+    },
     /// End the active recording/overdub (Metronome mode: at the next bar).
-    StopRecording { track: u8 },
-    SetTrackPlaying { track: u8, playing: bool },
-    SetMute { track: u8, muted: bool },
+    StopRecording {
+        track: u8,
+    },
+    SetTrackPlaying {
+        track: u8,
+        playing: bool,
+    },
+    SetMute {
+        track: u8,
+        muted: bool,
+    },
     /// While any track is soloed, only soloed tracks are audible.
-    SetSolo { track: u8, solo: bool },
+    SetSolo {
+        track: u8,
+        solo: bool,
+    },
     /// Linear gain, clamped to 0..=2.
-    SetGain { track: u8, gain: f32 },
+    SetGain {
+        track: u8,
+        gain: f32,
+    },
     /// Remove the most recent overdub layer.
-    Undo { track: u8 },
+    Undo {
+        track: u8,
+    },
     /// Restore the overdub layer most recently removed by `Undo`. A new
     /// recording on the track discards its redo history.
-    Redo { track: u8 },
+    Redo {
+        track: u8,
+    },
     /// Remove all layers on the track.
-    Clear { track: u8 },
+    Clear {
+        track: u8,
+    },
     ClearAll,
     /// Round-trip latency compensation for recordings that follow a reference.
-    SetInputLatency { frames: u32 },
+    SetInputLatency {
+        frames: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -97,9 +125,13 @@ pub enum RejectReason {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum LooperNotice {
-    Rejected { reason: RejectReason },
+    Rejected {
+        reason: RejectReason,
+    },
     /// A free-mode first take hit `max_loop_seconds` and was closed automatically.
-    MaxLengthReached { track: u8 },
+    MaxLengthReached {
+        track: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

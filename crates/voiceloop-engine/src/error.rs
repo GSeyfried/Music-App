@@ -34,9 +34,7 @@ impl From<cpal::DevicesError> for EngineError {
 impl From<cpal::DefaultStreamConfigError> for EngineError {
     fn from(e: cpal::DefaultStreamConfigError) -> Self {
         match e {
-            cpal::DefaultStreamConfigError::DeviceNotAvailable => {
-                EngineError::PermissionOrUnavailable(e.to_string())
-            }
+            cpal::DefaultStreamConfigError::DeviceNotAvailable => EngineError::PermissionOrUnavailable(e.to_string()),
             other => EngineError::Backend(other.to_string()),
         }
     }
@@ -45,9 +43,7 @@ impl From<cpal::DefaultStreamConfigError> for EngineError {
 impl From<cpal::BuildStreamError> for EngineError {
     fn from(e: cpal::BuildStreamError) -> Self {
         match e {
-            cpal::BuildStreamError::DeviceNotAvailable => {
-                EngineError::PermissionOrUnavailable(e.to_string())
-            }
+            cpal::BuildStreamError::DeviceNotAvailable => EngineError::PermissionOrUnavailable(e.to_string()),
             other => EngineError::Backend(other.to_string()),
         }
     }
@@ -56,9 +52,7 @@ impl From<cpal::BuildStreamError> for EngineError {
 impl From<cpal::PlayStreamError> for EngineError {
     fn from(e: cpal::PlayStreamError) -> Self {
         match e {
-            cpal::PlayStreamError::DeviceNotAvailable => {
-                EngineError::PermissionOrUnavailable(e.to_string())
-            }
+            cpal::PlayStreamError::DeviceNotAvailable => EngineError::PermissionOrUnavailable(e.to_string()),
             other => EngineError::Backend(other.to_string()),
         }
     }

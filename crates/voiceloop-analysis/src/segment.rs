@@ -133,8 +133,12 @@ impl NoteSegmenter {
             sorted_pitch.sort_unstable_by(f32::total_cmp);
             let label = sorted_pitch[sorted_pitch.len() / 2];
             let (first_frame, _, _) = moved[0];
-            self.active =
-                Some(Active { start_frame: first_frame, last_frame: first_frame, label: round_note(label), clarity_sum: 0.0 });
+            self.active = Some(Active {
+                start_frame: first_frame,
+                last_frame: first_frame,
+                label: round_note(label),
+                clarity_sum: 0.0,
+            });
             for &(f, m, c) in &moved {
                 if let Some(a) = self.active.as_mut() {
                     a.last_frame = f;
@@ -157,7 +161,8 @@ impl NoteSegmenter {
     fn open(&mut self, frame: u64, midi: f32, clarity: f32) {
         self.pitches.clear();
         self.pitches.push(midi);
-        self.active = Some(Active { start_frame: frame, last_frame: frame, label: round_note(midi), clarity_sum: clarity });
+        self.active =
+            Some(Active { start_frame: frame, last_frame: frame, label: round_note(midi), clarity_sum: clarity });
     }
 
     fn close(&mut self, emit: &mut impl FnMut(NoteEvent)) {

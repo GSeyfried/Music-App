@@ -46,9 +46,8 @@ pub struct LooperPlayback {
 /// Default output device and its default configuration.
 pub fn default_output() -> Result<(cpal::Device, cpal::SupportedStreamConfig), EngineError> {
     let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| EngineError::Backend("no output device is available".into()))?;
+    let device =
+        host.default_output_device().ok_or_else(|| EngineError::Backend("no output device is available".into()))?;
     let config = device.default_output_config()?;
     Ok((device, config))
 }

@@ -15,10 +15,17 @@ use crate::segment::NoteEvent;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum MidiMessage {
-    NoteOn { key: u8, velocity: u8 },
-    NoteOff { key: u8 },
+    NoteOn {
+        key: u8,
+        velocity: u8,
+    },
+    NoteOff {
+        key: u8,
+    },
     /// 14-bit bend, -8192..=8191 (0 = centre).
-    PitchBend { value: i16 },
+    PitchBend {
+        value: i16,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,7 +56,15 @@ pub struct MidiOptions {
 
 impl Default for MidiOptions {
     fn default() -> Self {
-        Self { bpm: 120.0, ticks_per_beat: 480, channel: 0, velocity: 96, pitch_bend: false, bend_range_semitones: 2.0, origin_frame: 0 }
+        Self {
+            bpm: 120.0,
+            ticks_per_beat: 480,
+            channel: 0,
+            velocity: 96,
+            pitch_bend: false,
+            bend_range_semitones: 2.0,
+            origin_frame: 0,
+        }
     }
 }
 
@@ -76,7 +91,11 @@ pub fn notes_to_midi(notes: &[NoteEvent], sample_rate: u32, options: &MidiOption
             let value = (note.cents / 100.0 / range * 8192.0).round().clamp(-8192.0, 8191.0) as i16;
             events.push(MidiEvent { tick: on, channel, message: MidiMessage::PitchBend { value } });
         }
-        events.push(MidiEvent { tick: on, channel, message: MidiMessage::NoteOn { key, velocity: options.velocity.clamp(1, 127) } });
+        events.push(MidiEvent {
+            tick: on,
+            channel,
+            message: MidiMessage::NoteOn { key, velocity: options.velocity.clamp(1, 127) },
+        });
         events.push(MidiEvent { tick: off, channel, message: MidiMessage::NoteOff { key } });
     }
     // Stable sort: equal (tick, rank) keep input order, so a bend stays before its note.
@@ -123,7 +142,9 @@ pub fn write_smf(events: &[MidiEvent], options: &MidiOptions) -> Vec<u8> {
         last_tick = last_tick.max(event.tick);
         let channel = event.channel.min(15);
         match event.message {
-            MidiMessage::NoteOn { key, velocity } => track.extend_from_slice(&[0x90 | channel, key & 0x7F, velocity & 0x7F]),
+            MidiMessage::NoteOn { key, velocity } => {
+                track.extend_from_slice(&[0x90 | channel, key & 0x7F, velocity & 0x7F])
+            }
             MidiMessage::NoteOff { key } => track.extend_from_slice(&[0x80 | channel, key & 0x7F, 0x40]),
             MidiMessage::PitchBend { value } => {
                 let v = (value as i32 + 8192).clamp(0, 16_383) as u16;
@@ -152,7 +173,16 @@ mod tests {
     const SR: u32 = 48_000;
 
     fn note(start: u64, end: u64, midi: i32, cents: f32) -> NoteEvent {
-        NoteEvent { start_frame: start, end_frame: end, note: midi, midi: midi as f32 + cents / 100.0, cents, stability_cents: 0.0, clarity: 1.0, frames: 1 }
+        NoteEvent {
+            start_frame: start,
+            end_frame: end,
+            note: midi,
+            midi: midi as f32 + cents / 100.0,
+            cents,
+            stability_cents: 0.0,
+            clarity: 1.0,
+            frames: 1,
+        }
     }
 
     fn ev(tick: u32, message: MidiMessage) -> MidiEvent {
@@ -183,7 +213,8 @@ mod tests {
 
     #[test]
     fn repeated_notes_retrigger_and_out_of_range_notes_are_skipped() {
-        let notes = [note(0, 24_000, 60, 0.0), note(24_000, 48_000, 60, 0.0), note(0, 10, 128, 0.0), note(0, 10, -1, 0.0)];
+        let notes =
+            [note(0, 24_000, 60, 0.0), note(24_000, 48_000, 60, 0.0), note(0, 10, 128, 0.0), note(0, 10, -1, 0.0)];
         let events = notes_to_midi(&notes, SR, &MidiOptions::default());
         assert_eq!(events.len(), 4);
         assert_eq!(events[1], ev(480, MidiMessage::NoteOff { key: 60 }), "off before the next on at the same tick");
@@ -200,7 +231,11 @@ mod tests {
         let second: Vec<MidiMessage> = events.iter().filter(|e| e.tick == 480).map(|e| e.message).collect();
         assert_eq!(
             second,
-            vec![MidiMessage::NoteOff { key: 69 }, MidiMessage::PitchBend { value: -1_024 }, MidiMessage::NoteOn { key: 69, velocity: 96 }]
+            vec![
+                MidiMessage::NoteOff { key: 69 },
+                MidiMessage::PitchBend { value: -1_024 },
+                MidiMessage::NoteOn { key: 69, velocity: 96 }
+            ]
         );
         // Larger than the range: clamped, not wrapped.
         let wide = notes_to_midi(&[note(0, 100, 60, 400.0)], SR, &options);

@@ -227,12 +227,7 @@ mod tests {
     use super::*;
 
     fn at(bpm: f64, num: u8, den: u8, sample_rate: u32) -> TransportState {
-        TransportState {
-            bpm,
-            time_signature: TimeSignature::new(num, den).unwrap(),
-            sample_rate,
-            ..Default::default()
-        }
+        TransportState { bpm, time_signature: TimeSignature::new(num, den).unwrap(), sample_rate, ..Default::default() }
     }
 
     #[test]

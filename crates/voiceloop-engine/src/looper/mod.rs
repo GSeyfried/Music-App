@@ -34,8 +34,8 @@ use crate::transport::{MusicalPosition, TransportState};
 pub use click::Accent;
 pub use pool::{LayerRecycler, StorageSink};
 pub use processor::{
-soft_limit, LooperCommand, LooperCore, LooperHandles, LooperNotice, LooperSnapshot, RejectReason, RunState, TrackSnapshot,
-    TrackState, LIMIT_KNEE,
+    soft_limit, LooperCommand, LooperCore, LooperHandles, LooperNotice, LooperSnapshot, RejectReason, RunState,
+    TrackSnapshot, TrackState, LIMIT_KNEE,
 };
 
 /// Hard upper bound on tracks (snapshot arrays are sized by this).

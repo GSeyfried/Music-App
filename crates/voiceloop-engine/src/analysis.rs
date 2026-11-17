@@ -46,7 +46,12 @@ pub struct AnalysisConfig {
 
 impl Default for AnalysisConfig {
     fn default() -> Self {
-        Self { enabled: true, tracker: TrackerConfig::default(), notes: NoteConfig::default(), onsets: OnsetConfig::default() }
+        Self {
+            enabled: true,
+            tracker: TrackerConfig::default(),
+            notes: NoteConfig::default(),
+            onsets: OnsetConfig::default(),
+        }
     }
 }
 
@@ -207,14 +212,20 @@ mod tests {
     /// A4 for 300 ms, a rest, then E5 for 300 ms.
     fn two_notes() -> Vec<f32> {
         let note = |hz: f64| signal::shape(signal::harmonic(hz, SR, 14_400, &VOICE_PARTIALS), 240, 240);
-        signal::concat(&[&signal::silence(4_800), &note(440.0), &signal::silence(4_800), &note(659.26), &signal::silence(9_600)])
+        signal::concat(&[
+            &signal::silence(4_800),
+            &note(440.0),
+            &signal::silence(4_800),
+            &note(659.26),
+            &signal::silence(9_600),
+        ])
     }
 
     fn summarise(outputs: &[AnalysisOutput]) -> (Vec<i32>, usize, usize) {
-        let notes = outputs.iter().filter_map(|o| if let AnalysisOutput::Note(n) = o { Some(n.note) } else { None }).collect();
+        let notes =
+            outputs.iter().filter_map(|o| if let AnalysisOutput::Note(n) = o { Some(n.note) } else { None }).collect();
         let onsets = outputs.iter().filter(|o| matches!(o, AnalysisOutput::Onset(_))).count();
-        let pitched =
-            outputs.iter().filter(|o| matches!(o, AnalysisOutput::Pitch(f) if f.hz.is_some())).count();
+        let pitched = outputs.iter().filter(|o| matches!(o, AnalysisOutput::Pitch(f) if f.hz.is_some())).count();
         (notes, onsets, pitched)
     }
 
@@ -314,7 +325,8 @@ mod tests {
         let outputs = collect(&worker, |outs| summarise(outs).0.len() == 2);
         assert_eq!(summarise(&outputs).0, vec![69, 76]);
         // Frames continue the input clock: the second pass starts after the first.
-        let first_pitch = outputs.iter().find_map(|o| if let AnalysisOutput::Pitch(f) = o { Some(f.frame) } else { None });
+        let first_pitch =
+            outputs.iter().find_map(|o| if let AnalysisOutput::Pitch(f) = o { Some(f.frame) } else { None });
         assert_eq!(first_pitch, Some(audio.len() as u64 + 480));
     }
 }

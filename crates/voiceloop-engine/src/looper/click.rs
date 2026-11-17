@@ -51,7 +51,14 @@ impl ClickVoice {
     const TAU_S: f32 = 0.006;
 
     pub fn new(sample_rate: u32) -> Self {
-        Self { sample_rate: sample_rate.max(1) as f32, phase: 0.0, increment: 0.0, amplitude: 0.0, decay: 0.0, remaining: 0 }
+        Self {
+            sample_rate: sample_rate.max(1) as f32,
+            phase: 0.0,
+            increment: 0.0,
+            amplitude: 0.0,
+            decay: 0.0,
+            remaining: 0,
+        }
     }
 
     pub fn trigger(&mut self, accent: Accent, gain: f32) {

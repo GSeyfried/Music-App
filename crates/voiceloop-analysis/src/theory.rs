@@ -34,7 +34,12 @@ pub fn interval_between(from_midi: f32, to_midi: f32) -> Interval {
     let size = semitones.unsigned_abs();
     // An exact octave is "P8", not "P1 plus an octave".
     let (simple, octaves) = if size > 0 && size % 12 == 0 { (12, size / 12 - 1) } else { (size % 12, size / 12) };
-    Interval { semitones, name: INTERVAL_NAMES[simple as usize], octaves, cents_off: (exact - semitones as f32) * 100.0 }
+    Interval {
+        semitones,
+        name: INTERVAL_NAMES[simple as usize],
+        octaves,
+        cents_off: (exact - semitones as f32) * 100.0,
+    }
 }
 
 // ---- scales ------------------------------------------------------------------
@@ -170,7 +175,8 @@ pub fn estimate_key(histogram: &[f32; 12]) -> Option<KeyEstimate> {
     let mut ranked: Vec<(f32, Scale)> = Vec::with_capacity(24);
     for tonic in 0..12u8 {
         ranked.push((correlation(histogram, &MAJOR_PROFILE, tonic as usize), Scale::new(tonic, ScaleKind::Major)));
-        ranked.push((correlation(histogram, &MINOR_PROFILE, tonic as usize), Scale::new(tonic, ScaleKind::NaturalMinor)));
+        ranked
+            .push((correlation(histogram, &MINOR_PROFILE, tonic as usize), Scale::new(tonic, ScaleKind::NaturalMinor)));
     }
     ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
     let (best, second) = (ranked[0], ranked[1]);
@@ -266,7 +272,16 @@ mod tests {
     use super::*;
 
     fn note(midi: i32, frames: u64) -> NoteEvent {
-        NoteEvent { start_frame: 0, end_frame: frames, note: midi, midi: midi as f32, cents: 0.0, stability_cents: 0.0, clarity: 1.0, frames: 1 }
+        NoteEvent {
+            start_frame: 0,
+            end_frame: frames,
+            note: midi,
+            midi: midi as f32,
+            cents: 0.0,
+            stability_cents: 0.0,
+            clarity: 1.0,
+            frames: 1,
+        }
     }
 
     #[test]
@@ -305,7 +320,15 @@ mod tests {
         assert_eq!(Scale::new(14, ScaleKind::Dorian).tonic, 2);
         assert_eq!(Scale::new(0, ScaleKind::Chromatic).mask(), 0x0FFF);
         // Every seven-note scale has seven notes, every mode of major the same interval set rotated.
-        for kind in [ScaleKind::Major, ScaleKind::Dorian, ScaleKind::Phrygian, ScaleKind::Lydian, ScaleKind::Mixolydian, ScaleKind::NaturalMinor, ScaleKind::Locrian] {
+        for kind in [
+            ScaleKind::Major,
+            ScaleKind::Dorian,
+            ScaleKind::Phrygian,
+            ScaleKind::Lydian,
+            ScaleKind::Mixolydian,
+            ScaleKind::NaturalMinor,
+            ScaleKind::Locrian,
+        ] {
             assert_eq!(kind.steps().len(), 7);
         }
         assert_eq!(Scale::new(2, ScaleKind::Dorian).mask(), c_major.mask(), "D dorian is the white keys");
@@ -324,13 +347,17 @@ mod tests {
     fn key_of_a_major_melody_and_its_relative_minor() {
         // "Twinkle" in D major: D D A A B B A  G G F# F# E E D.
         let melody = [62, 62, 69, 69, 71, 71, 69, 67, 67, 66, 66, 64, 64, 62];
-        let notes: Vec<NoteEvent> = melody.iter().enumerate().map(|(i, &m)| note(m, if i % 7 == 6 { 48_000 } else { 24_000 })).collect();
+        let notes: Vec<NoteEvent> =
+            melody.iter().enumerate().map(|(i, &m)| note(m, if i % 7 == 6 { 48_000 } else { 24_000 })).collect();
         let key = estimate_key(&pitch_class_histogram(&notes)).unwrap();
         assert_eq!(key.scale, Scale::new(2, ScaleKind::Major));
         assert!(key.correlation > 0.7, "{}", key.correlation);
 
         // A natural minor scale with the tonic and fifth held longer.
-        let minor: Vec<NoteEvent> = [57, 59, 60, 62, 64, 65, 67, 69].iter().map(|&m| note(m, if m % 12 == 9 || m % 12 == 4 { 96_000 } else { 24_000 })).collect();
+        let minor: Vec<NoteEvent> = [57, 59, 60, 62, 64, 65, 67, 69]
+            .iter()
+            .map(|&m| note(m, if m % 12 == 9 || m % 12 == 4 { 96_000 } else { 24_000 }))
+            .collect();
         let key = estimate_key(&pitch_class_histogram(&minor)).unwrap();
         assert_eq!(key.scale, Scale::new(9, ScaleKind::NaturalMinor));
     }

@@ -177,7 +177,14 @@ fn pitch_diff(performed: f32, reference: f32, shift: f32, octave_invariant: bool
     }
 }
 
-fn align(reference: &[MelodyNote], performed: &[NoteEvent], origin: f64, shift: f32, ms_per_frame: f64, cfg: &CompareConfig) -> Aligned {
+fn align(
+    reference: &[MelodyNote],
+    performed: &[NoteEvent],
+    origin: f64,
+    shift: f32,
+    ms_per_frame: f64,
+    cfg: &CompareConfig,
+) -> Aligned {
     let (n, m) = (reference.len(), performed.len());
     let width = m + 1;
     let mut cost = vec![0.0f32; (n + 1) * width];
@@ -227,7 +234,14 @@ fn align(reference: &[MelodyNote], performed: &[NoteEvent], origin: f64, shift: 
 }
 
 /// Cost in 0..2 of pairing two notes, or `None` if they are too far apart in time.
-fn match_cost(r: &MelodyNote, p: &NoteEvent, origin: f64, shift: f32, ms_per_frame: f64, cfg: &CompareConfig) -> Option<f32> {
+fn match_cost(
+    r: &MelodyNote,
+    p: &NoteEvent,
+    origin: f64,
+    shift: f32,
+    ms_per_frame: f64,
+    cfg: &CompareConfig,
+) -> Option<f32> {
     let onset_ms = ((p.start_frame as f64 - origin - r.start_frame as f64) * ms_per_frame).abs() as f32;
     if onset_ms > cfg.match_window_ms {
         return None;
@@ -331,11 +345,25 @@ pub fn compare(reference: &ReferenceMelody, performed: &[NoteEvent], cfg: &Compa
             }
             (Some(_), None) => {
                 missed += 1;
-                NoteComparison { reference_index: r, performed_index: None, verdict: Verdict::Missed, pitch_error_cents: None, onset_error_ms: None, duration_ratio: None }
+                NoteComparison {
+                    reference_index: r,
+                    performed_index: None,
+                    verdict: Verdict::Missed,
+                    pitch_error_cents: None,
+                    onset_error_ms: None,
+                    duration_ratio: None,
+                }
             }
             _ => {
                 extra += 1;
-                NoteComparison { reference_index: None, performed_index: p, verdict: Verdict::Extra, pitch_error_cents: None, onset_error_ms: None, duration_ratio: None }
+                NoteComparison {
+                    reference_index: None,
+                    performed_index: p,
+                    verdict: Verdict::Extra,
+                    pitch_error_cents: None,
+                    onset_error_ms: None,
+                    duration_ratio: None,
+                }
             }
         };
         notes.push(entry);
@@ -382,7 +410,11 @@ mod tests {
 
     /// "Twinkle" opening: C C G G A A G, one note every 500 ms.
     fn twinkle(offset_ms: u64) -> Vec<NoteEvent> {
-        [60.0, 60.0, 67.0, 67.0, 69.0, 69.0, 67.0].iter().enumerate().map(|(i, &m)| sung(offset_ms + i as u64 * 500, 400, m)).collect()
+        [60.0, 60.0, 67.0, 67.0, 69.0, 69.0, 67.0]
+            .iter()
+            .enumerate()
+            .map(|(i, &m)| sung(offset_ms + i as u64 * 500, 400, m))
+            .collect()
     }
 
     fn reference() -> ReferenceMelody {
@@ -424,10 +456,21 @@ mod tests {
         let r = compare(&reference(), &performance, &CompareConfig::default());
         assert_eq!(
             verdicts(&r),
-            vec![Verdict::Correct, Verdict::Correct, Verdict::Correct, Verdict::Correct, Verdict::WrongPitch, Verdict::Correct, Verdict::WrongPitch]
+            vec![
+                Verdict::Correct,
+                Verdict::Correct,
+                Verdict::Correct,
+                Verdict::Correct,
+                Verdict::WrongPitch,
+                Verdict::Correct,
+                Verdict::WrongPitch
+            ]
         );
         let cents: Vec<f32> = r.notes.iter().map(|n| n.pitch_error_cents.unwrap()).collect();
-        assert!((cents[1] + 30.0).abs() < 0.01 && (cents[4] - 80.0).abs() < 0.01 && (cents[6] + 200.0).abs() < 0.01, "{cents:?}");
+        assert!(
+            (cents[1] + 30.0).abs() < 0.01 && (cents[4] - 80.0).abs() < 0.01 && (cents[6] + 200.0).abs() < 0.01,
+            "{cents:?}"
+        );
         assert!((r.mean_pitch_error_cents - (-30.0 + 80.0 - 200.0) / 7.0).abs() < 0.01);
         assert!((r.score - 100.0 * 5.0 / 7.0).abs() < 1e-3);
     }
@@ -436,8 +479,8 @@ mod tests {
     fn a_missed_note_and_an_extra_note_do_not_derail_later_matches() {
         let mut performance = twinkle(0);
         performance.remove(3); // skip the second G
-        // A stray note halfway between the last two, 250 ms from either: with a
-        // 120 ms window it cannot be mistaken for one of them.
+                               // A stray note halfway between the last two, 250 ms from either: with a
+                               // 120 ms window it cannot be mistaken for one of them.
         performance.push(sung(5 * 500 + 250, 100, 72.0));
         let cfg = CompareConfig { match_window_ms: 120.0, ..CompareConfig::default() };
         let r = compare(&reference(), &performance, &cfg);
@@ -464,7 +507,8 @@ mod tests {
         // Everything 40 ms late, and note 5 a further 150 ms late.
         let mut performance = twinkle(10_040);
         performance[5].start_frame += 150 * 48;
-        let fixed = CompareConfig { alignment: Alignment::Fixed { origin_frame: 10_000 * 48 }, ..CompareConfig::default() };
+        let fixed =
+            CompareConfig { alignment: Alignment::Fixed { origin_frame: 10_000 * 48 }, ..CompareConfig::default() };
         let r = compare(&reference(), &performance, &fixed);
         assert!((r.notes[0].onset_error_ms.unwrap() - 40.0).abs() < 1e-3);
         assert!((r.notes[5].onset_error_ms.unwrap() - 190.0).abs() < 1e-3);
@@ -487,14 +531,16 @@ mod tests {
 
     #[test]
     fn transposition_and_octaves() {
-        let up_a_fourth: Vec<NoteEvent> = twinkle(0).into_iter().map(|e| sung(e.start_frame / 48, 400, e.midi + 5.0)).collect();
+        let up_a_fourth: Vec<NoteEvent> =
+            twinkle(0).into_iter().map(|e| sung(e.start_frame / 48, 400, e.midi + 5.0)).collect();
         let strict = compare(&reference(), &up_a_fourth, &CompareConfig::default());
         assert_eq!((strict.correct, strict.transposition_semitones), (0, 0));
         let lenient = CompareConfig { allow_transposition: true, ..CompareConfig::default() };
         let r = compare(&reference(), &up_a_fourth, &lenient);
         assert_eq!((r.correct, r.transposition_semitones), (7, 5));
 
-        let octave_down: Vec<NoteEvent> = twinkle(0).into_iter().map(|e| sung(e.start_frame / 48, 400, e.midi - 12.0 + 0.2)).collect();
+        let octave_down: Vec<NoteEvent> =
+            twinkle(0).into_iter().map(|e| sung(e.start_frame / 48, 400, e.midi - 12.0 + 0.2)).collect();
         let folded = CompareConfig { octave_invariant: true, ..CompareConfig::default() };
         let r = compare(&reference(), &octave_down, &folded);
         assert_eq!(r.correct, 7);

@@ -251,10 +251,8 @@ fn fractional_period_has_no_accumulated_drift() {
     let total = (300.0 * period) as usize + 10;
     r.run(total, impulse(0));
 
-    let expected: Vec<usize> = (1u64..)
-        .map(|k| (k as f64 * period).round() as usize)
-        .take_while(|&f| f < r.out.len())
-        .collect();
+    let expected: Vec<usize> =
+        (1u64..).map(|k| (k as f64 * period).round() as usize).take_while(|&f| f < r.out.len()).collect();
     assert!(expected.len() >= 299);
     assert_eq!(nonzero_from(&r.out, 0), expected);
     // Loop cycles coincide exactly with the bar grid used by the metronome.

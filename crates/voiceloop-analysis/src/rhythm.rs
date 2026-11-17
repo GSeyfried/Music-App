@@ -252,7 +252,8 @@ mod tests {
     fn tempo_is_recovered_from_jittery_onsets() {
         // 97 BPM with up to +-8 ms (384 frames) of jitter on every onset.
         let period = SR as f64 * 60.0 / 97.0;
-        let onsets: Vec<u64> = (0..32).map(|k| (10_000.0 + k as f64 * period).round() as i64 + jitter(k, 384)).map(|f| f as u64).collect();
+        let onsets: Vec<u64> =
+            (0..32).map(|k| (10_000.0 + k as f64 * period).round() as i64 + jitter(k, 384)).map(|f| f as u64).collect();
         let t = estimate_tempo(&onsets, SR, 60.0, 180.0).unwrap();
         assert!((t.bpm - 97.0).abs() < 0.2, "{}", t.bpm);
         assert!(t.confidence > 0.95);

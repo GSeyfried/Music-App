@@ -371,7 +371,8 @@ mod tests {
         input[20] = 440.0; // two frames an octave up
         input[21] = 440.0;
         input[30] = 110.0; // one frame an octave down
-        let out: Vec<PitchFrame> = input.iter().enumerate().map(|(i, &hz)| tracker.post(estimate(hz), i as u64 * 480)).collect();
+        let out: Vec<PitchFrame> =
+            input.iter().enumerate().map(|(i, &hz)| tracker.post(estimate(hz), i as u64 * 480)).collect();
         for f in &out {
             assert!((f.midi.unwrap() - 57.0).abs() < 1e-3, "stays on A3: {:?}", f.midi);
         }

@@ -344,11 +344,9 @@ impl ControlLoop {
             }
         }
         match self.playback.as_mut() {
-            Some(p) => p
-                .handles
-                .commands
-                .push(command)
-                .map_err(|_| EngineError::Busy("looper command queue is full".into())),
+            Some(p) => {
+                p.handles.commands.push(command).map_err(|_| EngineError::Busy("looper command queue is full".into()))
+            }
             None => Err(EngineError::Invalid("start audio input before using the looper".into())),
         }
     }
@@ -574,10 +572,7 @@ mod tests {
     fn unknown_device_is_a_typed_error() {
         let engine = Engine::start(Box::new(|_| {}));
         let err = engine.start_input(Some("definitely-not-a-device-🎤".into())).unwrap_err();
-        assert!(matches!(
-            err,
-            EngineError::DeviceNotFound(_) | EngineError::Backend(_) | EngineError::NoInputDevice
-        ));
+        assert!(matches!(err, EngineError::DeviceNotFound(_) | EngineError::Backend(_) | EngineError::NoInputDevice));
         engine.shutdown();
     }
 
@@ -636,7 +631,13 @@ mod tests {
         assert_eq!(f["stabilityCents"], serde_json::Value::Null);
         assert_eq!(f["octaveCorrected"], false);
 
-        let silent = PitchFrame { hz: None, midi: None, note: None, unpitched: Some(voiceloop_analysis::Unpitched::OutOfRange), ..frame };
+        let silent = PitchFrame {
+            hz: None,
+            midi: None,
+            note: None,
+            unpitched: Some(voiceloop_analysis::Unpitched::OutOfRange),
+            ..frame
+        };
         let json = serde_json::to_value(silent).unwrap();
         assert_eq!((&json["hz"], &json["unpitched"]), (&serde_json::Value::Null, &serde_json::json!("outOfRange")));
 
@@ -646,7 +647,8 @@ mod tests {
             serde_json::json!({"type": "onset", "payload": {"frame": 960, "levelDb": -12.0, "riseDb": 30.0}})
         );
 
-        let config: AnalysisConfig = serde_json::from_str(r#"{"tracker":{"pitch":{"minHz":80},"tuning":442}}"#).unwrap();
+        let config: AnalysisConfig =
+            serde_json::from_str(r#"{"tracker":{"pitch":{"minHz":80},"tuning":442}}"#).unwrap();
         assert_eq!(config.tracker.pitch.min_hz, 80.0);
         assert_eq!(config.tracker.tuning.a4_hz, 442.0);
         assert!(config.enabled && config.tracker.pitch.max_hz == 1_400.0, "unspecified fields keep their defaults");

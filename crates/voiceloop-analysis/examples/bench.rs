@@ -62,7 +62,9 @@ fn main() {
     timed("transcribe (track + segment)", audio_seconds, || {
         transcribe(&voice, SR, TrackerConfig::default(), NoteConfig::default()).expect("default config")
     });
-    timed("detect_onsets (5 ms hop)", audio_seconds, || detect_onsets(&voice, SR, OnsetConfig::default()).expect("default config"));
+    timed("detect_onsets (5 ms hop)", audio_seconds, || {
+        detect_onsets(&voice, SR, OnsetConfig::default()).expect("default config")
+    });
 
     let voiced = pitch_frames.iter().filter(|f| f.hz.is_some()).count();
     println!("\n{} pitch frames, {} pitched", pitch_frames.len(), voiced);
