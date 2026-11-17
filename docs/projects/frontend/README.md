@@ -412,3 +412,30 @@ the `EngineEvent` union. The store now handles those events generically:
 
 The tag-list test includes `PRACTICE_EVENT_TYPES`. The practice UI itself is
 not wired yet.
+
+## Round 3 status (stopped early at the token limit)
+
+Done (typecheck clean, 136 vitest tests pass, `npm run build` OK; not rendered or run on hardware this round):
+
+- **Add/remove track aligned to the engine.** Looper commands `addTrack` / `removeTrack` and the reject reason `trackLimit`. `LooperState.maxTracks` (the capacity, 16) is read, with a fallback to `trackCapacity`, the name used briefly mid-change. The PROPOSED `set_looper_config` command was removed. The Add Track card shows "n of cap", and quick actions gain "Remove track". The mock follows Rust's check order (busy before limit).
+- **Hardware contract fold-in (0fe3dc8):**
+  - Stable device ids are never shown. `deviceLabel()` picks the name, and `deviceName` / `inputDeviceName` / `outputDeviceName` are used.
+  - The missing-device hint also matches by saved name, because USB ids change with the port.
+  - `micPermission` in status, plus the `request_mic_permission` command. A banner shows when permission is denied or undetermined.
+  - `audioSession` / `audioSessionInfo` events are handled. Interruptions show calm info toasts.
+  - The `audioRestarted` warning becomes the info toast "Audio restarted after a device change — your loops were kept" only when the engine message says loops were kept. Otherwise it stays a normal warning.
+
+PENDING (round 3 scope not started):
+
+- The project workflow UI against `docs/projects/persistence/INTERFACE.md`:
+  - `project_command`, `find_recovery`, `discard_recovery` types
+  - new / open / save / save-as
+  - the unsaved indicator and the "Save first?" guard before stop-input or quit
+  - the recovery prompt
+  - exports (mixdown, stems, MIDI)
+  - WAV import
+  - progress, done and failed events
+  - recent projects in localStorage
+- Dialogs: `tauri-plugin-dialog` is registered in Rust and its capabilities are set, but the JS package `@tauri-apps/plugin-dialog` is not installed in `package.json`. Import it only in `bridge.ts`, with a typed-path fallback.
+- REAPER .rpp export: not in the persistence INTERFACE.
+- Moving the keyboard shortcuts onto the shared command list.

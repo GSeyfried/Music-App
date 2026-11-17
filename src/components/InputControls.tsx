@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { useEngineActions, useEngineState } from "../engine/EngineContext";
+import { deviceLabel } from "../lib/hardware";
 import { Icon } from "./ui/Icon";
 import { Button } from "./ui/controls";
 import { LevelMeter } from "./LevelMeter";
@@ -96,7 +97,12 @@ export function StartCard({ purpose }: { purpose: string }) {
 export function InputCluster() {
   const status = useEngineState((s) => s.status);
   const devices = useEngineState((s) => s.devices);
-  const name = devices.find((d) => d.id === status.capture?.deviceId)?.name ?? status.capture?.deviceId;
+  // Show names, never the stable ids (e.g. "coreaudio:BuiltInMicrophoneDevice").
+  const name = deviceLabel(
+    status.capture?.deviceName ?? devices.find((d) => d.id === status.capture?.deviceId)?.name,
+    status.capture?.deviceId,
+    "Audio input",
+  );
   return (
     <div className="input-cluster">
       {status.capturing && (

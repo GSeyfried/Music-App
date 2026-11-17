@@ -42,10 +42,32 @@ export function formatRate(hz: number): string {
   return `${(hz / 1000).toFixed(hz % 1000 === 0 ? 0 : 1)} kHz`;
 }
 
-/** A saved device that is not currently connected. */
-export function missingSavedDevice(saved: string | null | undefined, devices: DeviceInfo[]): string | null {
-  if (!saved || devices.length === 0) return null;
-  return devices.some((d) => d.id === saved || d.name === saved) ? null : saved;
+/** Stable CPAL ids look like "coreaudio:BuiltInMicrophoneDevice"; names do not carry a host prefix. */
+const looksLikeId = (s: string) => /^[a-z]+:\S/.test(s);
+
+/**
+ * What to call a device in the UI: its name, never its id. Older settings may
+ * hold a name in the id slot, which is fine to show.
+ */
+export function deviceLabel(name: string | null | undefined, id: string | null | undefined, fallback = "the saved device"): string {
+  if (name) return name;
+  if (id && !looksLikeId(id)) return id;
+  return fallback;
+}
+
+/**
+ * The display name of a saved device that is not currently connected, or null.
+ * Matches by id, by a name stored as the id, or by the saved name (macOS USB ids
+ * change with the port; the engine then finds the device by name).
+ */
+export function missingSavedDevice(
+  savedId: string | null | undefined,
+  savedName: string | null | undefined,
+  devices: DeviceInfo[],
+): string | null {
+  if (!savedId || devices.length === 0) return null;
+  const present = devices.some((d) => d.id === savedId || d.name === savedId || (!!savedName && d.name === savedName));
+  return present ? null : deviceLabel(savedName, savedId);
 }
 
 // ---- Monitoring -------------------------------------------------------------------------

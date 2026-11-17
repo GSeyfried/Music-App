@@ -4,6 +4,7 @@ import {
   applyMidi,
   bufferSizeOptions,
   calibrationReadiness,
+  deviceLabel,
   describeCalibration,
   latencyValue,
   midiLabel,
@@ -61,12 +62,22 @@ describe("format choices", () => {
     expect(bufferSizeOptions([device({ configs: [range(null, null)] })])).toContain(2048);
   });
 
-  it("flags a saved device that is not connected", () => {
-    const list = [device({ id: "Zoom H4n", name: "Zoom H4n" })];
-    expect(missingSavedDevice("Zoom H4n", list)).toBeNull();
-    expect(missingSavedDevice("Scarlett 2i2", list)).toBe("Scarlett 2i2");
-    expect(missingSavedDevice(null, list)).toBeNull();
-    expect(missingSavedDevice("X", [])).toBeNull(); // list not loaded: say nothing
+  it("flags a saved device that is not connected, by its name", () => {
+    const list = [device({ id: "coreaudio:AppleUSBAudioEngine:ZOOM:H4n Pro:14200000:1,2", name: "H4n Pro" })];
+    expect(missingSavedDevice("coreaudio:AppleUSBAudioEngine:ZOOM:H4n Pro:14200000:1,2", "H4n Pro", list)).toBeNull();
+    // Same device on another USB port: new id, same name. Not missing.
+    expect(missingSavedDevice("coreaudio:AppleUSBAudioEngine:ZOOM:H4n Pro:14300000:1,2", "H4n Pro", list)).toBeNull();
+    expect(missingSavedDevice("H4n Pro", null, list)).toBeNull(); // older settings stored the name
+    expect(missingSavedDevice("coreaudio:Focusrite:1", "Scarlett 2i2", list)).toBe("Scarlett 2i2");
+    expect(missingSavedDevice("coreaudio:Focusrite:1", null, list)).toBe("the saved device"); // never the id
+    expect(missingSavedDevice(null, null, list)).toBeNull();
+    expect(missingSavedDevice("X", null, [])).toBeNull(); // list not loaded: say nothing
+  });
+
+  it("labels devices by name, never by stable id", () => {
+    expect(deviceLabel("MacBook Pro Microphone", "coreaudio:BuiltInMicrophoneDevice")).toBe("MacBook Pro Microphone");
+    expect(deviceLabel(null, "coreaudio:BuiltInMicrophoneDevice", "Audio input")).toBe("Audio input");
+    expect(deviceLabel(undefined, "Zoom H4n")).toBe("Zoom H4n");
   });
 });
 

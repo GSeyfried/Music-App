@@ -16,7 +16,8 @@ export type TrackActionId =
   | "track.undo"
   | "track.redo"
   | "track.details"
-  | "track.clear";
+  | "track.clear"
+  | "track.remove";
 
 export interface TrackAction {
   id: TrackActionId;
@@ -61,6 +62,14 @@ export function trackActions(view: LooperView, track: number): TrackAction[] {
       shortcut: keys("clearTrack"),
       command: { type: "clear", track },
     },
+    {
+      id: "track.remove",
+      label: "Remove track",
+      enabled: view.tracks.length > 1 && !(t.state === "armed" || t.state === "recording" || t.state === "overdubbing"),
+      destructive: true,
+      shortcut: [],
+      command: { type: "removeTrack", track },
+    },
   ];
 }
 
@@ -71,24 +80,25 @@ export interface AddTrackState {
   note: string;
 }
 
-/** Product target is 10+ tracks; the engine ceiling (when reported) is the real limit. */
+/** Product target is 10+ tracks; the engine's track capacity is the real limit. */
 export const TRACK_TARGET = 10;
 
 export function addTrackState(view: LooperView): AddTrackState {
   const n = view.tracks.length;
-  if (view.maxTracks === null) {
+  const cap = view.trackCapacity;
+  if (cap === null) {
     return {
       enabled: false,
       label: "Add track",
-      note: `This engine runs a fixed ${n} tracks. Adding tracks needs an engine command that is not exposed yet.`,
+      note: `This engine build runs a fixed ${n} tracks (it predates addTrack).`,
     };
   }
-  if (n >= view.maxTracks) {
+  if (n >= cap) {
     return {
       enabled: false,
       label: "Add track",
-      note: `Engine limit reached: ${view.maxTracks} tracks.${view.maxTracks < TRACK_TARGET ? ` The goal is ${TRACK_TARGET}+; the engine limit is being raised.` : ""}`,
+      note: `Track limit reached: ${cap} tracks.${cap < TRACK_TARGET ? ` The goal is ${TRACK_TARGET}+.` : ""}`,
     };
   }
-  return { enabled: true, label: "Add track", note: `${n} of ${view.maxTracks} tracks` };
+  return { enabled: true, label: "Add track", note: `${n} of ${cap} tracks` };
 }

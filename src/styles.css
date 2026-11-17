@@ -1891,3 +1891,7 @@ input[type="range"] {
   gap: var(--s-2);
   flex-wrap: wrap;
 }
+
+.toast-info {
+  border-left-color: var(--info);
+}

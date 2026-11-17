@@ -13,7 +13,6 @@ import {
   type EngineTransport,
   type InputRoute,
   type LooperCommand,
-  type LooperConfig,
   type MonitorConfig,
   type OutputRoute,
 } from "./protocol";
@@ -49,9 +48,9 @@ export interface EngineClient {
   openMidiInput(portId: string): Promise<CommandResult<"open_midi_input">>;
   closeMidiInput(portId: string): Promise<CommandResult<"close_midi_input">>;
   getAudioSettings(): Promise<CommandResult<"get_audio_settings">>;
+  requestMicPermission(): Promise<CommandResult<"request_mic_permission">>;
   startupWarnings(): Promise<CommandResult<"startup_warnings">>;
   startLatencyCalibration(apply: boolean): Promise<CommandResult<"start_latency_calibration">>;
-  setLooperConfig(config: Partial<LooperConfig>): Promise<CommandResult<"set_looper_config">>;
 }
 
 export function createEngine(transport: EngineTransport): EngineClient {
@@ -86,8 +85,8 @@ export function createEngine(transport: EngineTransport): EngineClient {
     openMidiInput: (portId) => call("open_midi_input", { portId }),
     closeMidiInput: (portId) => call("close_midi_input", { portId }),
     getAudioSettings: () => call("get_audio_settings"),
+    requestMicPermission: () => call("request_mic_permission"),
     startupWarnings: () => call("startup_warnings"),
     startLatencyCalibration: (apply) => call("start_latency_calibration", { apply }),
-    setLooperConfig: (config) => call("set_looper_config", { config }),
   };
 }

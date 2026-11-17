@@ -78,16 +78,63 @@ export function Alerts() {
   );
 }
 
+function InfoToastView({ id, text, onDismiss }: { id: number; text: string; onDismiss: (id: number) => void }) {
+  useEffect(() => {
+    const t = setTimeout(() => onDismiss(id), NOTICE_MS);
+    return () => clearTimeout(t);
+  }, [id, onDismiss]);
+  return (
+    <div className="toast toast-info" role="status">
+      <span>{text}</span>
+      <Button variant="ghost" size="sm" icon="close" aria-label="Dismiss" onPress={() => onDismiss(id)} />
+    </div>
+  );
+}
+
 export function Toasts() {
   const notices = useEngineState((s) => s.notices);
-  const { dismissNotice } = useEngineActions();
+  const infos = useEngineState((s) => s.infoToasts);
+  const { dismissNotice, dismissInfo } = useEngineActions();
   return (
     <div className="toasts" aria-live="polite">
+      {infos.map((t) => (
+        <InfoToastView key={t.id} id={t.id} text={t.text} onDismiss={dismissInfo} />
+      ))}
       {notices.map((n) => (
         <Notice key={n.id} entry={n} onDismiss={dismissNotice} />
       ))}
     </div>
   );
+}
+
+/** Microphone permission (iOS asks; macOS reports "unknown" and shows denial as silentInput). */
+export function MicPermissionBanner() {
+  const permission = useEngineState((s) => s.micPermission);
+  const { requestMicPermission } = useEngineActions();
+  if (permission === "denied") {
+    return (
+      <div className="alert alert-error banner" role="alert" data-kind="micDenied">
+        <div className="alert-text">
+          <strong>Microphone access is off</strong>
+          <span>Allow VoiceLoop to use the microphone in Settings › Privacy &amp; Security › Microphone, then start input again.</span>
+        </div>
+      </div>
+    );
+  }
+  if (permission === "undetermined") {
+    return (
+      <div className="alert alert-sim banner" role="status" data-kind="micUndetermined">
+        <div className="alert-text">
+          <strong>Microphone permission needed</strong>
+          <span>VoiceLoop listens to your voice to loop and tune it. Nothing leaves this device.</span>
+        </div>
+        <Button variant="solid" size="sm" icon="mic" onPress={() => void requestMicPermission()}>
+          Allow microphone
+        </Button>
+      </div>
+    );
+  }
+  return null;
 }
 
 /** Persistent banner for the simulated engine and the no-engine state. */

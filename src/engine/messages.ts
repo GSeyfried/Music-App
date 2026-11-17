@@ -67,6 +67,7 @@ const WARNING_TITLE: Record<EngineWarningKind, string> = {
   configAdjusted: "Audio settings adjusted",
   midiPortLost: "MIDI device disconnected",
   settingsProblem: "Settings could not be saved",
+  audioRestarted: "Audio restarted",
 };
 
 const WARNING_FALLBACK: Record<EngineWarningKind, string> = {
@@ -77,6 +78,7 @@ const WARNING_FALLBACK: Record<EngineWarningKind, string> = {
   configAdjusted: "The requested route or buffer size did not fit the device and was adjusted.",
   midiPortLost: "A MIDI port was unplugged. It reopens automatically when reconnected.",
   settingsProblem: "The audio settings file could not be read or written. Changes may not persist.",
+  audioRestarted: "Audio restarted after a device change.",
 };
 
 export function describeWarning(w: EngineWarning): Described {
@@ -97,6 +99,7 @@ const REJECT_TEXT: Record<RejectReason, string> = {
   invalidTransport: "Those transport settings are not valid.",
   loopTooLong: "That loop would be longer than the maximum loop length.",
   tooShort: "The take was too short to loop.",
+  trackLimit: "No more tracks can be added (or the last track cannot be removed).",
 };
 
 export function describeNotice(n: LooperNotice): string {

@@ -37,7 +37,8 @@ export function MissingDeviceHint({ direction }: { direction: "input" | "output"
   const config = useCurrentConfig();
   if (!list) return null;
   const saved = direction === "input" ? config.inputDevice : config.outputDevice;
-  const missing = missingSavedDevice(saved, direction === "input" ? list.inputs : list.outputs);
+  const savedName = direction === "input" ? config.inputDeviceName : config.outputDeviceName;
+  const missing = missingSavedDevice(saved, savedName, direction === "input" ? list.inputs : list.outputs);
   if (!missing) return null;
   return (
     <p className="inline-warning" role="status">

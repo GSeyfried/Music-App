@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { describe, expect, it } from "vitest";
 import App from "../App";
 import { createEngine } from "../engine/client";
-import { MockEngine, MOCK_MAX_TRACKS } from "../engine/mock";
+import { MockEngine } from "../engine/mock";
 
 async function started() {
   const mock = new MockEngine({ realtime: false });
@@ -56,23 +56,31 @@ describe("lifecycles: input, transport and playback are separate", () => {
 });
 
 describe("Add Track", () => {
-  it("adds tracks up to the engine ceiling and then says so", async () => {
-    await started();
-    const add = () => screen.getByRole("button", { name: "Add track" }) as HTMLButtonElement;
-    expect(screen.getByText(`2 of ${MOCK_MAX_TRACKS} tracks`)).toBeTruthy();
-    fireEvent.click(add());
+  it("adds tracks up to the engine's track capacity and then says so", async () => {
+    const mock = new MockEngine({ realtime: false, trackCapacity: 4 });
+    render(<App client={createEngine(mock)} />);
+    await waitFor(() => screen.getAllByRole("button", { name: /Start input/ }));
+    fireEvent.click(screen.getAllByRole("button", { name: /Start input/ })[0]);
+    const add = async () => (await screen.findByRole("button", { name: "Add track" })) as HTMLButtonElement;
+    expect(await screen.findByText("2 of 4 tracks")).toBeTruthy();
+    fireEvent.click(await add());
     await screen.findByRole("region", { name: "Track 3" });
-    for (let n = 4; n <= MOCK_MAX_TRACKS; n++) {
-      fireEvent.click(add());
-      await screen.findByRole("region", { name: `Track ${n}` });
-    }
-    await waitFor(() => expect(add().disabled).toBe(true));
-    expect(screen.getByText(/Engine limit reached: 8 tracks\. The goal is 10\+/)).toBeTruthy();
+    fireEvent.click(await add());
+    await screen.findByRole("region", { name: "Track 4" });
+    await waitFor(async () => expect((await add()).disabled).toBe(true));
+    expect(screen.getByText("Track limit reached: 4 tracks. The goal is 10+.")).toBeTruthy();
   });
 
-  it("is visible but honest when the engine does not report a ceiling", async () => {
+  it("removes a track from its quick actions", async () => {
+    await started();
+    fireEvent.contextMenu(screen.getByRole("region", { name: "Track 2" }), { clientX: 5, clientY: 5 });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Remove track/ }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Track 2" })).toBeNull());
+  });
+
+  it("is visible but honest when the engine does not report a capacity", async () => {
     const mock = new MockEngine({ realtime: false });
-    // Simulate today's native engine: no maxTracks in looper state.
+    // An engine build from before addTrack: no trackCapacity in looper state.
     const state = mock.looperState.bind(mock);
     mock.looperState = () => ({ ...state(), maxTracks: undefined });
     render(<App client={createEngine(mock)} />);
@@ -92,7 +100,7 @@ describe("quick actions and details", () => {
     const menu = await screen.findByRole("menu", { name: "Track 2 actions" });
     const items = [...menu.querySelectorAll('[role^="menuitem"]')].map((b) => b.textContent);
     expect(items[0]).toMatch(/^Record/);
-    expect(items[items.length - 1]).toMatch(/Clear track/); // destructive last
+    expect(items.slice(-2)).toEqual([expect.stringMatching(/Clear track/), expect.stringMatching(/Remove track/)]); // destructive last
     fireEvent.click(within(menu).getByRole("menuitemcheckbox", { name: /Mute/ }));
     expect(screen.queryByRole("menu")).toBeNull();
     await waitFor(() =>

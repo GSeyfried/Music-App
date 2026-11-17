@@ -271,7 +271,7 @@ function AddTrackCard({ view }: { view: LooperView }) {
   const st = addTrackState(view);
   return (
     <div className="add-track">
-      <Button variant="outline" icon="plus" disabled={!st.enabled || busy} onPress={() => void addTrack()}>
+      <Button variant="outline" icon="plus" disabled={!st.enabled || busy} onPress={addTrack}>
         {st.label}
       </Button>
       <p className="hint">{st.note}</p>

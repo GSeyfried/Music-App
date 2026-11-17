@@ -49,6 +49,9 @@ export interface EngineActions {
   dismissError(id: number): void;
   dismissWarning(kind: EngineWarningKind): void;
   dismissNotice(id: number): void;
+  dismissInfo(id: number): void;
+  /** iOS shows the system prompt; the answer arrives as an audioSession event. */
+  requestMicPermission(): Promise<void>;
 }
 
 interface EngineContextValue {
@@ -188,6 +191,11 @@ export function createActions(client: EngineClient, store: EngineStore): EngineA
     dismissError: (id) => store.dismissError(id),
     dismissWarning: (kind) => store.dismissWarning(kind),
     dismissNotice: (id) => store.dismissNotice(id),
+    dismissInfo: (id) => store.dismissInfo(id),
+    requestMicPermission: () =>
+      run(async () => {
+        store.set({ micPermission: await client.requestMicPermission() });
+      }),
   };
 }
 

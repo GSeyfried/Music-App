@@ -114,7 +114,7 @@ const view = (tracks: TrackSnapshot[], over: Partial<LooperView> = {}): LooperVi
   latencyFrames: 0,
   sampleRate: 48_000,
   freeLayers: 8,
-  maxTracks: null,
+  trackCapacity: null,
   ...over,
 });
 
@@ -316,18 +316,20 @@ describe("track command table", () => {
       "track.redo",
       "track.details",
       "track.clear",
+      "track.remove",
     ]);
     expect(a[0]).toMatchObject({ label: "Overdub", command: { type: "overdub", track: 0 } });
     expect(a.find((x) => x.id === "track.mute")).toMatchObject({ checked: true, command: { type: "setMute", track: 0, muted: false } });
     expect(a.find((x) => x.id === "track.redo")?.enabled).toBe(true);
     expect(a.find((x) => x.id === "track.clear")?.destructive).toBe(true);
+    expect(a.find((x) => x.id === "track.remove")).toMatchObject({ enabled: false, command: { type: "removeTrack", track: 0 } }); // only track
     expect(trackActions(v, 5)).toEqual([]);
   });
 
   it("add-track availability is honest about the ceiling", () => {
-    expect(addTrackState(view([track(), track()], { maxTracks: null }))).toMatchObject({ enabled: false });
-    expect(addTrackState(view([track(), track()], { maxTracks: 8 }))).toMatchObject({ enabled: true, note: "2 of 8 tracks" });
-    expect(addTrackState(view(Array.from({ length: 8 }, () => track()), { maxTracks: 8 })).note).toMatch(/goal is 10\+/);
-    expect(addTrackState(view(Array.from({ length: 12 }, () => track()), { maxTracks: 12 })).note).not.toMatch(/goal/);
+    expect(addTrackState(view([track(), track()], { trackCapacity: null }))).toMatchObject({ enabled: false });
+    expect(addTrackState(view([track(), track()], { trackCapacity: 16 }))).toMatchObject({ enabled: true, note: "2 of 16 tracks" });
+    expect(addTrackState(view(Array.from({ length: 8 }, () => track()), { trackCapacity: 8 })).note).toMatch(/goal is 10\+/);
+    expect(addTrackState(view(Array.from({ length: 16 }, () => track()), { trackCapacity: 16 })).note).toBe("Track limit reached: 16 tracks.");
   });
 });

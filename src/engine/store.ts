@@ -23,6 +23,9 @@ import {
   type EngineEvent,
   type EngineStatus,
   type EngineWarning,
+  type MicPermission,
+  type SessionEvent,
+  type SessionInfo,
   type LevelReading,
   type LooperNotice,
   type LooperState,
@@ -106,6 +109,28 @@ export interface ErrorEntry {
   error: EngineError;
 }
 
+export interface InfoToast {
+  id: number;
+  text: string;
+}
+
+export const AUDIO_RESTARTED_TOAST = "Audio restarted after a device change — your loops were kept";
+
+/** Text for session notifications worth telling someone about (null = stay quiet). */
+export function sessionEventText(e: SessionEvent): string | null {
+  switch (e.kind) {
+    case "interruptionBegan":
+      return "Audio paused by the system (another app or a call). Your loops are kept.";
+    case "interruptionEnded":
+      return e.shouldResume ? "Audio resumed." : "Audio interruption ended. Start input to continue.";
+    case "mediaServicesReset":
+      return "The system audio service restarted.";
+    case "routeChanged":
+    case "micPermission":
+      return null;
+  }
+}
+
 export interface NoticeEntry {
   id: number;
   notice: LooperNotice;
@@ -137,6 +162,11 @@ export interface EngineSnapshot {
   /** What is in effect and on disk (get_audio_settings); null until loaded. */
   audioSettings: AudioSettings | null;
   calibration: { running: boolean; outcome: CalibrationOutcome | null };
+  /** Calm, informational toasts (not warnings), e.g. "Audio restarted … loops were kept". */
+  infoToasts: InfoToast[];
+  micPermission: MicPermission | null;
+  /** iOS: what the audio session granted (null on macOS). */
+  sessionInfo: SessionInfo | null;
   /** Practice Lab (src/practice): latest status and recent take events, newest last. */
   practiceStatus: PracticeStatus | null;
   practiceTakes: PracticeTakeEvent[];
@@ -231,6 +261,9 @@ export class EngineStore {
       calibration: { running: false, outcome: null },
       practiceStatus: null,
       practiceTakes: [],
+      infoToasts: [],
+      micPermission: null,
+      sessionInfo: null,
     };
   }
 
@@ -303,6 +336,12 @@ export class EngineStore {
         this.applyStatus(event.payload);
         return;
       case "warning": {
+        // A device change that the engine rode through is good news, not a warning,
+        // but only say "loops were kept" when the engine says so.
+        if (event.payload.kind === "audioRestarted" && /loops were kept/i.test(event.payload.message)) {
+          this.pushInfo(AUDIO_RESTARTED_TOAST);
+          return;
+        }
         const others = this.snapshot.warnings.filter((w) => w.kind !== event.payload.kind);
         this.set({ warnings: [...others, event.payload] });
         return;
@@ -330,6 +369,16 @@ export class EngineStore {
       case "calibration":
         this.set({ calibration: { running: false, outcome: event.payload } });
         return;
+      case "audioSession": {
+        const e = event.payload;
+        if (e.kind === "micPermission") this.set({ micPermission: e.permission });
+        const text = sessionEventText(e);
+        if (text) this.pushInfo(text);
+        return;
+      }
+      case "audioSessionInfo":
+        this.set({ sessionInfo: event.payload });
+        return;
       case "practiceState":
         this.set({ practiceStatus: event.payload });
         return;
@@ -353,6 +402,7 @@ export class EngineStore {
   applyStatus(status: EngineStatus): void {
     const live = this.live;
     const patch: Partial<EngineSnapshot> = { status };
+    if (status.micPermission) patch.micPermission = status.micPermission;
     if (!status.capturing) {
       live.level = null;
       live.audioDiagnostics = null;
@@ -396,6 +446,15 @@ export class EngineStore {
 
   pushNotice(notice: LooperNotice): void {
     this.set({ notices: [...this.snapshot.notices, { id: this.nextId++, notice }].slice(-MAX_NOTICES) });
+  }
+
+  pushInfo(text: string): void {
+    const kept = this.snapshot.infoToasts.filter((t) => t.text !== text);
+    this.set({ infoToasts: [...kept, { id: this.nextId++, text }].slice(-MAX_NOTICES) });
+  }
+
+  dismissInfo(id: number): void {
+    this.set({ infoToasts: this.snapshot.infoToasts.filter((t) => t.id !== id) });
   }
 
   dismissNotice(id: number): void {

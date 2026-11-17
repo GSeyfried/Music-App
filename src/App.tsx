@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Alerts, EngineModeBanner, Toasts } from "./components/Alerts";
+import { Alerts, EngineModeBanner, MicPermissionBanner, Toasts } from "./components/Alerts";
 import { MidiIndicator } from "./components/HardwarePanels";
 import { InputCluster } from "./components/InputControls";
 import { SettingsSheet } from "./components/SettingsSheet";
@@ -77,6 +77,7 @@ function Shell() {
         </div>
       </header>
       <EngineModeBanner />
+      <MicPermissionBanner />
       <Alerts />
       <main>{workspace === "studio" ? <Studio /> : <PracticeLab />}</main>
       <Toasts />

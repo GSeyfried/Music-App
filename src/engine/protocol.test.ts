@@ -1,3 +1,4 @@
+import { AUDIO_RESTARTED_TOAST, EngineStore } from "./store";
 import { describe, expect, it } from "vitest";
 import { defaultTransport } from "../models/domain";
 import {
@@ -82,6 +83,17 @@ describe("engine events parse from the Rust JSON", () => {
     expect(parseEngineEvent(null)).toBeNull();
   });
 
+  it("treats audioRestarted as calm news only when loops were kept", () => {
+    const store = new EngineStore("mock");
+    store.applyEvent({ type: "warning", payload: { kind: "audioRestarted", message: "audio restarted after a device change; loops were kept" } });
+    expect(store.getSnapshot().infoToasts.map((t) => t.text)).toEqual([AUDIO_RESTARTED_TOAST]);
+    expect(store.getSnapshot().warnings).toEqual([]);
+    store.applyEvent({ type: "warning", payload: { kind: "audioRestarted", message: "audio restarted" } });
+    expect(store.getSnapshot().warnings.map((w) => w.kind)).toEqual(["audioRestarted"]);
+    store.applyEvent({ type: "audioSession", payload: { kind: "micPermission", permission: "denied" } });
+    expect(store.getSnapshot().micPermission).toBe("denied");
+  });
+
   it("knows every event tag the engine emits", () => {
     expect([...EVENT_TYPES].sort()).toEqual(
       [
@@ -97,6 +109,8 @@ describe("engine events parse from the Rust JSON", () => {
         "devicesChanged",
         "midiPorts",
         "midi",
+        "audioSession",
+        "audioSessionInfo",
         "audioDiagnostics",
         "calibration",
         ...PRACTICE_EVENT_TYPES,
@@ -139,11 +153,15 @@ describe("commands serialise to what Rust deserialises", () => {
       { type: "setSolo", track: 0, solo: true },
       { type: "redo", track: 1 },
       { type: "restart" },
+      { type: "addTrack" },
+      { type: "removeTrack", track: 3 },
     ];
     expect(cmds.map((c) => JSON.stringify(c))).toEqual([
       `{"type":"setSolo","track":0,"solo":true}`,
       `{"type":"redo","track":1}`,
       `{"type":"restart"}`,
+      `{"type":"addTrack"}`,
+      `{"type":"removeTrack","track":3}`,
     ]);
   });
 

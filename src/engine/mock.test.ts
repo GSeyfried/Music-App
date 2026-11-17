@@ -262,3 +262,28 @@ describe("MockEngine hardware-io round 2", () => {
     expect(diag?.type === "audioDiagnostics" && diag.payload.output?.bridge?.ratioPpm).toBe(3.2);
   });
 });
+
+describe("MockEngine tracks", () => {
+  it("adds tracks up to capacity and removes them, like the engine", async () => {
+    const mock = new MockEngine({ realtime: false, trackCapacity: 3 });
+    const engine = createEngine(mock);
+    const events: EngineEvent[] = [];
+    await engine.subscribe((e) => events.push(e));
+    const latest = () => [...events].reverse().find((e) => e.type === "looper")?.payload as LooperState;
+    await engine.startInput(null);
+    expect(latest().maxTracks).toBe(3);
+    await engine.looper({ type: "addTrack" });
+    expect(latest().tracks).toHaveLength(3);
+    await engine.looper({ type: "addTrack" });
+    expect(events.filter((e) => e.type === "looperNotice").pop()?.payload).toEqual({ kind: "rejected", reason: "trackLimit" });
+    await engine.looper({ type: "record", track: 2 });
+    await engine.looper({ type: "removeTrack", track: 2 });
+    expect(events.filter((e) => e.type === "looperNotice").pop()?.payload).toEqual({ kind: "rejected", reason: "trackBusy" });
+    await engine.looper({ type: "stopRecording", track: 2 }); // cancels the take (it never started)
+    await engine.looper({ type: "removeTrack", track: 0 });
+    await engine.looper({ type: "removeTrack", track: 0 });
+    expect(latest().tracks).toHaveLength(1);
+    await engine.looper({ type: "removeTrack", track: 0 });
+    expect(events.filter((e) => e.type === "looperNotice").pop()?.payload).toEqual({ kind: "rejected", reason: "trackLimit" });
+  });
+});

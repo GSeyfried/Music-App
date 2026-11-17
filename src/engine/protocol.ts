@@ -42,8 +42,12 @@ export interface MonitorConfig {
 export type MissingDevicePolicy = "fail" | "useDefault";
 
 export interface AudioConfig {
+  /** DeviceInfo.id (stable CPAL id) or a name; null = system default. Never shown to people. */
   inputDevice: string | null;
   outputDevice: string | null;
+  /** Filled in by the engine; used if the id is gone. Show these, not the ids. */
+  inputDeviceName?: string | null;
+  outputDeviceName?: string | null;
   missingDevice: MissingDevicePolicy;
   sampleRate: number | null;
   bufferSize: number | null;
@@ -56,6 +60,8 @@ export interface AudioConfig {
 export const DEFAULT_AUDIO_CONFIG: AudioConfig = {
   inputDevice: null,
   outputDevice: null,
+  inputDeviceName: null,
+  outputDeviceName: null,
   missingDevice: "fail",
   sampleRate: null,
   bufferSize: null,
@@ -105,7 +111,9 @@ export interface AudioSettings {
 }
 
 export interface CaptureInfo {
+  /** Stable id (same as DeviceInfo.id). Show `deviceName` instead. */
   deviceId: string;
+  deviceName?: string;
   sampleRate: number;
   /** All are metered; the route picks what the engine uses. */
   channels: number;
@@ -121,7 +129,9 @@ export interface CaptureInfo {
 }
 
 export interface OutputInfo {
+  /** Stable id (same as DeviceInfo.id). Show `deviceName` instead. */
   deviceId: string;
+  deviceName?: string;
   sampleRate: number;
   channels: number;
   sampleFormat: string;
@@ -228,6 +238,46 @@ export interface EngineStatus {
   analysis: boolean;
   /** What start_input will use (hardware-io). */
   audioConfig?: AudioConfig;
+  /** macOS reports "unknown" (a denial shows up as the silentInput warning). */
+  micPermission?: MicPermission;
+}
+
+export type MicPermission = "granted" | "denied" | "undetermined" | "unknown";
+
+export type RouteChangeReason =
+  | "unknown"
+  | "newDeviceAvailable"
+  | "oldDeviceUnavailable"
+  | "categoryChange"
+  | "override"
+  | "wakeFromSleep"
+  | "noSuitableRouteForCategory"
+  | "routeConfigurationChange";
+
+/** Platform audio-session notifications (iOS), and the answer to request_mic_permission. */
+export type SessionEvent =
+  | { kind: "interruptionBegan" }
+  | { kind: "interruptionEnded"; shouldResume: boolean }
+  | { kind: "routeChanged"; reason: RouteChangeReason }
+  | { kind: "mediaServicesReset" }
+  | { kind: "micPermission"; permission: MicPermission };
+
+export interface SessionPort {
+  uid: string;
+  name: string;
+  portType: string;
+}
+
+/** What the iOS audio session granted (sent on every start; never on macOS). */
+export interface SessionInfo {
+  sampleRate: number;
+  ioBufferFrames: number;
+  inputLatencyFrames: number;
+  outputLatencyFrames: number;
+  inputChannels: number;
+  maxInputChannels: number;
+  inputs: SessionPort[];
+  outputs: SessionPort[];
 }
 
 export const IDLE_STATUS: EngineStatus = {
@@ -290,7 +340,9 @@ export type EngineWarningKind =
   | "deviceFallback"
   | "configAdjusted"
   | "midiPortLost"
-  | "settingsProblem";
+  | "settingsProblem"
+  /** Streams rebuilt after a device/route/default-device change; loops were kept. */
+  | "audioRestarted";
 
 export interface EngineWarning {
   kind: EngineWarningKind;
@@ -504,6 +556,8 @@ export type EngineEvent =
   | { type: "midi"; payload: MidiBatch }
   | { type: "audioDiagnostics"; payload: AudioDiagnostics }
   | { type: "calibration"; payload: CalibrationOutcome }
+  | { type: "audioSession"; payload: SessionEvent }
+  | { type: "audioSessionInfo"; payload: SessionInfo }
   // Practice Lab (docs/projects/practice-lab/INTERFACE.md); consumed by src/practice.
   | PracticeEvent;
 
@@ -524,6 +578,8 @@ export const EVENT_TYPES: readonly EngineEventType[] = [
   "midi",
   "audioDiagnostics",
   "calibration",
+  "audioSession",
+  "audioSessionInfo",
   "practiceState",
   "practiceProgress",
   "practiceTake",
@@ -569,6 +625,8 @@ export interface EngineCommands extends PracticeCommands {
   save_audio_settings: { args: undefined; result: null };
   /** Warnings raised while loading settings at app start; call once after subscribing. */
   startup_warnings: { args: undefined; result: EngineWarning[] };
+  /** Current state; iOS shows the system prompt and answers with an `audioSession` event. */
+  request_mic_permission: { args: undefined; result: MicPermission };
   /** Result arrives as a `calibration` event ~2.5 s later. */
   start_latency_calibration: { args: { apply: boolean }; result: null };
 
