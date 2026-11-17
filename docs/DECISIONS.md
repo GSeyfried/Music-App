@@ -126,6 +126,38 @@ Revisit with a "record from next bar" option once looping on hardware is verifie
 frames. CPAL does not report reliable round-trip latency. Plan: a loopback
 calibration (play a click, detect it in the input) in Milestone 1B.
 
+## D-016 Analysis is its own crate and its own thread (Accepted, backend-dsp)
+
+`voiceloop-analysis` is pure DSP with no audio I/O, so it is testable with
+synthetic signals and reusable by Studio and Practice Lab. The engine feeds
+it from the input callback through a ring to a dedicated, non-realtime
+thread. Analysis can never block or starve audio: if it falls behind, its
+samples are dropped and counted. Alternative rejected: running it on the
+control thread (an unoptimised build would stall command handling).
+
+## D-017 Keep our YIN pitch estimator; compare before replacing (Accepted, backend-dsp)
+
+See `docs/projects/backend-dsp/DSP_ASSESSMENT.md`. Measured on a numerical
+model: within 0.5 cents on clean tones, no octave errors with a weak
+fundamental. GPL/AGPL libraries are excluded by D-007; neural estimators are
+too heavy for now. Revisit with pYIN or the `pitch-detection` crate if
+recorded voices show octave slips or poor voicing decisions.
+
+## D-018 Uncertain pitch is reported as no pitch (Accepted, backend-dsp)
+
+A frame carries a pitch only if it is loud enough, periodic enough
+(`clarity`), and inside the configured range. Otherwise `hz` is null and
+`unpitched` says why (`silence`, `aperiodic`, `outOfRange`). Nothing is
+interpolated across gaps. The UI must not hold the last value.
+
+## D-019 Redo holds pool buffers; latency applies to every take (Accepted, backend-dsp)
+
+Undone layers stay reserved so Redo is instant and allocation-free; a new
+take on the track, or an empty pool, releases them. Input latency
+compensation now applies to free first takes too (the take stays open for
+`latency` frames after Stop to collect its tail), so the base loop and its
+overdubs share one alignment.
+
 ## Open tradeoffs
 
 - **Duplex alignment:** separate CPAL input and output streams have independent
