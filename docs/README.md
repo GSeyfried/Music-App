@@ -2,6 +2,7 @@
 
 | Path | Contents |
 | --- | --- |
+| `KNOWLEDGE_BASE.md` | **Start here.** Reference projects, candidate libraries, our crates and modules, third-party Rust crates |
 | `MAC_SETUP.md` | Building and running on macOS (primary target), mic permissions |
 | `ARCHITECTURE.md` | Components, threading model, realtime rules, engine API |
 | `DECISIONS.md` | Architectural decisions and open tradeoffs |
