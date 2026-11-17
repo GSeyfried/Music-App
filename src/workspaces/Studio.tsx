@@ -1,21 +1,27 @@
-import { useState } from "react";
-import { defaultTransport, type TransportState } from "../models/domain";
-import { InputPanel } from "../components/InputPanel";
-import { LooperTracks } from "../components/LooperTracks";
-import { TransportControls } from "../components/TransportControls";
+// Studio: the live looper with a compact tuner and pitch curve alongside.
+
+import { useEngineState } from "../engine/EngineContext";
+import { StartCard } from "../components/InputControls";
+import { PitchCurve } from "../components/PitchCurve";
+import { TrackGrid } from "../components/TrackCard";
+import { TransportBar } from "../components/TransportBar";
+import { Tuner } from "../components/Tuner";
 
 export function Studio() {
-  // Local copy for editing before audio starts; the engine's echoed transport wins once running.
-  const [transport, setTransport] = useState<TransportState>(defaultTransport);
-
+  const capturing = useEngineState((s) => s.status.capturing);
+  if (!capturing) {
+    return <StartCard purpose="Choose a microphone or interface. The looper, tuner and pitch curve start with it." />;
+  }
   return (
-    <div className="workspace studio">
-      <div className="col side">
-        <InputPanel />
-      </div>
-      <div className="col main">
-        <TransportControls transport={transport} onChange={setTransport} />
-        <LooperTracks />
+    <div className="studio">
+      <TransportBar />
+      <div className="studio-body">
+        <TrackGrid />
+        <aside className="studio-side card" aria-label="Live pitch">
+          <h2 className="card-title">Live pitch</h2>
+          <Tuner size="compact" />
+          <PitchCurve windowSeconds={5} span={14} height={180} />
+        </aside>
       </div>
     </div>
   );

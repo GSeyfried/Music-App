@@ -1,168 +1,160 @@
-// One engine state shared by Studio and Practice Lab.
+// One engine shared by Studio and Practice Lab: the store (state), the client
+// (commands), and the actions that tie them together.
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import type { AudioDevice } from "../models/domain";
+import { createContext, useContext, useEffect, useMemo, useSyncExternalStore, type ReactNode } from "react";
+import type { TransportState } from "../models/domain";
+import { engine as defaultEngine } from "./bridge";
+import type { EngineClient } from "./client";
 import {
-  engine,
-  nativeAvailable,
-  type EngineError,
-  type EngineStatus,
-  type EngineWarning,
-  type LevelReading,
+  toEngineError,
+  type AnalysisConfig,
+  type EngineWarningKind,
+  type InputRoute,
   type LooperCommand,
-  type LooperNotice,
-  type LooperState,
-} from "./bridge";
+} from "./protocol";
+import { EngineStore, mergeConfig, type EngineSnapshot, type LiveData } from "./store";
 
-interface EngineState {
-  native: boolean;
-  devices: AudioDevice[];
-  selectedDeviceId: string | null;
-  status: EngineStatus;
-  level: LevelReading | null;
-  looper: LooperState | null;
-  notice: LooperNotice | null;
-  error: EngineError | null;
-  warning: EngineWarning | null;
-  busy: boolean;
-  refreshDevices: () => Promise<void>;
-  selectDevice: (id: string | null) => void;
-  startInput: () => Promise<void>;
-  stopInput: () => Promise<void>;
+export interface EngineActions {
+  refreshDevices(): Promise<void>;
+  selectDevice(id: string | null): void;
+  startInput(): Promise<void>;
+  stopInput(): Promise<void>;
   /** Fire-and-forget looper command; results arrive as looper state / notices. */
-  sendLooper: (command: LooperCommand) => void;
-  clearError: () => void;
-  clearNotice: () => void;
+  sendLooper(command: LooperCommand): void;
+  /** Merge a change into the current transport and send it. */
+  patchTransport(patch: Partial<TransportState>): void;
+  /** Merge into the last applied analysis config and send the result. */
+  setAnalysisConfig(patch: AnalysisConfig): Promise<void>;
+  /** Choose which device input channel(s) the engine records (live, no restart). */
+  setInputRoute(route: InputRoute): Promise<void>;
+  dismissError(id: number): void;
+  dismissWarning(kind: EngineWarningKind): void;
+  dismissNotice(id: number): void;
 }
 
-const idle: EngineStatus = { capturing: false, monitoring: false, capture: null, output: null, looper: false };
-const EngineCtx = createContext<EngineState | null>(null);
+interface EngineContextValue {
+  store: EngineStore;
+  actions: EngineActions;
+}
 
-export function EngineProvider({ children }: { children: ReactNode }) {
-  const native = nativeAvailable();
-  const [devices, setDevices] = useState<AudioDevice[]>([]);
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
-  const [status, setStatus] = useState<EngineStatus>(idle);
-  const [level, setLevel] = useState<LevelReading | null>(null);
-  const [looper, setLooper] = useState<LooperState | null>(null);
-  const [notice, setNotice] = useState<LooperNotice | null>(null);
-  const [error, setError] = useState<EngineError | null>(null);
-  const [warning, setWarning] = useState<EngineWarning | null>(null);
-  const [busy, setBusy] = useState(false);
+const EngineCtx = createContext<EngineContextValue | null>(null);
 
-  const run = useCallback(async (op: () => Promise<void>) => {
-    setBusy(true);
+export function createActions(client: EngineClient, store: EngineStore): EngineActions {
+  const run = async (op: () => Promise<void>) => {
+    store.set({ busy: true });
     try {
       await op();
     } catch (e) {
-      setError(e as EngineError);
+      store.pushError(toEngineError(e));
     } finally {
-      setBusy(false);
+      store.set({ busy: false });
     }
-  }, []);
-
-  const refreshDevices = useCallback(
-    () =>
+  };
+  const sendLooper = (command: LooperCommand) => {
+    client.looper(command).catch((e) => store.pushError(toEngineError(e)));
+  };
+  return {
+    refreshDevices: () =>
       run(async () => {
-        const list = await engine.listInputDevices();
-        setDevices(list);
-        setSelectedDeviceId((cur) =>
-          cur && list.some((d) => d.id === cur) ? cur : (list.find((d) => d.isDefault)?.id ?? list[0]?.id ?? null),
-        );
+        const devices = await client.listInputDevices();
+        const cur = store.getSnapshot().selectedDeviceId;
+        const selectedDeviceId =
+          cur && devices.some((d) => d.id === cur)
+            ? cur
+            : (devices.find((d) => d.isDefault)?.id ?? devices[0]?.id ?? null);
+        store.set({ devices, selectedDeviceId });
       }),
-    [run],
-  );
+    selectDevice: (id) => store.set({ selectedDeviceId: id }),
+    startInput: () =>
+      run(async () => {
+        store.clearErrors();
+        store.applyStatus(await client.startInput(store.getSnapshot().selectedDeviceId));
+      }),
+    stopInput: () => run(async () => store.applyStatus(await client.stopInput())),
+    sendLooper,
+    patchTransport: (patch) => {
+      const current = store.getSnapshot().looper?.transport;
+      if (!current) return;
+      sendLooper({ type: "setTransport", transport: { ...current, ...patch } });
+    },
+    setAnalysisConfig: (patch) =>
+      run(async () => {
+        const next = mergeConfig(store.getSnapshot().analysisConfig, patch);
+        await client.setAnalysisConfig(next);
+        store.set({ analysisConfig: next });
+      }),
+    setInputRoute: (route) => run(async () => store.applyStatus(await client.setInputRoute(route))),
+    dismissError: (id) => store.dismissError(id),
+    dismissWarning: (kind) => store.dismissWarning(kind),
+    dismissNotice: (id) => store.dismissNotice(id),
+  };
+}
+
+interface ProviderProps {
+  children: ReactNode;
+  /** Tests inject a client (usually over a MockEngine) and optionally a store. */
+  client?: EngineClient;
+  store?: EngineStore;
+}
+
+export function EngineProvider({ children, client = defaultEngine, store: givenStore }: ProviderProps) {
+  const value = useMemo<EngineContextValue>(() => {
+    const store = givenStore ?? new EngineStore(client.kind);
+    return { store, actions: createActions(client, store) };
+  }, [client, givenStore]);
 
   useEffect(() => {
-    if (!native) {
-      setError({
-        kind: "bridgeUnavailable",
-        message:
-          "Running in a browser preview — the native audio engine is only available in the desktop app (`npm run app:dev`).",
-      });
-      return;
-    }
+    const { store, actions } = value;
     let unlisten: (() => void) | undefined;
     let disposed = false;
-    engine
-      .subscribe((ev) => {
-        switch (ev.type) {
-          case "level":
-            setLevel(ev.payload);
-            break;
-          case "looper":
-            setLooper(ev.payload);
-            break;
-          case "looperNotice":
-            setNotice(ev.payload);
-            break;
-          case "status":
-            setStatus(ev.payload);
-            if (!ev.payload.capturing) {
-              setLevel(null);
-              setWarning(null);
-            }
-            if (!ev.payload.looper) setLooper(null);
-            break;
-          case "warning":
-            setWarning(ev.payload);
-            break;
-          case "error":
-            setError(ev.payload);
-            break;
-        }
-      })
-      .then((fn) => (disposed ? fn() : (unlisten = fn)));
-    engine.status().then(setStatus).catch(() => {});
-    void refreshDevices();
+    client
+      .subscribe((event) => store.applyEvent(event))
+      .then((fn) => (disposed ? fn() : (unlisten = fn)))
+      .catch((e) => store.pushError(toEngineError(e)));
+    // With no engine at all the shell shows a persistent "no native engine" state instead.
+    if (client.kind !== "unavailable") {
+      client
+        .status()
+        .then((s) => store.applyStatus(s))
+        .catch(() => {});
+      const autostart =
+        client.kind === "mock" &&
+        typeof window !== "undefined" &&
+        new URLSearchParams(window.location.search).get("autostart") === "1";
+      // ?autostart=1 (simulator only): start input straight away, for demos and screenshots.
+      void actions.refreshDevices().then(() => (autostart ? actions.startInput() : undefined));
+    }
     return () => {
       disposed = true;
       unlisten?.();
     };
-  }, [native, refreshDevices]);
-
-  const sendLooper = useCallback((command: LooperCommand) => {
-    engine.looper(command).catch((e) => setError(e as EngineError));
-  }, []);
-
-  const value = useMemo<EngineState>(
-    () => ({
-      native,
-      devices,
-      selectedDeviceId,
-      status,
-      level,
-      looper,
-      notice,
-      error,
-      warning,
-      busy,
-      refreshDevices,
-      selectDevice: setSelectedDeviceId,
-      startInput: () =>
-        run(async () => {
-          setError(null);
-          setWarning(null);
-          setStatus(await engine.startInput(selectedDeviceId));
-        }),
-      stopInput: () =>
-        run(async () => {
-          setStatus(await engine.stopInput());
-          setLevel(null);
-          setLooper(null);
-        }),
-      sendLooper,
-      clearError: () => setError(null),
-      clearNotice: () => setNotice(null),
-    }),
-    [native, devices, selectedDeviceId, status, level, looper, notice, error, warning, busy, refreshDevices, run, sendLooper],
-  );
+  }, [client, value]);
 
   return <EngineCtx.Provider value={value}>{children}</EngineCtx.Provider>;
 }
 
-export function useEngine(): EngineState {
+function useCtx(): EngineContextValue {
   const ctx = useContext(EngineCtx);
-  if (!ctx) throw new Error("useEngine must be used inside <EngineProvider>");
+  if (!ctx) throw new Error("engine hooks must be used inside <EngineProvider>");
   return ctx;
+}
+
+/** Subscribe to one slice of the slow snapshot. Return existing references, not new objects. */
+export function useEngineState<T>(selector: (s: EngineSnapshot) => T): T {
+  const { store } = useCtx();
+  return useSyncExternalStore(store.subscribe, () => selector(store.getSnapshot()));
+}
+
+export function useEngineActions(): EngineActions {
+  return useCtx().actions;
+}
+
+/** High-rate data. Read it inside a useFrame callback; it does not trigger renders. */
+export function useLive(): LiveData {
+  return useCtx().store.live;
+}
+
+/** The store itself, for event handlers that need the current state at call time. */
+export function useEngineStore(): EngineStore {
+  return useCtx().store;
 }

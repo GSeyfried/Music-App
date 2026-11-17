@@ -17,7 +17,9 @@
     "refs:fetch": "node scripts/reference-packages.mjs fetch",
     "refs:lock": "node scripts/reference-packages.mjs lock",
     "refs:verify": "node scripts/reference-packages.mjs verify",
-    "refs:status": "node scripts/reference-packages.mjs status"
+    "refs:status": "node scripts/reference-packages.mjs status",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.5",
@@ -26,10 +28,14 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.5",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^4.7.0",
+    "jsdom": "^26.1.0",
     "typescript": "~5.8",
-    "vite": "^6.4.6"
+    "vite": "^6.4.6",
+    "vitest": "^3.2.7"
   }
 }

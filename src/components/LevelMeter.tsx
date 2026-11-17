@@ -1,32 +1,51 @@
-import type { LevelReading } from "../engine/bridge";
+// Input level meter. Reads the live level in an animation frame and writes
+// straight to the DOM, so 30 Hz readings never re-render React.
+
+import { useRef } from "react";
+import { useEngineState, useLive } from "../engine/EngineContext";
+import { formatDb } from "../lib/format";
+import { setText, useFrame } from "../lib/useFrame";
 
 const FLOOR_DB = -60;
+const STALE_MS = 400;
+const PEAK_HOLD_MS = 1200;
 
-/** Map dBFS to 0..1 on a -60..0 dB scale. */
-const toUnit = (db: number) => Math.min(1, Math.max(0, (db - FLOOR_DB) / -FLOOR_DB));
+export const dbToFraction = (db: number) => Math.min(1, Math.max(0, (db - FLOOR_DB) / -FLOOR_DB));
 
-export function LevelMeter({ level, active }: { level: LevelReading | null; active: boolean }) {
-  const rms = level ? toUnit(level.rmsDb) : 0;
-  const peak = level ? toUnit(level.peakDb) : 0;
-  const clipping = (level?.peak ?? 0) >= 0.99;
+export function LevelMeter({ compact = false, label = "Input level" }: { compact?: boolean; label?: string }) {
+  const live = useLive();
+  const capturing = useEngineState((s) => s.status.capturing);
+  const fill = useRef<HTMLDivElement>(null);
+  const peak = useRef<HTMLDivElement>(null);
+  const text = useRef<HTMLSpanElement>(null);
+  const hold = useRef({ db: -120, at: 0 });
+  const shown = useRef(0);
+
+  useFrame((now) => {
+    const level = live.level && now - live.levelAt < STALE_MS ? live.level : null;
+    const target = level ? dbToFraction(level.rmsDb) : 0;
+    // Fast attack, gentle release.
+    shown.current = target > shown.current ? target : shown.current + (target - shown.current) * 0.25;
+    const peakDb = level?.peakDb ?? -120;
+    if (peakDb >= hold.current.db || now - hold.current.at > PEAK_HOLD_MS) hold.current = { db: peakDb, at: now };
+    if (fill.current) {
+      fill.current.style.transform = `scaleX(${shown.current.toFixed(3)})`;
+      fill.current.dataset.hot = peakDb > -3 ? "clip" : peakDb > -12 ? "hot" : "ok";
+    }
+    if (peak.current) peak.current.style.left = `${(dbToFraction(hold.current.db) * 100).toFixed(1)}%`;
+    setText(text.current, level ? formatDb(level.peakDb) : "—");
+  });
 
   return (
-    <div className={`meter ${active ? "" : "inactive"}`}>
-      <div
-        className="meter-track"
-        role="meter"
-        aria-label="Input level"
-        aria-valuemin={FLOOR_DB}
-        aria-valuemax={0}
-        aria-valuenow={level ? Math.round(level.rmsDb) : FLOOR_DB}
-      >
-        <div className="meter-fill" style={{ transform: `scaleX(${rms})` }} />
-        <div className={`meter-peak ${clipping ? "clip" : ""}`} style={{ left: `${peak * 100}%` }} />
+    <div className={compact ? "meter meter-compact" : "meter"} data-active={capturing}>
+      {!compact && <span className="meter-label">{label}</span>}
+      <div className="meter-track" role="img" aria-label={capturing ? label : `${label}: input off`}>
+        <div className="meter-fill" ref={fill} />
+        <div className="meter-peak" ref={peak} />
       </div>
-      <div className="meter-readout">
-        <span>RMS {level ? `${level.rmsDb.toFixed(1)} dB` : "—"}</span>
-        <span>Peak {level ? `${level.peakDb.toFixed(1)} dB` : "—"}</span>
-      </div>
+      <span className="meter-db num" ref={text} aria-hidden="true">
+        —
+      </span>
     </div>
   );
 }
