@@ -275,7 +275,7 @@ mod tests {
     fn count_in_frames_round_once() {
         let mut t = at(113.0, 4, 4, 44_100);
         t.metronome.count_in_bars = 2;
-        let exact = 2.0 * 4.0 * 44_100.0 * 60.0 / 113.0;
+        let exact: f64 = 2.0 * 4.0 * 44_100.0 * 60.0 / 113.0;
         assert_eq!(t.count_in_frames(), exact.round() as u64);
     }
 
