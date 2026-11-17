@@ -12,7 +12,7 @@ tight for separate worktrees). Read `AGENTS.md` first, then follow these rules.
 - Disk has ~15 GB free. Do not create git worktrees or extra `target` dirs. Do
   not run `tauri build` / release builds. `cargo build -p voiceloop` (debug) is fine.
 - Full Xcode is not installed (Command Line Tools only).
-- No `codex` CLI is installed; Claude agents only.
+- Codex CLI: `$HOME/.nvm/versions/node/v22.18.0/bin/codex` (used by the lead for separate tasks).
 
 ## Ownership
 

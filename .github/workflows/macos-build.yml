@@ -1,0 +1,104 @@
+name: VoiceLoop CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'dev/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust quality
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Select repository Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-quality
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint Rust workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Workspace tests use synthetic input and must not open audio devices.
+      - name: Test Rust workspace without audio hardware
+        run: cargo test --workspace
+
+  frontend:
+    name: Frontend quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Type-check frontend
+        run: npm run typecheck
+
+      - name: Test frontend when a test script exists
+        run: npm test --if-present
+
+      - name: Build frontend
+        run: npm run build
+
+  tauri:
+    name: Tauri compile
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Select repository Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tauri-compile
+
+      - name: Compile Tauri shell
+        run: cargo build -p voiceloop
+
+  reference-manifest:
+    name: Reference manifest JSON
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate reference manifest JSON
+        run: node -e "JSON.parse(require('fs').readFileSync('reference-packages/manifest.json', 'utf8'))"
