@@ -1,0 +1,16 @@
+[package]
+name = "voiceloop-analysis"
+description = "Pitch, note, onset, rhythm, and melody analysis for VoiceLoop. Pure Rust, no audio I/O, no Tauri."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[[example]]
+name = "bench"

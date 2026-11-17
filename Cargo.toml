@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/voiceloop-engine", "src-tauri"]
+members = ["crates/voiceloop-analysis", "crates/voiceloop-engine", "src-tauri"]
 
 [workspace.package]
 edition = "2021"

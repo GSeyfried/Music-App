@@ -3977,6 +3977,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "voiceloop-analysis"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "voiceloop-engine"
 version = "0.1.0"
 dependencies = [
