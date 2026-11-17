@@ -1,0 +1,21 @@
+# Manifest used to compile-check ios_session.rs (copy both into a scratch crate
+# outside the repo as Cargo.toml + src/lib.rs, then:
+#   cargo check --target aarch64-apple-ios && cargo clippy --target aarch64-apple-ios
+# Not a workspace member; never built by the repo.)
+[package]
+name = "iosprobe"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+midir = "0.11.1"                                      # probe: compiles on iOS; 0.10 conflicts with cpal 0.18 (alsa-sys links)
+hound = "3"
+cpal18 = { package = "cpal", version = "=0.18.2" }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSError"] }
+objc2-avf-audio = { version = "0.3", features = ["AVAudioSession", "AVAudioSessionTypes", "AVAudioSessionRoute", "AVAudioApplication", "block2"] }
+
+[workspace]
