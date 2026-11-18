@@ -100,34 +100,86 @@
 }
 
 .pitch-catcher-score { margin-left: auto; color: var(--text-dim); }
-.pitch-catcher-choices {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: var(--s-3);
+.pitch-catcher-arena {
+  position: relative;
   width: 100%;
+  height: clamp(300px, 42vh, 430px);
   margin: var(--s-5) 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: linear-gradient(180deg, var(--surface-3), var(--surface));
+}
+
+.pitch-catcher-sky {
+  position: absolute;
+  top: var(--s-3);
+  left: 50%;
+  transform: translateX(-50%);
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pitch-catcher-catch-line {
+  position: absolute;
+  right: var(--s-4);
+  bottom: 72px;
+  left: var(--s-4);
+  border-top: 2px dashed var(--accent);
+  opacity: 0.65;
 }
 
 .pitch-catcher-choice {
+  position: absolute;
+  top: -104px;
+  left: var(--catcher-left);
   display: flex;
   align-items: center;
   justify-content: center;
   gap: var(--s-3);
-  min-height: 110px;
-  border: 2px solid var(--border);
-  border-radius: var(--r-lg);
+  width: clamp(86px, 18%, 150px);
+  min-height: 92px;
+  transform: translateX(-50%);
+  border: 3px solid var(--catcher-color);
+  border-radius: 50%;
   color: var(--text);
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--catcher-color) 32%, var(--surface-2));
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--catcher-color) 22%, transparent);
   cursor: pointer;
+  animation: pitch-catcher-fall var(--catcher-fall) linear var(--catcher-delay) forwards;
 }
 
 .pitch-catcher-choice strong { font-size: 1.8rem; }
-.pitch-catcher-choice:hover:not(:disabled) { border-color: var(--accent); }
+.pitch-catcher-choice:hover:not(:disabled) { box-shadow: 0 0 0 5px color-mix(in srgb, var(--catcher-color) 35%, transparent); }
 .pitch-catcher-choice:focus-visible { outline: none; box-shadow: var(--focus); }
-.pitch-catcher-choice.is-answer { border-color: var(--good); background: color-mix(in srgb, var(--good) 12%, var(--surface-2)); }
-.pitch-catcher-choice.is-missed { border-color: var(--danger); }
+.pitch-catcher-arena.is-caught .pitch-catcher-choice { animation-play-state: paused; opacity: 0.65; }
+.pitch-catcher-arena.is-caught .pitch-catcher-choice.is-answer { opacity: 1; box-shadow: 0 0 0 6px color-mix(in srgb, var(--good) 40%, transparent); }
+.pitch-catcher-arena.is-caught .pitch-catcher-choice.is-missed { opacity: 1; box-shadow: 0 0 0 6px color-mix(in srgb, var(--danger) 40%, transparent); }
 .pitch-catcher-prompt .is-correct { color: var(--good); font-weight: 700; }
 .pitch-catcher-prompt .is-wrong { color: var(--danger); font-weight: 700; }
+
+.pitch-catcher-reveal {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: var(--s-5);
+  margin: calc(-1 * var(--s-3)) 0 var(--s-4);
+  color: var(--text-dim);
+}
+
+.pitch-catcher-reveal span { display: flex; align-items: center; gap: var(--s-2); }
+.pitch-catcher-reveal i { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--surface); box-shadow: 0 0 0 1px var(--border-strong); }
+
+@keyframes pitch-catcher-fall {
+  from { top: -104px; }
+  to { top: calc(100% - 120px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pitch-catcher-choice { animation-duration: 1ms; animation-delay: 0ms; }
+}
 
 /* ---- Range Finder ---------------------------------------------------------- */
 

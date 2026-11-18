@@ -184,18 +184,30 @@ export interface ChallengeAdvance {
   difficulty: GrooveDifficulty;
   bpm: number;
   advanced: boolean;
+  change: "harder" | "easier" | "same";
 }
 
-/** Successful rounds climb difficulty; continued Hard success raises tempo. */
+/** Strong rounds get harder, failed rounds get easier, and the middle band holds steady. */
 export function advanceChallenge(
   difficulty: GrooveDifficulty,
   bpm: number,
   score: number,
   enabled: boolean,
+  failureThreshold = 55,
+  successThreshold = 80,
 ): ChallengeAdvance {
-  if (!enabled || score < 80) return { difficulty, bpm, advanced: false };
-  if (difficulty === "easy") return { difficulty: "medium", bpm, advanced: true };
-  if (difficulty === "medium") return { difficulty: "hard", bpm, advanced: true };
-  const faster = Math.min(180, bpm + 6);
-  return { difficulty, bpm: faster, advanced: faster !== bpm };
+  if (!enabled) return { difficulty, bpm, advanced: false, change: "same" };
+  if (score >= successThreshold) {
+    if (difficulty === "easy") return { difficulty: "medium", bpm, advanced: true, change: "harder" };
+    if (difficulty === "medium") return { difficulty: "hard", bpm, advanced: true, change: "harder" };
+    const faster = Math.min(180, bpm + 6);
+    return { difficulty, bpm: faster, advanced: faster !== bpm, change: faster === bpm ? "same" : "harder" };
+  }
+  if (score < failureThreshold) {
+    if (difficulty === "hard") return { difficulty: "medium", bpm, advanced: true, change: "easier" };
+    if (difficulty === "medium") return { difficulty: "easy", bpm, advanced: true, change: "easier" };
+    const slower = Math.max(50, bpm - 6);
+    return { difficulty, bpm: slower, advanced: slower !== bpm, change: slower === bpm ? "same" : "easier" };
+  }
+  return { difficulty, bpm, advanced: false, change: "same" };
 }

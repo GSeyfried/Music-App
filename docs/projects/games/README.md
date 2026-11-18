@@ -3,9 +3,10 @@
 Rhythm-game direction and the implemented first slice live in [GROOVE](groove.md).
 
 Pitch Catcher is an implemented no-microphone ear-training game: hear one
-pitch, then choose its matching named note from two, three, or four choices.
-It has no answer timer, supports 1–4 keyboard choices and replay, and can add a
-choice automatically after three correct catches.
+pitch, then catch its matching colored note while two, three, or four choices
+fall from the sky. The notes wait at the catch line instead of failing a slow
+answer. It supports 1–4 keyboard choices and replay, reveals both the caught
+and correct pitch colors, and can add a choice after three correct catches.
 
 Status: Games tab built (merged 1d34530). Pitch Glider and the Range Finder
 were tested with the simulated engine only; the user is now playing them on

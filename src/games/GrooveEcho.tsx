@@ -39,6 +39,7 @@ export function GrooveEcho() {
   const inputMode = useAppSetting("groove.inputMode");
   const midiLowNote = useAppSetting("groove.midiLowNote");
   const midiHighNote = useAppSetting("groove.midiHighNote");
+  const continuous = useAppSetting("groove.continuous");
   const bestScores = useAppSetting("groove.bestScores");
   const [phase, setPhase] = useState<EchoPhase>("ready");
   const [pattern, setPattern] = useState<RhythmPattern | null>(null);
@@ -56,6 +57,7 @@ export function GrooveEcho() {
   const timers = useRef<number[]>([]);
   const lastOnsetFrame = useRef<number | null>(null);
   const lastMidiTotal = useRef(0);
+  const startEchoRef = useRef<() => void>(() => undefined);
   phaseRef.current = phase;
   modeRef.current = mode;
 
@@ -151,16 +153,29 @@ export function GrooveEcho() {
     const beat = scored.score > bests[current.difficulty];
     setNewBest(beat);
     if (beat) setAppSetting("groove.bestScores", { ...bests, [current.difficulty]: scored.score });
-    const next = advanceChallenge(current.difficulty, current.bpm, scored.score, getAppSetting("groove.autoAdvance"));
+    const next = advanceChallenge(
+      current.difficulty,
+      current.bpm,
+      scored.score,
+      getAppSetting("groove.autoAdvance"),
+      getAppSetting("groove.failureThreshold"),
+      getAppSetting("groove.successThreshold"),
+    );
     if (next.advanced) {
       setAppSetting("groove.difficulty", next.difficulty);
       setAppSetting("groove.bpm", next.bpm);
-      setAdvanceMessage(
-        next.difficulty !== current.difficulty
-          ? `Next round: ${next.difficulty[0].toUpperCase()}${next.difficulty.slice(1)}`
-          : `Next round: Hard at ${next.bpm} BPM`,
-      );
-    } else setAdvanceMessage(null);
+    }
+    const level = `${next.difficulty[0].toUpperCase()}${next.difficulty.slice(1)} at ${next.bpm} BPM`;
+    setAdvanceMessage(
+      next.change === "harder"
+        ? `Strong round — harder next: ${level}`
+        : next.change === "easier"
+          ? `Reset and recover — easier next: ${level}`
+          : `Steady round — staying at ${level}`,
+    );
+    if (getAppSetting("groove.continuous")) {
+      timers.current.push(window.setTimeout(() => startEchoRef.current(), getAppSetting("groove.nextRoundDelayMs")));
+    }
   };
 
   const startEcho = () => {
@@ -189,6 +204,7 @@ export function GrooveEcho() {
     timers.current.push(window.setTimeout(() => setPhase("remember"), Math.max(0, afterPattern)));
     timers.current.push(window.setTimeout(() => setPhase("play"), Math.max(0, roundSchedule.playerStartMs - performance.now())));
   };
+  startEchoRef.current = startEcho;
 
   const startFree = () => {
     clearRound();
@@ -213,7 +229,7 @@ export function GrooveEcho() {
           <h2 className="card-title">{title}</h2>
           <p className="hint">
             {mode === "echo"
-              ? "Hear a phrase, then answer at any speed. The game fits your tempo and gets harder after strong rounds."
+              ? "Hear a phrase, then answer at any speed. Strong rounds get harder, failed rounds get easier, and steady rounds stay put."
               : "Play freely and see every accepted low/high drum input."}
           </p>
         </div>
@@ -260,7 +276,7 @@ export function GrooveEcho() {
               {advanceMessage && <p className="groove-advance">{advanceMessage}</p>}
             </div>
             <ResultTimeline pattern={pattern} result={result} />
-            <Button size="lg" icon="restart" onPress={startEcho}>New phrase</Button>
+            <Button size="lg" icon="restart" onPress={startEcho}>{continuous ? "Next now" : "New phrase"}</Button>
           </div>
         )}
       </div>
@@ -294,6 +310,7 @@ export function GrooveEcho() {
           <Setting id="groove.inputMode" />
           {mode === "echo" && <Setting id="groove.bpm" />}
           {mode === "echo" && <Setting id="groove.autoAdvance" />}
+          {mode === "echo" && <Setting id="groove.continuous" />}
           {mode === "echo" && <Setting id="groove.timingToleranceMs" />}
           {inputMode === "microphone" && <Setting id="groove.micMinLevelDb" />}
           {inputMode === "microphone" && <Setting id="groove.micMinRiseDb" />}

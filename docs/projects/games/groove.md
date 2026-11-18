@@ -19,6 +19,10 @@ future beat. After the player finishes, results show matched, missed and extra
 hits, tempo-fitted timing error, answer tempo, drum-choice accuracy where
 applicable, a post-performance timeline, and a saved best score per difficulty.
 Scores of 80+ automatically advance difficulty; Hard success raises tempo.
+Scores below 55 make the next round easier (or slow Easy by 6 BPM), while the
+middle band keeps the same challenge. Echo shows the result briefly and then
+starts the next phrase automatically, continuing until the player leaves or
+turns off Keep going.
 
 The mode dropdown also includes **Free drums**, an unscored input visualizer for
 testing pads, F/J, a microphone, or external MIDI before starting Echo.

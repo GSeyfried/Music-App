@@ -16,7 +16,7 @@ type ToolId = "glider" | "catcher" | "groove" | "range";
 
 const TOOLS: { id: ToolId; title: string; blurb: string }[] = [
   { id: "glider", title: "Pitch Glider", blurb: "Steer a glider with your voice through openings in drifting walls." },
-  { id: "catcher", title: "Pitch Catcher", blurb: "Hear one pitch and catch the matching note from two, three, or four choices." },
+  { id: "catcher", title: "Pitch Catcher", blurb: "Hear one pitch and catch its colored note as two, three, or four choices fall." },
   { id: "groove", title: "GROOVE · Echo", blurb: "Hear a drum phrase, remember it, and answer on pads or acoustic drums." },
   { id: "range", title: "Range Finder", blurb: "Find your lowest and highest comfortable notes." },
 ];

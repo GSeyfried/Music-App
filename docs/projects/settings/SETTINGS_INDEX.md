@@ -125,6 +125,7 @@ tuning; only the first few are likely user-facing.
 | `pitchCatcher.choiceCount` | Note choices | Number of possible notes shown in Pitch Catcher. | 2 | app | Pitch Catcher controls | exists |
 | `pitchCatcher.autoAdvance` | Automatically get harder | Adds another note choice after a correct streak, up to four. | on | app | Pitch Catcher controls | exists |
 | `pitchCatcher.advanceStreak` | Catches to advance | Consecutive correct answers needed to add a choice. | 3 | app | internal Pitch Catcher progression | exists |
+| `pitchCatcher.fallSeconds` | Fall time | Seconds colored choices take to reach the catch line; they wait there rather than failing. | 6 s | app | Pitch Catcher controls | exists |
 | `groove.difficulty` | Echo difficulty | Controls remembered phrase length, density, and syncopation without displaying future hits. | Easy | app | Games › GROOVE Echo | exists |
 | `groove.mode` | GROOVE mode | Echo plays a phrase for a tempo-flexible answer; Free drums gives unscored visual input feedback. | Echo | app | GROOVE mode dropdown | exists |
 | `groove.inputMode` | Echo input | Play the two pads with touch/F/J, use gated microphone onset detection, or map two notes from an external MIDI drum/controller. | Pads + F/J | app | GROOVE input dropdown, pads and visual trails | exists |
@@ -134,7 +135,11 @@ tuning; only the first few are likely user-facing.
 | `groove.micMinRiseDb` | Attack contrast | Reject acoustic sounds that do not rise sharply enough over the recent background. | 18 dB | app | GROOVE microphone input | exists |
 | `groove.midiLowNote` | External low-drum note | MIDI note mapped to the low drum. | 36 (GM kick) | app | GROOVE external MIDI input | exists |
 | `groove.midiHighNote` | External high-drum note | MIDI note mapped to the high drum. | 38 (GM snare) | app | GROOVE external MIDI input | exists |
-| `groove.autoAdvance` | Automatically get harder | Scores of 80+ advance Easy → Medium → Hard; continued success on Hard adds 6 BPM up to 180. | on | app | GROOVE Echo progression/result | exists |
+| `groove.autoAdvance` | Adapt challenge | Scores of 80+ get harder, scores below 55 get easier, and the middle band stays unchanged. | on | app | GROOVE Echo progression/result | exists |
+| `groove.continuous` | Keep going | Automatically starts another Echo phrase after each result. | on | app | GROOVE Echo controls | exists |
+| `groove.failureThreshold` | Easier below | Scores below this value make the next round easier. | 55 | app | internal GROOVE progression | exists |
+| `groove.successThreshold` | Harder at | Scores at or above this value make the next round harder. | 80 | app | internal GROOVE progression | exists |
+| `groove.nextRoundDelayMs` | Next-round pause | Time the result remains visible before continuous Echo starts again. | 1800 ms | app | internal GROOVE timing | exists |
 | `groove.bestScores` | Echo best scores | Best GROOVE Echo score for Easy, Medium, and Hard. Stored value, not a control. | 0 / 0 / 0 | app | GROOVE Echo result | exists |
 
 ## Visuals and theme (proposed; see [visualization](../visualization/README.md))

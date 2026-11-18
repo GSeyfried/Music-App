@@ -50,7 +50,12 @@ describe("Games workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Pitch Catcher/ }));
     expect(await screen.findByRole("heading", { name: "Pitch Catcher" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Start catching" }));
-    expect(screen.getByRole("group", { name: "Pitch choices" }).querySelectorAll("button")).toHaveLength(2);
+    const choices = screen.getByRole("group", { name: "Pitch choices" });
+    expect(choices.querySelectorAll("button")).toHaveLength(2);
+    expect((choices.querySelector("button") as HTMLElement).style.getPropertyValue("--catcher-color")).not.toBe("");
+    fireEvent.click(choices.querySelector("button") as HTMLElement);
+    expect(choices.classList.contains("is-caught")).toBe(true);
+    expect(screen.getByLabelText("Caught pitch colors")).toBeTruthy();
     expect(screen.queryByText(/Choose a microphone/)).toBeNull();
   });
 });

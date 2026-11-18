@@ -151,6 +151,7 @@ export interface AppSettings {
   "pitchCatcher.autoAdvance": boolean;
   /** Consecutive correct answers needed before another choice is added. */
   "pitchCatcher.advanceStreak": number;
+  "pitchCatcher.fallSeconds": number;
   "groove.difficulty": GrooveDifficulty;
   "groove.mode": GrooveMode;
   "groove.inputMode": GrooveInputMode;
@@ -161,6 +162,10 @@ export interface AppSettings {
   "groove.midiLowNote": number;
   "groove.midiHighNote": number;
   "groove.autoAdvance": boolean;
+  "groove.continuous": boolean;
+  "groove.failureThreshold": number;
+  "groove.successThreshold": number;
+  "groove.nextRoundDelayMs": number;
   "groove.bestScores": Record<GrooveDifficulty, number>;
 }
 
@@ -225,6 +230,7 @@ export const APP_DEFAULTS: AppSettings = {
   "pitchCatcher.choiceCount": 2,
   "pitchCatcher.autoAdvance": true,
   "pitchCatcher.advanceStreak": 3,
+  "pitchCatcher.fallSeconds": 6,
   "groove.difficulty": "easy",
   "groove.mode": "echo",
   "groove.inputMode": "pads",
@@ -235,6 +241,10 @@ export const APP_DEFAULTS: AppSettings = {
   "groove.midiLowNote": 36,
   "groove.midiHighNote": 38,
   "groove.autoAdvance": true,
+  "groove.continuous": true,
+  "groove.failureThreshold": 55,
+  "groove.successThreshold": 80,
+  "groove.nextRoundDelayMs": 1800,
   "groove.bestScores": { easy: 0, medium: 0, hard: 0 },
 };
 
@@ -864,6 +874,19 @@ export const SETTINGS: SettingDef[] = [
     scope: "app",
   },
   {
+    id: "pitchCatcher.fallSeconds",
+    source: "app",
+    kind: "number",
+    min: 2,
+    max: 20,
+    step: 0.5,
+    label: "Fall time",
+    description: "Seconds the colored notes take to reach the catch line. They wait there rather than failing the round.",
+    category: "Pitch Catcher",
+    tier: "daily",
+    scope: "app",
+  },
+  {
     id: "groove.difficulty",
     source: "app",
     kind: "choice",
@@ -986,10 +1009,59 @@ export const SETTINGS: SettingDef[] = [
     id: "groove.autoAdvance",
     source: "app",
     kind: "bool",
-    label: "Automatically get harder",
-    description: "A score of 80 or higher advances Easy to Medium to Hard. Success on Hard raises the tempo.",
+    label: "Adapt challenge",
+    description: "Strong rounds get harder, failed rounds get easier, and middle scores keep the same challenge.",
     category: "Groove",
     tier: "daily",
+    scope: "app",
+  },
+  {
+    id: "groove.continuous",
+    source: "app",
+    kind: "bool",
+    label: "Keep going",
+    description: "Automatically start the next Echo phrase after showing the result.",
+    category: "Groove",
+    tier: "daily",
+    scope: "app",
+  },
+  {
+    id: "groove.failureThreshold",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 100,
+    step: 1,
+    label: "Easier below",
+    description: "Scores below this value make the next GROOVE round easier.",
+    category: "Groove",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "groove.successThreshold",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 100,
+    step: 1,
+    label: "Harder at",
+    description: "Scores at or above this value make the next GROOVE round harder.",
+    category: "Groove",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "groove.nextRoundDelayMs",
+    source: "app",
+    kind: "number",
+    min: 500,
+    max: 5000,
+    step: 100,
+    label: "Next-round pause",
+    description: "How long GROOVE shows a result before automatically starting the next phrase.",
+    category: "Groove",
+    tier: "internal",
     scope: "app",
   },
   {

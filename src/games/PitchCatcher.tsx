@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { playPreview, stopPreview } from "../audio/instruments";
 import { Button } from "../components/ui/controls";
 import { noteLabel } from "../lib/tuner";
 import { getAppSetting, setAppSetting, useAppSetting } from "../settings/appSettings";
+import { noteColor } from "../settings/noteColors";
 import { settingById, type SettingDef } from "../settings/registry";
 import { SettingControl } from "../settings/SettingControl";
 import { makePitchQuestion, nextChoiceCount, type PitchQuestion } from "./pitchCatcherLogic";
@@ -22,6 +23,8 @@ function newQuestion(): PitchQuestion {
 
 export function PitchCatcher() {
   const choiceCount = useAppSetting("pitchCatcher.choiceCount");
+  const fallSeconds = useAppSetting("pitchCatcher.fallSeconds");
+  const noteColors = useAppSetting("notes.colorMap");
   const [question, setQuestion] = useState<PitchQuestion | null>(null);
   const [picked, setPicked] = useState<number | null>(null);
   const [score, setScore] = useState(0);
@@ -79,7 +82,7 @@ export function PitchCatcher() {
       <div className="games-head">
         <div>
           <h2 className="card-title">Pitch Catcher</h2>
-          <p className="hint">Hear one pitch, then catch its note. There is no timer.</p>
+          <p className="hint">Hear one pitch, then catch the matching colored note as the choices fall.</p>
         </div>
         <div className="pitch-catcher-score num">Score <strong>{score}</strong> · Streak <strong>{streak}</strong></div>
       </div>
@@ -87,7 +90,7 @@ export function PitchCatcher() {
         <div className="pitch-catcher-ready">
           <div className="pitch-catcher-orb" aria-hidden="true">♪</div>
           <h3>Ready to listen?</h3>
-          <p>The first round plays as soon as you start. Use buttons or keys 1–4.</p>
+          <p>The first round plays as soon as you start. Click a falling note or use keys 1–4.</p>
           <Button size="lg" icon="play" onPress={next}>Start catching</Button>
         </div>
       ) : (
@@ -100,17 +103,31 @@ export function PitchCatcher() {
               </p>
             )}
           </div>
-          <div className="pitch-catcher-choices" role="group" aria-label="Pitch choices">
+          <div className={`pitch-catcher-arena${picked === null ? " is-falling" : " is-caught"}`} role="group" aria-label="Pitch choices">
+            <div className="pitch-catcher-sky" aria-hidden="true">Listen, then catch</div>
+            <div className="pitch-catcher-catch-line" aria-hidden="true" />
             {question.choices.map((midi, index) => {
               const answered = picked !== null;
               const tone = answered && midi === question.targetMidi ? " is-answer" : answered && midi === picked ? " is-missed" : "";
+              const style = {
+                "--catcher-color": noteColor(noteColors, midi),
+                "--catcher-left": `${((index + 0.5) / question.choices.length) * 100}%`,
+                "--catcher-delay": `${index * 0.12}s`,
+                "--catcher-fall": `${fallSeconds}s`,
+              } as CSSProperties;
               return (
-                <button key={midi} type="button" className={`pitch-catcher-choice${tone}`} disabled={answered} onClick={() => choose(midi)}>
+                <button key={midi} type="button" style={style} className={`pitch-catcher-choice${tone}`} disabled={answered} onClick={() => choose(midi)}>
                   <kbd>{index + 1}</kbd><strong>{noteLabel(midi)}</strong>
                 </button>
               );
             })}
           </div>
+          {picked !== null && (
+            <div className="pitch-catcher-reveal" aria-label="Caught pitch colors">
+              <span><i style={{ background: noteColor(noteColors, picked) }} />Caught {noteLabel(picked)}</span>
+              <span><i style={{ background: noteColor(noteColors, question.targetMidi) }} />Heard {noteLabel(question.targetMidi)}</span>
+            </div>
+          )}
           {picked !== null && <Button size="lg" icon="play" onPress={next}>Next pitch</Button>}
         </>
       )}
@@ -118,6 +135,7 @@ export function PitchCatcher() {
         <div className="glider-settings">
           <Setting id="pitchCatcher.choiceCount" />
           <Setting id="pitchCatcher.autoAdvance" />
+          <Setting id="pitchCatcher.fallSeconds" />
         </div>
       )}
     </section>

@@ -57,10 +57,13 @@ describe("GROOVE Echo scoring", () => {
   });
 
   it("automatically advances levels, then tempo on Hard", () => {
-    expect(advanceChallenge("easy", 92, 79, true)).toEqual({ difficulty: "easy", bpm: 92, advanced: false });
-    expect(advanceChallenge("easy", 92, 80, true)).toEqual({ difficulty: "medium", bpm: 92, advanced: true });
-    expect(advanceChallenge("medium", 92, 90, true)).toEqual({ difficulty: "hard", bpm: 92, advanced: true });
-    expect(advanceChallenge("hard", 92, 90, true)).toEqual({ difficulty: "hard", bpm: 98, advanced: true });
+    expect(advanceChallenge("easy", 92, 70, true)).toEqual({ difficulty: "easy", bpm: 92, advanced: false, change: "same" });
+    expect(advanceChallenge("easy", 92, 80, true)).toEqual({ difficulty: "medium", bpm: 92, advanced: true, change: "harder" });
+    expect(advanceChallenge("medium", 92, 90, true)).toEqual({ difficulty: "hard", bpm: 92, advanced: true, change: "harder" });
+    expect(advanceChallenge("hard", 92, 90, true)).toEqual({ difficulty: "hard", bpm: 98, advanced: true, change: "harder" });
+    expect(advanceChallenge("hard", 92, 40, true)).toEqual({ difficulty: "medium", bpm: 92, advanced: true, change: "easier" });
+    expect(advanceChallenge("medium", 92, 40, true)).toEqual({ difficulty: "easy", bpm: 92, advanced: true, change: "easier" });
+    expect(advanceChallenge("easy", 92, 40, true)).toEqual({ difficulty: "easy", bpm: 86, advanced: true, change: "easier" });
   });
 
   it("rejects background noise unless both acoustic thresholds pass", () => {
