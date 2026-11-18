@@ -447,7 +447,7 @@ export const SETTINGS: SettingDef[] = [
     source: "app",
     kind: "choice",
     label: "Note display",
-    description: "Show takes as a piano roll, a staff, or both.",
+    description: "Show the reference, your live attempt and the results as a piano roll, on a staff (clef mode; while you sing, the note to sing now is highlighted), or both.",
     category: "Practice",
     tier: "daily",
     scope: "app",

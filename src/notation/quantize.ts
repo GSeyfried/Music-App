@@ -24,6 +24,8 @@ export interface TimedNote {
   midi: number;
   /** Optional 0..1 accuracy/stability, carried through for coloring. */
   quality?: number;
+  /** Optional caller index (e.g. the take's note index), carried through for highlighting. */
+  source?: number;
 }
 
 export interface QuantizeOptions {
@@ -48,6 +50,8 @@ export interface NotationEvent {
   kind: "note" | "rest";
   midi?: number;
   quality?: number;
+  /** `TimedNote.source` of the note this event engraves (tied pieces share it). */
+  source?: number;
   /** VexFlow duration code: "w" | "h" | "q" | "8" | "16" | "32". */
   duration: string;
   dots: 0 | 1;
@@ -179,7 +183,7 @@ function pow2Floor(n: number): number {
   return p;
 }
 
-type Span = { a: number; b: number; midi: number; quality?: number };
+type Span = { a: number; b: number; midi: number; quality?: number; source?: number };
 
 export function quantize(notes: TimedNote[], o: QuantizeOptions): Measure[] {
   const m = meterInfo(o.beatsPerBar, o.beatUnit);
@@ -194,7 +198,7 @@ export function quantize(notes: TimedNote[], o: QuantizeOptions): Measure[] {
   // 1. Ticks, one voice.
   let spans: Span[] = notes
     .filter((n) => n.duration > 0 && Number.isFinite(n.midi))
-    .map((n) => ({ a: toTicks(n.start + shift), b: toTicks(n.start + shift + n.duration), midi: Math.round(n.midi), quality: n.quality }))
+    .map((n) => ({ a: toTicks(n.start + shift), b: toTicks(n.start + shift + n.duration), midi: Math.round(n.midi), quality: n.quality, source: n.source }))
     .sort((x, y) => x.a - y.a);
   for (let i = 0; i + 1 < spans.length; i++) if (spans[i].b > spans[i + 1].a) spans[i].b = spans[i + 1].a;
   spans = spans.filter((s) => s.b > s.a);
@@ -290,7 +294,7 @@ export function quantize(notes: TimedNote[], o: QuantizeOptions): Measure[] {
           measures[bar].push(
             rest
               ? { kind: "rest", duration: v.duration, dots: v.dots, tieToNext: false, start: v.start, ticks: v.ticks }
-              : { kind: "note", midi: p.midi, quality: p.quality, duration: v.duration, dots: v.dots, tieToNext: !last, start: v.start, ticks: v.ticks },
+              : { kind: "note", midi: p.midi, quality: p.quality, source: p.source, duration: v.duration, dots: v.dots, tieToNext: !last, start: v.start, ticks: v.ticks },
           );
         });
       }

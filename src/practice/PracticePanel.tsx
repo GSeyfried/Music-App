@@ -198,6 +198,7 @@ function DifficultyControl() {
 function TakeBanner({ reference }: { reference: ReferenceDetail | null }) {
   const status = usePractice((s) => s.status);
   const legend = pitchLegend(usePractice((s) => s.config.scoring));
+  const notationView = useAppSetting("notation.view");
   const store = usePracticeStore();
   const elapsedRef = useRef<HTMLSpanElement>(null);
   const posRef = useRef<HTMLSpanElement>(null);
@@ -230,7 +231,12 @@ function TakeBanner({ reference }: { reference: ReferenceDetail | null }) {
           Cancel
         </Button>
       </div>
-      {status.phase !== "arming" && <LiveOverlay reference={status.kind === "attempt" ? (reference?.take ?? null) : null} />}
+      {status.phase !== "arming" && status.kind === "attempt" && reference && notationView !== "pianoRoll" && (
+        <LiveStaff take={reference.take} />
+      )}
+      {status.phase !== "arming" && (status.kind !== "attempt" || notationView !== "staff") && (
+        <LiveOverlay reference={status.kind === "attempt" ? (reference?.take ?? null) : null} />
+      )}
       {status.kind === "attempt" && (
         <p className="legend">
           <span className="lg lg-target">Expected note</span>
@@ -663,6 +669,7 @@ function ReferenceView({ ready }: { ready: boolean }) {
   const busy = usePractice((s) => s.busy);
   const phase = usePractice((s) => s.status?.phase ?? "idle");
   const scoring = usePractice((s) => s.config.scoring);
+  const notationView = useAppSetting("notation.view");
   const [mode, setMode] = useState<Mode | null>(null);
   const [bars, setBars] = useState(2);
   if (!detail)
@@ -695,7 +702,15 @@ function ReferenceView({ ready }: { ready: boolean }) {
           <PlayTakeButton take={detail.take} />
           <TransposeControl referenceId={s.id} notes={detail.take.notes.map((n) => n.note)} disabled={phase !== "idle"} />
         </div>
-        {phase === "idle" && <ReferenceCurve take={detail.take} label={`Pitch of ${s.name}: ${detail.take.notes.map((n) => noteLabel(n.note)).join(" ")}`} />}
+        {phase === "idle" && (
+          <>
+            <NotationViewPicker />
+            {notationView !== "staff" && (
+              <ReferenceCurve take={detail.take} label={`Pitch of ${s.name}: ${detail.take.notes.map((n) => noteLabel(n.note)).join(" ")}`} />
+            )}
+            {notationView !== "pianoRoll" && <TakeStaff take={detail.take} grid={detail.take.grid} label="Reference" />}
+          </>
+        )}
       </Widget>
       {phase === "idle" && (
         <Widget id="attempt" label="Attempt">
@@ -781,13 +796,38 @@ function NotationViewPicker() {
   return def ? <SettingControl def={def} /> : null;
 }
 
-function TakeStaff({ take, grid, label }: { take: Take; grid: TakeGrid | null; label: string }) {
+function TakeStaff({ take, grid, label, highlight = null }: { take: Take; grid: TakeGrid | null; label: string; highlight?: number | null }) {
   const subdivision = useAppSetting("notation.gridSubdivision");
   const staff = useMemo(() => takeToStaff(take, subdivision, grid), [take, subdivision, grid]);
   return (
     <div className="pl-staff">
       <h3 className="pl-staff-label">{label}</h3>
-      <Staff notes={staff.notes} options={staff.options} label={`${label} in notation`} />
+      <Staff notes={staff.notes} options={staff.options} label={`${label} in notation`} highlight={highlight} />
+    </div>
+  );
+}
+
+/**
+ * The reference on a staff while you sing it, with the note to sing now in
+ * the accent colour (the first note until you start). Re-engraves only when
+ * that note changes, a few times a second at most.
+ */
+function LiveStaff({ take }: { take: Take }) {
+  const store = usePracticeStore();
+  const [current, setCurrent] = useState<number>(0);
+  useFrame(() => {
+    const i = store.live.progress?.expected?.referenceIndex ?? store.live.anchor?.referenceIndex ?? 0;
+    if (i !== current) setCurrent(i);
+  });
+  const note = take.notes[current];
+  return (
+    <div className="pl-live-staff">
+      <TakeStaff take={take} grid={take.grid} label="Sing" highlight={current} />
+      {note && (
+        <p className="hint" aria-live="polite">
+          Now: <strong>{noteLabel(note.note)}</strong>
+        </p>
+      )}
     </div>
   );
 }

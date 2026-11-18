@@ -47,10 +47,11 @@ interface Built {
   maxLine: number;
 }
 
-function render(vf: VF, el: HTMLDivElement, plan: NotationPlan, scale: number, colorNotes: boolean) {
+function render(vf: VF, el: HTMLDivElement, plan: NotationPlan, scale: number, colorNotes: boolean, highlight: number | null) {
   const { Renderer, Stave, StaveNote, Voice, Formatter, Accidental, Dot, StaveTie, Beam, Fraction, Barline } = vf;
   el.innerHTML = "";
   const { ink, lines: lineInk } = readInk(el);
+  const accent = getComputedStyle(el).getPropertyValue("--accent").trim() || "#2a9d8f";
   const pxWidth = Math.max(320, el.clientWidth || 600);
   const W = pxWidth / scale; // layout width in VexFlow units
   const clef = plan.clef === "treble8" ? "treble" : plan.clef;
@@ -83,7 +84,12 @@ function render(vf: VF, el: HTMLDivElement, plan: NotationPlan, scale: number, c
       });
       if (!isRest && sp.accidental) n.addModifier(new Accidental(sp.accidental), 0);
       if (e.dots) Dot.buildAndAttach([n], { all: true });
-      const c = colorNotes && !isRest && e.midi !== undefined ? noteColor(colors, e.midi, e.quality ?? 1, encoding) : ink;
+      const c =
+        highlight !== null && !isRest && e.source === highlight
+          ? accent
+          : colorNotes && !isRest && e.midi !== undefined
+            ? noteColor(colors, e.midi, e.quality ?? 1, encoding)
+            : ink;
       n.setStyle({ fillStyle: c, strokeStyle: c });
       n.setLedgerLineStyle({ fillStyle: lineInk, strokeStyle: lineInk });
       return n;
@@ -259,7 +265,18 @@ function useRedrawTriggers(el: React.RefObject<HTMLDivElement | null>) {
   return tick;
 }
 
-export function Staff({ notes, options, label = "Notation" }: { notes: TimedNote[]; options: QuantizeOptions; label?: string }) {
+export function Staff({
+  notes,
+  options,
+  label = "Notation",
+  highlight = null,
+}: {
+  notes: TimedNote[];
+  options: QuantizeOptions;
+  label?: string;
+  /** `TimedNote.source` to draw in the accent colour (e.g. the note to sing now). */
+  highlight?: number | null;
+}) {
   const el = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const colors = useAppSetting("notes.colorMap");
@@ -286,14 +303,14 @@ export function Staff({ notes, options, label = "Notation" }: { notes: TimedNote
     loadVexFlow()
       .then((mod) => {
         if (cancelled || !el.current) return;
-        render(mod, el.current, plan, scale, colorNotes);
+        render(mod, el.current, plan, scale, colorNotes, highlight);
         setError(null);
       })
       .catch((e: unknown) => !cancelled && setError(String(e)));
     return () => {
       cancelled = true;
     };
-  }, [plan, scale, colorNotes, colors, encoding, redraw]);
+  }, [plan, scale, colorNotes, colors, encoding, redraw, highlight]);
   return (
     <figure className="staff" aria-label={label}>
       <div ref={el} className="staff-canvas" />

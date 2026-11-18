@@ -169,3 +169,18 @@ describe("Practice Lab UI: difficulty and scales", () => {
     await waitFor(() => expect(within(screen.getByRole("radiogroup", { name: "Difficulty" })).getByRole("radio", { name: "Custom" }).getAttribute("aria-checked")).toBe("true"));
   });
 });
+
+describe("Practice Lab UI: clef mode", () => {
+  it("Staff view shows the reference on a staff instead of the piano roll", async () => {
+    setAppSetting("notation.view", "staff");
+    const mock = new MockEngine({ realtime: false });
+    render(<App client={createEngine(mock)} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Practice Lab" }));
+    const card = await screen.findByRole("region", { name: "Scale exercise" });
+    fireEvent.click(within(card).getByRole("button", { name: /^Add C major scale/ }));
+    const ref = await screen.findByRole("region", { name: "Reference C major scale" });
+    expect(within(ref).getByRole("figure", { name: "Reference in notation" })).toBeTruthy();
+    expect(within(ref).queryByRole("img", { name: /^Pitch of/ })).toBeNull();
+    setAppSetting("notation.view", "pianoRoll");
+  });
+});

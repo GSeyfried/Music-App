@@ -11,7 +11,8 @@ export function takeToStaff(take: Take, subdivision: number, fallbackGrid?: Take
   const grid = take.grid ?? fallbackGrid ?? null;
   const sr = take.sampleRate || 48_000;
   const origin = take.grid?.originFrame ?? take.notes[0]?.startFrame ?? 0;
-  const notes = take.notes.map((n) => ({
+  const notes = take.notes.map((n, i) => ({
+    source: i,
     start: Math.max(0, (n.startFrame - origin) / sr),
     duration: (n.endFrame - n.startFrame) / sr,
     midi: n.note,
