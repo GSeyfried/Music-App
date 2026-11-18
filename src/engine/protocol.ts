@@ -251,6 +251,7 @@ export interface MidiBatch {
 }
 
 export interface EngineStatus {
+  /** Audio is running. The microphone opens only when needed: see `input` (and `capture`, set while it is open). */
   capturing: boolean;
   /** Always false today (no direct monitoring path yet). */
   monitoring: boolean;
@@ -266,6 +267,32 @@ export interface EngineStatus {
   micPermission?: MicPermission;
   /** Project data changed since the last save/open/new. */
   unsavedChanges?: boolean;
+  /** Microphone state and why it is open (mic.rs). Absent from older engines (mic always open). */
+  input?: InputStatus;
+}
+
+// ---- Mic only when needed (crates/voiceloop-engine/src/mic.rs) ------------------------
+
+/** Why the microphone is open. record / monitor / calibration are set by the engine only. */
+export type InputReason = "alwaysOn" | "pitch" | "practice" | "game" | "meter" | "record" | "monitor" | "calibration";
+/** off: closed (system mic indicator off); opening: open, input not flowing yet; on: delivering input. */
+export type MicState = "off" | "opening" | "on";
+
+export interface InputStatus {
+  mic: MicState;
+  /** Every reason holding the mic open (frontend and engine), sorted. */
+  reasons: InputReason[];
+  holdMs: number;
+  /** Nothing needs the mic: it closes in this many ms. */
+  closingInMs: number | null;
+  /** Record / overdub / calibration requests waiting for the mic to start. */
+  waiting: number;
+}
+
+/** `set_input_needs`: replaces the frontend's reasons; holdMs omitted = unchanged. */
+export interface InputNeeds {
+  reasons: InputReason[];
+  holdMs?: number;
 }
 
 export type MicPermission = "granted" | "denied" | "undetermined" | "unknown";
@@ -785,6 +812,8 @@ export interface EngineCommands extends PracticeCommands, ProjectCommands {
   /** Plays on the engine's output; fails (kind "invalid") when audio output is not running. */
   preview_play: { args: { request: PreviewRequest }; result: PreviewStarted };
   preview_stop: { args: undefined; result: null };
+  /** Mic only when needed: what the UI needs the microphone for, and the release hold. */
+  set_input_needs: { args: { needs: InputNeeds }; result: EngineStatus };
 
 }
 

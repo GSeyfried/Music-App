@@ -11,6 +11,7 @@ import {
   type EngineEvent,
   type AudioConfig,
   type EngineTransport,
+  type InputNeeds,
   type InputRoute,
   type LooperCommand,
   type MonitorConfig,
@@ -51,6 +52,7 @@ export interface EngineClient {
   requestMicPermission(): Promise<CommandResult<"request_mic_permission">>;
   startupWarnings(): Promise<CommandResult<"startup_warnings">>;
   startLatencyCalibration(apply: boolean): Promise<CommandResult<"start_latency_calibration">>;
+  setInputNeeds(needs: InputNeeds): Promise<CommandResult<"set_input_needs">>;
 }
 
 export function createEngine(transport: EngineTransport): EngineClient {
@@ -88,5 +90,6 @@ export function createEngine(transport: EngineTransport): EngineClient {
     requestMicPermission: () => call("request_mic_permission"),
     startupWarnings: () => call("startup_warnings"),
     startLatencyCalibration: (apply) => call("start_latency_calibration", { apply }),
+    setInputNeeds: (needs) => call("set_input_needs", { needs }),
   };
 }

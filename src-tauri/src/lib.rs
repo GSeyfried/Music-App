@@ -5,6 +5,7 @@
 
 use tauri::{Emitter, Manager, RunEvent, State};
 use voiceloop_engine::devices::DeviceList;
+use voiceloop_engine::mic::InputNeeds;
 use voiceloop_engine::midi_in::MidiPortInfo;
 use voiceloop_engine::model::AudioDevice;
 use voiceloop_engine::platform::MicPermission;
@@ -145,6 +146,13 @@ fn preview_play(engine: State<'_, Engine>, request: PreviewRequest) -> Result<Pr
 #[tauri::command]
 fn preview_stop(engine: State<'_, Engine>) -> Result<(), EngineError> {
     engine.preview_stop()
+}
+
+/// What the UI needs the microphone for (replaces the previous set) and the
+/// release hold. The mic opens only while a reason exists ("mic only when needed").
+#[tauri::command]
+fn set_input_needs(engine: State<'_, Engine>, needs: InputNeeds) -> Result<EngineStatus, EngineError> {
+    engine.set_input_needs(needs)
 }
 
 // --- Projects and file interchange (docs/projects/persistence/INTERFACE.md) ---
@@ -374,7 +382,8 @@ pub fn run() {
             practice_export_library,
             practice_import_library,
             preview_play,
-            preview_stop
+            preview_stop,
+            set_input_needs
         ])
         .build(tauri::generate_context!())
         .expect("error while building VoiceLoop");
