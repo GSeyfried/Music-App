@@ -180,6 +180,7 @@ tuning; only the first few are likely user-facing.
 | `widgets.hidden` | Hidden widgets | Widgets you have hidden (right-click › Hide widget, or the View menu). Show them again from View › Show all. | none | app | Practice dashboard widgets; View menu | exists |
 | `practice.scale.instrument` | Scale sound | The instrument used when you play a scale or reference to hear it. More instruments are coming. | Piano | app | Scale card "Play"; reference "Play" | exists |
 | `audio.previewVolume` | Preview volume | Volume of scales and references played to hear them (not recorded into loops). | 0.5 | app | Scale/reference playback | exists |
+| `audio.previewThroughEngine` | Play previews on the output device | Scales and references play with the sampled piano (Salamander Grand) on the chosen output device, mixed after the loops and never recorded. Off, or while audio is stopped: the synthesized Web Audio piano on the system default output. | on | app | Scale/reference playback; games' note previews | exists |
 | `audio.previewTuningA4` | Preview tuning (A4) | Pitch of A4 for played scales and references. PENDING: follow the tuner's reference pitch. | 440 Hz | app | Scale/reference playback | exists (internal) |
 | `practice.startNote.minClarity` | Start note clarity | How clear a sung note must be for "Start from my note". | 0.85 | app | Scale card | exists (internal) |
 | `practice.startNote.maxDriftCents` | Start note steadiness | How far (cents) the sung note may wander while it is being captured. | 35 | app | Scale card | exists (internal) |

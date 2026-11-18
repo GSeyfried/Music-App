@@ -1,12 +1,18 @@
-// Preview instruments for hearing references and scales, played with Web
-// Audio in the webview. This is a listening aid, not part of the recorded
-// mix: it plays on the system's default output, not the engine's chosen
-// device (PENDING: route through the engine so it follows the output picker).
+// Preview instruments for hearing references and scales. A listening aid,
+// never part of the recorded mix.
 //
-// "piano" is a small synthesized piano: a few slightly inharmonic partials
-// with a fast attack, a two-stage decay that is shorter for higher notes, and
-// a gentle low-pass. More instruments (and sampled piano) come later.
+// Two paths, same API (`playPreview` / `stopPreview`):
+//   - Engine (default, `audio.previewThroughEngine`): the sampled piano
+//     (Salamander Grand, src-tauri/resources/piano) plays inside the engine's
+//     output callback, so it follows the output device and route the user
+//     picked, like the loops and the click (crates/voiceloop-engine/src/preview.rs).
+//   - Web Audio fallback: when the engine is not running audio, outside the
+//     desktop app, or with the setting off. A small synthesized piano on the
+//     system's default output: a few slightly inharmonic partials with a fast
+//     attack, a two-stage decay that is shorter for higher notes, and a gentle
+//     low-pass.
 
+import { engine, nativeAvailable } from "../engine/bridge";
 import { getAppSetting } from "../settings/appSettings";
 
 export type PreviewInstrument = "piano";
@@ -67,14 +73,12 @@ function pianoNote(ac: AudioContext, out: AudioNode, hz: number, t0: number, dur
   return oscs.filter((o): o is OscillatorNode => o !== null);
 }
 
-/**
- * Play notes now; any previous preview stops. Returns a handle and the
- * total length in seconds, or null when Web Audio is unavailable.
- */
-export function playPreview(notes: PreviewNote[], instrument: PreviewInstrument = "piano"): { stop(): void; seconds: number } | null {
+type Handle = { stop(): void; seconds: number };
+
+/** The synthesized Web Audio piano. Does not touch `active`. */
+function playWebAudio(notes: PreviewNote[], instrument: PreviewInstrument, seconds: number): Handle | null {
   const ac = audio();
-  if (!ac || notes.length === 0) return null;
-  active?.stop();
+  if (!ac) return null;
   const master = ac.createGain();
   master.gain.value = getAppSetting("audio.previewVolume");
   master.connect(ac.destination);
@@ -84,8 +88,7 @@ export function playPreview(notes: PreviewNote[], instrument: PreviewInstrument 
   for (const n of notes) {
     if (instrument === "piano") oscs.push(...pianoNote(ac, master, midiToHz(n.midi, a4), t + n.start, n.duration));
   }
-  const seconds = Math.max(...notes.map((n) => n.start + n.duration)) + 0.6;
-  const handle = {
+  return {
     seconds,
     stop() {
       const now = ac.currentTime;
@@ -98,10 +101,53 @@ export function playPreview(notes: PreviewNote[], instrument: PreviewInstrument 
           // already stopped
         }
       });
+    },
+  };
+}
+
+/**
+ * Play notes now; any previous preview stops. Returns a handle and the
+ * total length in seconds, or null when no audio path is available.
+ *
+ * In the desktop app the engine is tried first; if it refuses (audio stopped),
+ * the Web Audio piano plays instead, a few milliseconds later.
+ */
+export function playPreview(notes: PreviewNote[], instrument: PreviewInstrument = "piano"): Handle | null {
+  if (notes.length === 0) return null;
+  active?.stop();
+  const seconds = Math.max(...notes.map((n) => n.start + n.duration)) + 0.6;
+  if (!(nativeAvailable() && getAppSetting("audio.previewThroughEngine"))) {
+    const h = playWebAudio(notes, instrument, seconds);
+    if (!h) return null;
+    const handle: Handle = {
+      seconds,
+      stop() {
+        h.stop();
+        if (active === handle) active = null;
+      },
+    };
+    active = handle;
+    return handle;
+  }
+  let fallback: Handle | null = null;
+  const handle: Handle = {
+    seconds,
+    stop() {
+      fallback?.stop();
+      void engine.call("preview_stop").catch(() => {});
       if (active === handle) active = null;
     },
   };
   active = handle;
+  const request = {
+    notes: notes.map((n) => ({ midi: n.midi, start: Math.max(0, n.start), duration: Math.max(0, n.duration) })),
+    gain: getAppSetting("audio.previewVolume"),
+    tuningA4: getAppSetting("audio.previewTuningA4"),
+  };
+  engine.call("preview_play", { request }).catch(() => {
+    // Engine audio is not running: play here instead, unless already stopped/replaced.
+    if (active === handle) fallback = playWebAudio(notes, instrument, seconds);
+  });
   return handle;
 }
 

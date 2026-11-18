@@ -43,6 +43,7 @@ pub mod midi_in;
 pub mod model;
 pub mod platform;
 pub mod practice;
+pub mod preview;
 pub mod project;
 pub mod routing;
 pub mod settings;

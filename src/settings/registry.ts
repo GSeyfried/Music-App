@@ -96,6 +96,7 @@ export interface AppSettings {
   "practice.startNote.holdMs": number;
   "audio.previewVolume": number;
   "audio.previewTuningA4": number;
+  "audio.previewThroughEngine": boolean;
   /** Hidden dashboard widgets, as "<workspace>:<widget id>". */
   "widgets.hidden": string[];
   "theme.mode": ThemeMode;
@@ -197,6 +198,7 @@ export const APP_DEFAULTS: AppSettings = {
   "practice.startNote.holdMs": 600,
   "audio.previewVolume": 0.5,
   "audio.previewTuningA4": 440,
+  "audio.previewThroughEngine": true,
   "theme.mode": "system",
   "theme.pitchReactive": false,
   "theme.pitchReactiveStrength": 0.35,
@@ -1141,6 +1143,17 @@ export const SETTINGS: SettingDef[] = [
     description: "Pitch of A4 for played scales and references. PENDING: follow the tuner's reference pitch.",
     category: "Practice scales",
     tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "audio.previewThroughEngine",
+    source: "app",
+    kind: "bool",
+    label: "Play previews on the output device",
+    description:
+      "Play scales and references with the sampled piano on the output device you picked, like the loops. Off, or while audio is stopped, they use a simpler built-in piano on the system's default output.",
+    category: "Practice scales",
+    tier: "advanced",
     scope: "app",
   },
   {

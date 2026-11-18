@@ -67,8 +67,8 @@ stops after the scale's length) are recorded and scored by the existing engine.
 - Melodic minor descends as natural minor (classical form).
 - PENDING:
   - Octave/range from the user's measured vocal range.
-  - Is the reference played as a synthesized tone, or only shown? (Only shown
-    now: piano roll/pitch curve and the live overlay.)
+  - Is the reference played as a synthesized tone, or only shown? Answered:
+    both. "Play" uses the preview piano (see "Preview playback" below).
   - Melodic minor: offer the jazz form (same up and down)?
   - Generated references carry `formatVersion: 1` and an id `scale-…`; if the
     library format changes, update `PracticeStore.addReference`.
@@ -161,3 +161,42 @@ PENDING:
   colours still compare against the untransposed reference.
 - Should the live view re-fit its placement after a few notes (a single
   correction rather than continuous movement)?
+
+## Preview playback (2026-11-18)
+
+**Built.** Scales, references and the games' note previews play with the
+**Salamander Grand Piano** (CC-BY 3.0, credits in
+`src-tauri/resources/piano/CREDITS.md`). The audio runs inside the engine's
+output callback, so it plays on the output device and channels you picked,
+like the loops and the click.
+
+- Engine: `crates/voiceloop-engine/src/preview.rs`.
+  - A fixed 16-voice sampler, mixed after the looper and the monitor.
+  - Never recorded: the looper records from the input before this mix.
+  - Schedules and sample banks are built on the control thread, then handed
+    over and back through `rtrb` rings, so the audio thread never allocates
+    or frees.
+  - 30 samples, every minor third from A0 to C8: mono, 32 kHz, 2–4 s each,
+    levels matched, 5 MB in total.
+  - Each note plays the nearest sample, resampled to its pitch.
+- Tauri: `preview_play` and `preview_stop`. The samples are bundled as app
+  resources and loaded at startup (`Engine::use_preview_samples`).
+- Frontend: `src/audio/instruments.ts` keeps the same
+  `playPreview`/`stopPreview` API.
+  - It tries the engine first.
+  - If audio isn't running, outside the desktop app, or with
+    `audio.previewThroughEngine` off, it uses the old synthesized Web Audio
+    piano on the system's default output.
+- Verified: engine unit tests (pitch, timing, release, stop fade, voice
+  stealing, bank swap and return, loading the bundled set) and vitest for the
+  engine-first and fallback paths. **Not yet heard in the app on real
+  hardware.**
+
+PENDING:
+- Only one velocity layer, so loudness doesn't change with velocity.
+  Salamander has 16 layers if dynamics are wanted later.
+- Should previews be heard while the microphone records an attempt? Speakers
+  bleed into the mic acoustically. Headphones avoid it; nothing ducks the
+  preview yet.
+- With "mic only when needed" (hardware-io), the output stream should run
+  without the input, so previews still use the engine with the mic off.

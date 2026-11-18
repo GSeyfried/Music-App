@@ -383,6 +383,11 @@ export class MockEngine implements EngineTransport {
         return this.startCalibration(Boolean(args.apply));
       case "project_command":
         return this.projectCommand(args.request as ProjectRequest);
+      case "preview_play":
+        // No simulated output device: previews use the browser's Web Audio piano.
+        throw { kind: "invalid", message: "the simulated engine has no audio output" } satisfies EngineError;
+      case "preview_stop":
+        return null;
       case "find_recovery":
         return null;
       case "discard_recovery":

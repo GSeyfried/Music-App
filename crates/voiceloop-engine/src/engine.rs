@@ -38,6 +38,7 @@ use crate::midi_in::{MidiBatch, MidiPortInfo};
 use crate::model::AudioDevice;
 use crate::platform::{self, MicPermission, SessionEvent, SessionInfo, SessionRequest};
 use crate::practice::{self, Practice, PracticeIo, PracticeProgress, PracticeStatus, PracticeTakeEvent, TransportMap};
+use crate::preview::{PreviewRequest, PreviewStarted, SampleBank};
 use crate::project::{ProjectEvent, ProjectGlue, ProjectReply, ProjectRequest};
 use crate::routing::{AudioConfig, InputRoute, MonitorConfig, OutputRoute};
 use crate::settings::AudioSettings;
@@ -199,6 +200,9 @@ enum Command {
     RequestMicPermission(Reply<MicPermission>),
     Project(ProjectRequest, Reply<ProjectReply>),
     Practice(practice::Request, Reply<practice::Response>),
+    UsePreviewSamples(std::path::PathBuf, Reply<u32>),
+    PreviewPlay(PreviewRequest, Reply<PreviewStarted>),
+    PreviewStop(Reply<()>),
     Shutdown,
 }
 
@@ -366,6 +370,23 @@ impl Engine {
         self.request(|r| Command::Practice(request, r))
     }
 
+    /// Load the preview instrument's samples (`NNN.wav` per MIDI note) from
+    /// `dir`. Returns the number of notes loaded. Used from the next preview on.
+    pub fn use_preview_samples(&self, dir: std::path::PathBuf) -> Result<u32, EngineError> {
+        self.request(|r| Command::UsePreviewSamples(dir, r))
+    }
+
+    /// Play notes on the output device, replacing any preview still playing.
+    /// Needs running audio output and loaded samples; heard, never recorded.
+    pub fn preview_play(&self, request: PreviewRequest) -> Result<PreviewStarted, EngineError> {
+        self.request(|r| Command::PreviewPlay(request, r))
+    }
+
+    /// Stop the preview (short fade). Succeeds when nothing is playing.
+    pub fn preview_stop(&self) -> Result<(), EngineError> {
+        self.request(Command::PreviewStop)
+    }
+
     /// Stop audio, release devices and buffers, and join the control thread.
     pub fn shutdown(&self) {
         let _ = self.inner.tx.send(Command::Shutdown);
@@ -393,6 +414,8 @@ struct ControlLoop {
     project: ProjectGlue,
     /// Practice Lab sessions, references, clock mapping (see `practice/`).
     practice: Practice,
+    /// Preview instrument samples, handed to each output stream.
+    preview_bank: Option<Arc<SampleBank>>,
     latest: Option<MeterFrame>,
     peak_since_emit: f32,
     channel_peaks: [f32; crate::meter::MAX_METER_CHANNELS],
@@ -420,6 +443,7 @@ impl ControlLoop {
             hw: Hardware::default(),
             project: ProjectGlue::new(),
             practice: Practice::default(),
+            preview_bank: None,
             latest: None,
             peak_since_emit: 0.0,
             channel_peaks: [0.0; crate::meter::MAX_METER_CHANNELS],
@@ -463,6 +487,9 @@ impl ControlLoop {
             self.poll_hardware();
             self.drain_meter();
             self.drain_looper();
+            if let Some(p) = self.playback.as_mut() {
+                p.preview.collect(); // drop finished previews off the audio thread
+            }
             let epoch = self.latest_snapshot.map(|s| s.epoch);
             self.project.poll(self.playback.as_mut(), epoch, self.practice.library(), &self.hw.config, &*self.sink);
             if let Some(library) = self.project.take_practice_import() {
@@ -650,6 +677,29 @@ impl ControlLoop {
                 self.flush_practice();
                 let _ = reply.send(result);
             }
+            Command::UsePreviewSamples(dir, reply) => {
+                let result = SampleBank::load_dir(&dir).map(|bank| {
+                    let bank = Arc::new(bank);
+                    let count = bank.len() as u32;
+                    if let Some(p) = self.playback.as_mut() {
+                        let _ = p.preview.set_bank(bank.clone());
+                    }
+                    self.preview_bank = Some(bank);
+                    count
+                });
+                let _ = reply.send(result);
+            }
+            Command::PreviewPlay(request, reply) => {
+                let result = match self.playback.as_mut() {
+                    Some(p) => p.preview.play(&request),
+                    None => Err(EngineError::Invalid("audio output is not running".into())),
+                };
+                let _ = reply.send(result);
+            }
+            Command::PreviewStop(reply) => {
+                let result = self.playback.as_mut().map_or(Ok(()), |p| p.preview.stop());
+                let _ = reply.send(result);
+            }
             Command::Shutdown => unreachable!("handled in run loop"),
         }
     }
@@ -707,6 +757,9 @@ impl ControlLoop {
 
         self.capture = Some(capture);
         self.playback = playback;
+        if let (Some(p), Some(bank)) = (self.playback.as_mut(), self.preview_bank.clone()) {
+            let _ = p.preview.set_bank(bank);
+        }
         self.latest = None;
         self.latest_snapshot = None;
         self.peak_since_emit = 0.0;

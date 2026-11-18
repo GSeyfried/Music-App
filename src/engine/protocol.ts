@@ -20,6 +20,29 @@ import type { AudioDevice, TransportState } from "../models/domain";
 import type { PracticeCommands, PracticeEvent, TransportMap } from "../practice/types";
 import type { ProjectCommands, ProjectEngineEvent } from "../project/types";
 
+// ---- Preview instrument (preview.rs) ------------------------------------------
+
+export interface PreviewNoteWire {
+  midi: number;
+  /** Seconds from the start of the preview. */
+  start: number;
+  /** Seconds the key is held. */
+  duration: number;
+  /** 0..1; omitted = 0.8. */
+  velocity?: number;
+}
+
+export interface PreviewRequest {
+  notes: PreviewNoteWire[];
+  /** Linear 0..2 */
+  gain: number;
+  tuningA4?: number;
+}
+
+export interface PreviewStarted {
+  seconds: number;
+}
+
 // ---- Status -----------------------------------------------------------------
 
 // ---- Hardware I/O (docs/projects/hardware-io/INTERFACE.md) -----------------------
@@ -758,6 +781,10 @@ export interface EngineCommands extends PracticeCommands, ProjectCommands {
   request_mic_permission: { args: undefined; result: MicPermission };
   /** Result arrives as a `calibration` event ~2.5 s later. */
   start_latency_calibration: { args: { apply: boolean }; result: null };
+  // preview instrument (crates/voiceloop-engine/src/preview.rs)
+  /** Plays on the engine's output; fails (kind "invalid") when audio output is not running. */
+  preview_play: { args: { request: PreviewRequest }; result: PreviewStarted };
+  preview_stop: { args: undefined; result: null };
 
 }
 

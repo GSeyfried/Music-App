@@ -28,6 +28,7 @@ use super::{soft_limit, IoCounters, LooperConfig, LooperCore, LooperHandles, Run
 use crate::clock::{self, add_saturating, Anchor, StreamStats, XrunDetector};
 use crate::devices;
 use crate::error::EngineError;
+use crate::preview::{preview_pair, PreviewControl, PreviewPlayer};
 use crate::routing::{MonitorCell, MonitorConfig, OutputRoute, RouteCell};
 use crate::transport::TransportState;
 
@@ -142,6 +143,8 @@ pub struct LooperPlayback {
     pub bridge: Arc<BridgeStats>,
     calibration_tx: rtrb::Producer<CalibrationJob>,
     calibration_rx: Consumer<CalibrationJob>,
+    /// Reference/scale preview instrument, mixed into the output only.
+    pub preview: PreviewControl,
 }
 
 /// Default output device and its default configuration.
@@ -187,9 +190,11 @@ impl LooperPlayback {
         let bridge = Arc::new(BridgeStats::default());
         let (calibration_tx, cal_in) = rtrb::RingBuffer::<CalibrationJob>::new(1);
         let (cal_out, calibration_rx) = rtrb::RingBuffer::<CalibrationJob>::new(1);
+        let (preview, preview_player) = preview_pair(None, sample_rate); // the engine sets the bank
         clock::init_epoch();
 
         let parts = Parts {
+            preview: preview_player,
             input_clock: options.input_clock,
             bridge: bridge.clone(),
             cal_in,
@@ -243,6 +248,7 @@ impl LooperPlayback {
             bridge,
             calibration_tx,
             calibration_rx,
+            preview,
         })
     }
 
@@ -297,6 +303,7 @@ impl LooperPlayback {
 }
 
 struct Parts {
+    preview: PreviewPlayer,
     /// The input stream's stats (its anchor gives a burst-free fill measure).
     input_clock: Option<Arc<StreamStats>>,
     bridge: Arc<BridgeStats>,
@@ -341,6 +348,7 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let Parts {
+        mut preview,
         input_clock,
         bridge: bridge_stats,
         mut cal_in,
@@ -418,6 +426,8 @@ where
 
                 core.process(&in_buf[..n], &mut out_buf[..n]);
                 monitor_gain = mix_monitor(&mut out_buf[..n], &in_buf[..n], monitor_gain, monitor_target);
+                // After the looper: heard, never recorded.
+                preview.process(&mut out_buf[..n]);
                 if let Some(job) = calibration.as_mut() {
                     job.process(&mut out_buf[..n], &in_buf[..n]);
                 }

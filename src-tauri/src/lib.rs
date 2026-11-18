@@ -8,6 +8,7 @@ use voiceloop_engine::devices::DeviceList;
 use voiceloop_engine::midi_in::MidiPortInfo;
 use voiceloop_engine::model::AudioDevice;
 use voiceloop_engine::platform::MicPermission;
+use voiceloop_engine::preview::{PreviewRequest, PreviewStarted};
 use voiceloop_engine::{
     AnalysisConfig, AudioConfig, AudioSettings, Engine, EngineError, EngineStatus, EngineWarning, InputRoute,
     LooperCommand, MonitorConfig, OutputRoute,
@@ -131,6 +132,19 @@ fn request_mic_permission(engine: State<'_, Engine>) -> Result<MicPermission, En
 #[tauri::command]
 fn startup_warnings(engine: State<'_, Engine>) -> Result<Vec<EngineWarning>, EngineError> {
     engine.startup_warnings()
+}
+
+// --- Preview instrument (reference/scale playback on the engine's output) ---
+
+/// Play notes on the output device; fails when audio output is not running.
+#[tauri::command]
+fn preview_play(engine: State<'_, Engine>, request: PreviewRequest) -> Result<PreviewStarted, EngineError> {
+    engine.preview_play(request)
+}
+
+#[tauri::command]
+fn preview_stop(engine: State<'_, Engine>) -> Result<(), EngineError> {
+    engine.preview_stop()
 }
 
 // --- Projects and file interchange (docs/projects/persistence/INTERFACE.md) ---
@@ -311,6 +325,11 @@ pub fn run() {
             if let Ok(dir) = app.path().app_config_dir() {
                 let _ = engine.use_settings_file(dir.join(voiceloop_engine::settings::SETTINGS_FILE_NAME));
             }
+            // Bundled preview piano (resources/piano, Salamander Grand, CC-BY 3.0).
+            // Without it previews fall back to the webview's synthesized piano.
+            if let Ok(dir) = app.path().resource_dir() {
+                let _ = engine.use_preview_samples(dir.join("resources").join("piano"));
+            }
             app.manage(engine);
             Ok(())
         })
@@ -353,7 +372,9 @@ pub fn run() {
             practice_get_config,
             practice_set_config,
             practice_export_library,
-            practice_import_library
+            practice_import_library,
+            preview_play,
+            preview_stop
         ])
         .build(tauri::generate_context!())
         .expect("error while building VoiceLoop");
