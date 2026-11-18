@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::doc::ProjectDoc;
 use crate::error::{ProjectError, Result};
-use crate::package::{self, Progress, TrackAudio};
+use crate::package::{self, AssetAudio, Progress, TrackAudio};
 use crate::util;
 
 pub const MARKER_FILE: &str = "recovery.json";
@@ -38,13 +38,14 @@ pub fn autosave(
     recovery_dir: &Path,
     doc: &ProjectDoc,
     audio: &[TrackAudio],
+    assets: &AssetAudio,
     practice: Option<&[u8]>,
     original_path: Option<&Path>,
     progress: Progress,
 ) -> Result<RecoveryInfo> {
     fs::create_dir_all(recovery_dir).map_err(|e| ProjectError::io("create", recovery_dir, e))?;
     let pkg = recovery_dir.join(SESSION_DIR);
-    package::save_package(&pkg, doc, audio, practice, progress)?;
+    package::save_package(&pkg, doc, audio, assets, practice, progress)?;
     let info = RecoveryInfo {
         package_path: pkg.to_string_lossy().into_owned(),
         original_path: original_path.map(|p| p.to_string_lossy().into_owned()),
@@ -104,7 +105,7 @@ mod tests {
         let mut doc = ProjectDoc::new("Jam", 48_000, 1);
         doc.loop_ = Some(LoopDoc { period_frames: 100.0, extra: Default::default() });
         let audio = vec![TrackAudio { layers: vec![vec![0.25f32; 100].into()], ..TrackAudio::default() }];
-        autosave(&rec, &doc, &audio, None, None, &mut |_| {}).unwrap();
+        autosave(&rec, &doc, &audio, &AssetAudio::new(), None, None, &mut |_| {}).unwrap();
         let info = find(&rec).unwrap().expect("recoverable");
         assert_eq!(info.project_name, "Jam");
         let opened = package::open_package(&package_dir(&rec)).unwrap();
@@ -112,7 +113,16 @@ mod tests {
 
         // A second autosave refreshes it.
         let audio2 = vec![TrackAudio { layers: vec![vec![0.5f32; 100].into()], ..TrackAudio::default() }];
-        autosave(&rec, &opened.doc, &audio2, None, Some(Path::new("/x/Jam.voiceloop")), &mut |_| {}).unwrap();
+        autosave(
+            &rec,
+            &opened.doc,
+            &audio2,
+            &AssetAudio::new(),
+            None,
+            Some(Path::new("/x/Jam.voiceloop")),
+            &mut |_| {},
+        )
+        .unwrap();
         assert_eq!(find(&rec).unwrap().unwrap().original_path.as_deref(), Some("/x/Jam.voiceloop"));
 
         discard(&rec).unwrap();
@@ -124,7 +134,7 @@ mod tests {
     fn a_damaged_recovery_copy_is_not_offered() {
         let rec = crate::test_dir("recovery-bad");
         let doc = ProjectDoc::new("Jam", 48_000, 1);
-        autosave(&rec, &doc, &[], None, None, &mut |_| {}).unwrap();
+        autosave(&rec, &doc, &[], &AssetAudio::new(), None, None, &mut |_| {}).unwrap();
         fs::write(package_dir(&rec).join(package::PROJECT_FILE), b"{").unwrap();
         fs::remove_file(package_dir(&rec).join(package::PREVIOUS_FILE)).ok();
         assert_eq!(find(&rec).unwrap(), None);

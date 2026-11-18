@@ -1673,7 +1673,7 @@ fn spawn_save(
 ) -> mpsc::Receiver<WorkerMsg> {
     spawn_worker(move |progress| {
         let practice = practice_bytes(&practice)?;
-        let saved = package::save_package(&path, &doc, &audio, practice.as_deref(), progress)?;
+        let saved = package::save_package(&path, &doc, &audio, &Default::default(), practice.as_deref(), progress)?;
         Ok(Work::Saved(saved, path))
     })
 }
@@ -1687,7 +1687,7 @@ fn spawn_autosave(
 ) -> mpsc::Receiver<WorkerMsg> {
     spawn_worker(move |progress| {
         let practice = practice_bytes(&practice)?;
-        let info = recovery::autosave(&dir, &doc, &audio, practice.as_deref(), original.as_deref(), progress)?;
+        let info = recovery::autosave(&dir, &doc, &audio, &Default::default(), practice.as_deref(), original.as_deref(), progress)?;
         Ok(Work::Autosaved(info))
     })
 }

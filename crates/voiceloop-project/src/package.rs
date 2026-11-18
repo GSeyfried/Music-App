@@ -33,6 +33,9 @@ pub const PRACTICE_DIR: &str = "practice";
 /// Mono layer samples (shared, never copied for saving).
 pub type Samples = Arc<[f32]>;
 
+/// Arrangement asset samples by asset id (mono, at each asset's rate).
+pub type AssetAudio = std::collections::HashMap<String, Samples>;
+
 /// Audio for one track, index-aligned with `ProjectDoc::tracks`.
 #[derive(Debug, Clone, Default)]
 pub struct TrackAudio {
@@ -88,6 +91,11 @@ fn layer_file_name(sum: &str) -> String {
     format!("{AUDIO_DIR}/layer-{}.wav", sum.trim_start_matches("fnv1a64:"))
 }
 
+/// Package path of an arrangement asset with this checksum.
+pub fn asset_file_name(sum: &str) -> String {
+    format!("{AUDIO_DIR}/asset-{}.wav", sum.trim_start_matches("fnv1a64:"))
+}
+
 /// Bytes of a float32 mono WAV with our header (fmt 18 + fact + bext).
 fn expected_wav_len(path: &Path) -> Option<u64> {
     wav::WavReader::open(path).ok().filter(|r| !r.info().truncated).map(|r| r.info().frames)
@@ -111,8 +119,18 @@ fn ensure_package_dir(dir: &Path) -> Result<()> {
 }
 
 fn write_layer(dir: &Path, samples: &[f32], sample_rate: u32, description: &str) -> Result<(String, String)> {
+    write_audio(dir, samples, sample_rate, description, layer_file_name)
+}
+
+fn write_audio(
+    dir: &Path,
+    samples: &[f32],
+    sample_rate: u32,
+    description: &str,
+    name: fn(&str) -> String,
+) -> Result<(String, String)> {
     let sum = checksum(samples);
-    let rel = layer_file_name(&sum);
+    let rel = name(&sum);
     let path = dir.join(&rel);
     if expected_wav_len(&path) == Some(samples.len() as u64) {
         return Ok((rel, sum)); // content-addressed: already on disk
@@ -142,15 +160,22 @@ fn write_layer(dir: &Path, samples: &[f32], sample_rate: u32, description: &str)
 ///
 /// `practice` is the serialised Practice Lab library (opaque JSON); `None`
 /// means the project has none (any previous library reference is dropped).
+///
+/// `assets` holds the samples of every `doc.assets` entry (by id); their
+/// files are written as `audio/asset-<hash>.wav` and checksummed like layers.
 pub fn save_package(
     dir: &Path,
     doc: &ProjectDoc,
     audio: &[TrackAudio],
+    assets: &AssetAudio,
     practice: Option<&[u8]>,
     progress: Progress,
 ) -> Result<ProjectDoc> {
     if audio.len() > doc.tracks.len() {
         return Err(ProjectError::Invalid("audio for more tracks than the project has".into()));
+    }
+    if let Some(a) = doc.assets.iter().find(|a| !assets.contains_key(&a.id)) {
+        return Err(ProjectError::Invalid(format!("arrangement asset {} has no audio", a.id)));
     }
     ensure_package_dir(dir)?;
     let mut out = doc.clone();
@@ -201,6 +226,15 @@ pub fn save_package(
         track.layers.clear();
         track.redo_layers.clear();
     }
+    for asset in out.assets.iter_mut() {
+        let samples = &assets[&asset.id];
+        let what = format!("{} (arrangement asset)", asset.name);
+        let (file, sum) = write_audio(dir, samples, asset.sample_rate, &what, asset_file_name)?;
+        asset.file = file;
+        asset.checksum = sum;
+        asset.frames = samples.len() as u64;
+        asset.channels = 1;
+    }
     out.practice.library = match practice {
         Some(bytes) => Some(write_practice(dir, bytes)?),
         None => None,
@@ -237,7 +271,7 @@ fn collect_garbage(dir: &Path, current: &ProjectDoc, previous: Option<&ProjectDo
     if let Some(p) = previous {
         keep.extend(p.referenced_files().map(str::to_owned));
     }
-    for (sub, prefix) in [(AUDIO_DIR, "layer-"), (PRACTICE_DIR, "library-")] {
+    for (sub, prefix) in [(AUDIO_DIR, "layer-"), (AUDIO_DIR, "asset-"), (PRACTICE_DIR, "library-")] {
         let Ok(entries) = fs::read_dir(dir.join(sub)) else { continue };
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
@@ -305,19 +339,32 @@ fn check_files_exist(dir: &Path, doc: &ProjectDoc) -> Result<()> {
 }
 
 fn load_layer(dir: &Path, doc: &ProjectDoc, layer: &LayerDoc) -> Result<Samples> {
-    let path = dir.join(&layer.file);
+    load_checked(dir, &layer.file, layer.frames, doc.sample_rate, &layer.checksum)
+}
+
+fn load_checked(dir: &Path, file: &str, frames: u64, rate: u32, sum: &str) -> Result<Samples> {
+    let path = dir.join(file);
     let (info, data) = wav::read_wav(&path)?;
-    if info.truncated || info.frames != layer.frames {
-        return Err(ProjectError::corrupt(&path, format!("has {} frames, expected {}", info.frames, layer.frames)));
+    if info.truncated || info.frames != frames {
+        return Err(ProjectError::corrupt(&path, format!("has {} frames, expected {}", info.frames, frames)));
     }
-    if info.spec.sample_rate != doc.sample_rate {
+    if info.spec.sample_rate != rate {
         return Err(ProjectError::corrupt(&path, "sample rate differs from the project"));
     }
     let mono = if info.spec.channels == 1 { data } else { wav::downmix_mono(&data, info.spec.channels as usize) };
-    if checksum(&mono) != layer.checksum {
+    if checksum(&mono) != sum {
         return Err(ProjectError::corrupt(&path, "audio content does not match its checksum"));
     }
     Ok(mono.into())
+}
+
+/// Load and verify every arrangement asset of `doc` (frame count and checksum).
+pub fn load_assets(dir: &Path, doc: &ProjectDoc) -> Result<AssetAudio> {
+    let mut out = AssetAudio::new();
+    for a in &doc.assets {
+        out.insert(a.id.clone(), load_checked(dir, &a.file, a.frames, a.sample_rate, &a.checksum)?);
+    }
+    Ok(out)
 }
 
 fn practice_hash(bytes: &[u8]) -> String {
@@ -425,7 +472,7 @@ mod tests {
         assert!(dir.ends_with("My Song.voiceloop"));
         let (d, audio) = project();
         let mut steps = Vec::new();
-        let saved = save_package(&dir, &d, &audio, None, &mut |p| steps.push(p)).unwrap();
+        let saved = save_package(&dir, &d, &audio, &AssetAudio::new(), None, &mut |p| steps.push(p)).unwrap();
         assert_eq!(steps.last(), Some(&1.0));
         assert_eq!(files(&dir).len(), 4);
 
@@ -448,19 +495,19 @@ mod tests {
     fn resave_reuses_unchanged_files_and_collects_garbage() {
         let dir = crate::test_dir("pkg-resave").join("s.voiceloop");
         let (d, mut audio) = project();
-        let first = save_package(&dir, &d, &audio, None, &mut |_| {}).unwrap();
+        let first = save_package(&dir, &d, &audio, &AssetAudio::new(), None, &mut |_| {}).unwrap();
         let mtime = |f: &str| fs::metadata(dir.join(f)).unwrap().modified().unwrap();
         let base = first.tracks[0].layers[0].file.clone();
         let t0 = mtime(&base);
 
         audio[1].layers[0] = layer(4_800, 9.0); // change one layer
-        let second = save_package(&dir, &first, &audio, None, &mut |_| {}).unwrap();
+        let second = save_package(&dir, &first, &audio, &AssetAudio::new(), None, &mut |_| {}).unwrap();
         assert_eq!(mtime(&base), t0, "unchanged layer not rewritten");
         assert_eq!(second.tracks[0].layers[0].id, first.tracks[0].layers[0].id, "id kept");
         assert_ne!(second.tracks[1].layers[0].file, first.tracks[1].layers[0].file);
         assert_eq!(files(&dir).len(), 5, "the previous save's file is kept for the fallback");
 
-        let third = save_package(&dir, &second, &audio, None, &mut |_| {}).unwrap();
+        let third = save_package(&dir, &second, &audio, &AssetAudio::new(), None, &mut |_| {}).unwrap();
         assert_eq!(files(&dir).len(), 4, "files of older saves are removed");
         assert_eq!(third.tracks[1].layers[0].file, second.tracks[1].layers[0].file);
     }
@@ -469,10 +516,10 @@ mod tests {
     fn damaged_project_json_falls_back_to_the_previous_save() {
         let dir = crate::test_dir("pkg-fallback").join("s.voiceloop");
         let (d, audio) = project();
-        let first = save_package(&dir, &d, &audio, None, &mut |_| {}).unwrap();
+        let first = save_package(&dir, &d, &audio, &AssetAudio::new(), None, &mut |_| {}).unwrap();
         let mut renamed = first.clone();
         renamed.name = "Second".into();
-        save_package(&dir, &renamed, &audio, None, &mut |_| {}).unwrap();
+        save_package(&dir, &renamed, &audio, &AssetAudio::new(), None, &mut |_| {}).unwrap();
         // Simulate a torn write of project.json.
         let bytes = fs::read(dir.join(PROJECT_FILE)).unwrap();
         fs::write(dir.join(PROJECT_FILE), &bytes[..bytes.len() / 3]).unwrap();
@@ -488,7 +535,7 @@ mod tests {
     fn damaged_or_missing_audio_is_detected() {
         let dir = crate::test_dir("pkg-audio").join("s.voiceloop");
         let (d, audio) = project();
-        let saved = save_package(&dir, &d, &audio, None, &mut |_| {}).unwrap();
+        let saved = save_package(&dir, &d, &audio, &AssetAudio::new(), None, &mut |_| {}).unwrap();
         let f = dir.join(&saved.tracks[0].layers[1].file);
         let mut bytes = fs::read(&f).unwrap();
         let n = bytes.len();
@@ -507,7 +554,10 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("notes.txt"), "mine").unwrap();
         let (d, audio) = project();
-        assert!(matches!(save_package(&dir, &d, &audio, None, &mut |_| {}), Err(ProjectError::Invalid(_))));
+        assert!(matches!(
+            save_package(&dir, &d, &audio, &AssetAudio::new(), None, &mut |_| {}),
+            Err(ProjectError::Invalid(_))
+        ));
         assert_eq!(fs::read_to_string(dir.join("notes.txt")).unwrap(), "mine");
     }
 
@@ -515,7 +565,7 @@ mod tests {
     fn interrupted_save_leaves_the_old_save_intact() {
         let dir = crate::test_dir("pkg-interrupt").join("s.voiceloop");
         let (d, audio) = project();
-        let saved = save_package(&dir, &d, &audio, None, &mut |_| {}).unwrap();
+        let saved = save_package(&dir, &d, &audio, &AssetAudio::new(), None, &mut |_| {}).unwrap();
         // A crash mid-save leaves temp files and new audio not yet referenced.
         fs::write(dir.join(format!("{PROJECT_FILE}{}1-1", util::TEMP_MARKER)), b"{partial").unwrap();
         fs::write(dir.join(AUDIO_DIR).join("layer-ffffffffffffffff.wav"), b"RIFF").unwrap();
@@ -523,7 +573,7 @@ mod tests {
         assert_eq!(opened.doc, saved);
         assert_eq!(load_audio(&dir, &opened.doc, &mut |_| {}).unwrap(), audio);
         // The next save cleans up.
-        save_package(&dir, &opened.doc, &audio, None, &mut |_| {}).unwrap();
+        save_package(&dir, &opened.doc, &audio, &AssetAudio::new(), None, &mut |_| {}).unwrap();
         assert_eq!(files(&dir).len(), 4);
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 3, "audio/, project.json, project.previous.json");
     }
@@ -541,7 +591,7 @@ mod practice_tests {
         d.loop_ = Some(LoopDoc { period_frames: 10.0, extra: Default::default() });
         let audio = vec![TrackAudio { layers: vec![vec![0.5f32; 10].into()], ..TrackAudio::default() }];
         let lib = br#"{"formatVersion":1,"references":[{"id":"r1"}]}"#;
-        let saved = save_package(&dir, &d, &audio, Some(lib), &mut |_| {}).unwrap();
+        let saved = save_package(&dir, &d, &audio, &AssetAudio::new(), Some(lib), &mut |_| {}).unwrap();
         let rel = saved.practice.library.clone().unwrap();
         assert!(rel.starts_with("practice/library-") && rel.ends_with(".json"));
         let opened = open_package(&dir).unwrap();
@@ -549,18 +599,96 @@ mod practice_tests {
 
         // A changed library gets a new file; the old one survives one save (fallback), then goes.
         let lib2 = br#"{"formatVersion":1,"references":[]}"#;
-        let second = save_package(&dir, &saved, &audio, Some(lib2), &mut |_| {}).unwrap();
+        let second = save_package(&dir, &saved, &audio, &AssetAudio::new(), Some(lib2), &mut |_| {}).unwrap();
         assert_ne!(second.practice.library, saved.practice.library);
         assert!(dir.join(&rel).exists());
-        save_package(&dir, &second, &audio, Some(lib2), &mut |_| {}).unwrap();
+        save_package(&dir, &second, &audio, &AssetAudio::new(), Some(lib2), &mut |_| {}).unwrap();
         assert!(!dir.join(&rel).exists());
 
         // Tampering is detected; a missing file makes the save fall back.
         let rel2 = second.practice.library.clone().unwrap();
         fs::write(dir.join(&rel2), b"{}").unwrap();
         assert!(matches!(load_practice(&dir, &second), Err(ProjectError::Corrupt { .. })));
-        let none = save_package(&dir, &second, &audio, None, &mut |_| {}).unwrap();
+        let none = save_package(&dir, &second, &audio, &AssetAudio::new(), None, &mut |_| {}).unwrap();
         assert_eq!(none.practice.library, None);
         assert_eq!(load_practice(&dir, &none).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod arrangement_tests {
+    use super::*;
+    use crate::arrangement::{ArrangementTrackDoc, AudioAssetDoc, RegionDoc};
+
+    #[test]
+    fn arrangement_and_assets_round_trip_and_are_verified() {
+        let dir = crate::test_dir("pkg-arrangement").join("a.voiceloop");
+        let mut d = ProjectDoc::new("Song", 48_000, 1);
+        let samples: Samples = (0..3_000).map(|i| (i as f32 * 0.02).sin() * 0.4).collect::<Vec<_>>().into();
+        let asset = AudioAssetDoc::new("Take", &samples, 48_000);
+        assert_eq!(asset.peaks.len(), 1_024);
+        assert!(asset.peaks.iter().all(|p| (0.0..=0.4001).contains(p)));
+        let mut lane = ArrangementTrackDoc::new("Lane 1");
+        lane.regions.push(RegionDoc {
+            id: "r1".into(),
+            name: "Take".into(),
+            asset_id: asset.id.clone(),
+            start_frame: 48_000,
+            source_offset_frames: 100,
+            length_frames: 9_000,
+            repeat: true,
+            gain: 0.8,
+            fade_in_frames: 10,
+            fade_out_frames: 20,
+            muted: false,
+            origin: Some(crate::arrangement::RegionOrigin { looper_track: 1, layer: None }),
+            extra: Default::default(),
+        });
+        d.arrangement.sample_rate = 48_000;
+        d.arrangement.tracks.push(lane);
+        let mut audio = AssetAudio::new();
+        audio.insert(asset.id.clone(), samples.clone());
+        d.assets.push(asset);
+
+        // An asset without audio is refused.
+        assert!(save_package(&dir, &d, &[], &AssetAudio::new(), None, &mut |_| {}).is_err());
+        let saved = save_package(&dir, &d, &[], &audio, None, &mut |_| {}).unwrap();
+        assert!(saved.assets[0].file.starts_with("audio/asset-") && saved.assets[0].checksum.starts_with("fnv1a64:"));
+        let opened = open_package(&dir).unwrap();
+        assert_eq!(opened.doc, saved);
+        assert_eq!(opened.doc.arrangement, d.arrangement);
+        let back = load_assets(&dir, &opened.doc).unwrap();
+        assert_eq!(back[&d.assets[0].id], samples, "bit-identical");
+
+        // Removing the asset collects its file after one more save (fallback).
+        let mut gone = saved.clone();
+        gone.assets.clear();
+        gone.arrangement.tracks.clear();
+        save_package(&dir, &gone, &[], &AssetAudio::new(), None, &mut |_| {}).unwrap();
+        assert!(dir.join(&saved.assets[0].file).exists(), "kept for the previous-save fallback");
+        save_package(&dir, &gone, &[], &AssetAudio::new(), None, &mut |_| {}).unwrap();
+        assert!(!dir.join(&saved.assets[0].file).exists());
+
+        // Damaged asset audio is a typed error.
+        let saved = save_package(&dir, &d, &[], &audio, None, &mut |_| {}).unwrap();
+        let f = dir.join(&saved.assets[0].file);
+        let mut bytes = fs::read(&f).unwrap();
+        let n = bytes.len();
+        bytes[n - 8] ^= 0x10;
+        fs::write(&f, &bytes).unwrap();
+        assert!(matches!(load_assets(&dir, &saved), Err(ProjectError::Corrupt { .. })));
+    }
+
+    #[test]
+    fn older_projects_open_with_an_empty_arrangement() {
+        let text = r#"{"format":"voiceloop.project","formatVersion":1,"id":"x","name":"n","sampleRate":44100}"#;
+        let d = doc::parse_project(text.as_bytes(), Path::new("p")).unwrap();
+        assert!(d.arrangement.is_empty() && d.assets.is_empty());
+        assert_eq!(d.arrangement.format_version, 1);
+        // A region pointing at a missing asset makes the document invalid.
+        let mut v: serde_json::Value = serde_json::from_slice(&doc::to_json(&d).unwrap()).unwrap();
+        v["arrangement"]["tracks"] = serde_json::json!([{"id": "t", "regions": [
+            {"id": "r", "assetId": "missing", "startFrame": 0, "lengthFrames": 10}]}]);
+        assert!(doc::parse_project(&serde_json::to_vec(&v).unwrap(), Path::new("p")).is_err());
     }
 }

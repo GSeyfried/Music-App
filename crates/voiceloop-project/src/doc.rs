@@ -13,6 +13,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::arrangement::{ArrangementDoc, AudioAssetDoc};
 use crate::error::{ProjectError, Result};
 
 /// Value of the `format` field.
@@ -343,6 +344,12 @@ pub struct ProjectDoc {
     pub practice: PracticeDoc,
     #[serde(default)]
     pub devices: DeviceHints,
+    /// PRODUCE timeline (empty in projects written before it existed).
+    #[serde(default)]
+    pub arrangement: ArrangementDoc,
+    /// Immutable audio the arrangement's regions play.
+    #[serde(default)]
+    pub assets: Vec<AudioAssetDoc>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -370,6 +377,8 @@ impl ProjectDoc {
             tracks: (0..tracks).map(TrackDoc::new).collect(),
             practice: PracticeDoc::default(),
             devices: DeviceHints::default(),
+            arrangement: ArrangementDoc::default(),
+            assets: Vec::new(),
             extra: Extra::new(),
         }
     }
@@ -380,6 +389,7 @@ impl ProjectDoc {
             .iter()
             .flat_map(|t| t.layers.iter().chain(t.redo_layers.iter()))
             .map(|l| l.file.as_str())
+            .chain(self.assets.iter().map(|a| a.file.as_str()))
             .chain(self.practice.library.as_deref())
     }
 
@@ -408,6 +418,7 @@ impl ProjectDoc {
         if let Some(lib) = &self.practice.library {
             check_relative_path(lib)?;
         }
+        self.arrangement.validate(&self.assets, self.sample_rate)?;
         let mut ids = std::collections::HashSet::new();
         for (ti, track) in self.tracks.iter().enumerate() {
             if !ids.insert(track.id.as_str()) {

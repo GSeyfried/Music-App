@@ -7,6 +7,7 @@
 //! - [`wav`]      WAV read/write (16/24-bit PCM, 32-bit float, BWF `bext`, `acid`)
 //! - [`resample`] offline sample-rate conversion for imports
 //! - [`smf`]      Standard MIDI File write (tempo + meter) and read
+//! - [`arrangement`] PRODUCE timeline: lanes, regions, assets, shared render rules
 //! - [`doc`]      `project.json` schema, validation, versioning, migration hook
 //! - [`package`]  `<Name>.voiceloop/` folders: crash-safe save, open, verify
 //! - [`recovery`] autosave slot for crash recovery
@@ -15,6 +16,7 @@
 //!
 //! Format specification: `docs/projects/persistence/README.md`.
 
+pub mod arrangement;
 pub mod doc;
 pub mod error;
 pub mod package;
