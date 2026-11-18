@@ -1375,8 +1375,13 @@ impl LooperCore {
         }
     }
 
+    /// Mixer commands. Refused on both tracks of a duplicate being copied.
     fn with_track(&mut self, ti: usize, f: impl FnOnce(&mut Track)) -> Result<(), RejectReason> {
+        let busy = self.track_busy(ti);
         let tr = self.tracks.get_mut(ti).ok_or(RejectReason::NoSuchTrack)?;
+        if busy {
+            return Err(RejectReason::TrackBusy);
+        }
         f(tr);
         Ok(())
     }
@@ -1817,7 +1822,11 @@ impl LooperCore {
     }
 
     fn nudge_layer(&mut self, ti: usize, li: usize, frames: i64) -> Result<(), RejectReason> {
+        let busy = self.track_busy(ti);
         let tr = self.tracks.get_mut(ti).ok_or(RejectReason::NoSuchTrack)?;
+        if busy {
+            return Err(RejectReason::TrackBusy);
+        }
         let half_loop = tr.clock.map(|m| (m.period / 2.0).floor() as i64).ok_or(RejectReason::TrackEmpty)?;
         let offset = tr.offsets.get_mut(li).ok_or(RejectReason::TrackEmpty)?;
         *offset = offset.saturating_add(frames).clamp(-half_loop, half_loop);

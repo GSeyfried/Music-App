@@ -993,8 +993,7 @@ impl ProjectGlue {
                 doc.transport = self.doc.transport.clone();
                 self.pending = None;
                 if looper {
-                    let empty =
-                        loadable(&doc, &[], &[], None, rate.unwrap_or(doc.sample_rate)).map_err(to_engine)?;
+                    let empty = loadable(&doc, &[], &[], None, rate.unwrap_or(doc.sample_rate)).map_err(to_engine)?;
                     let importer = Importer::new(empty.plan, empty.layers);
                     Some(self.start(OpKind::New, Stage::Import(importer, AfterImport::Created { doc: Box::new(doc) })))
                 } else {
@@ -1576,15 +1575,7 @@ fn converted(
     doc.sample_rate = rate;
     progress(1.0);
     let resampled_from = (from != rate).then_some(from);
-    Work::Opened {
-        opened: Opened { path, doc, warnings },
-        audio,
-        clocks,
-        rate,
-        parked,
-        resampled_from,
-        practice: None,
-    }
+    Work::Opened { opened: Opened { path, doc, warnings }, audio, clocks, rate, parked, resampled_from, practice: None }
 }
 
 /// Unity-gain stems in `<dir>/Audio/` and a `.rpp` that mixes them with the
