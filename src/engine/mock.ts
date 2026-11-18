@@ -1147,12 +1147,20 @@ export class MockEngine implements EngineTransport {
     const blocked = this.canAddLayer(tr);
     if (blocked) return blocked;
     if (tr.layers === 0 || this.period === null) return "trackEmpty";
-    let start = this.t;
     if (this.transport.mode === "free") {
       if (this.run === "stopped" || this.run === "paused") this.run = "running";
-    } else {
-      if (this.run === "stopped" || this.run === "paused") this.play();
+    } else if (this.run === "stopped" || this.run === "paused") {
+      this.play();
+    }
+    let start: number;
+    const when = this.transport.overdubStart;
+    if (when === "loopStart") {
+      const cycles = Math.ceil((this.t - this.origin) / this.period - 1e-9);
+      start = this.origin + Math.round(cycles * this.period);
+    } else if (when === "nextBar" || this.transport.mode === "synced") {
       start = this.nextBarAtOrAfter(this.t);
+    } else {
+      start = this.t;
     }
     this.begin(tr, { kind: "overdub", start, end: null });
     return null;

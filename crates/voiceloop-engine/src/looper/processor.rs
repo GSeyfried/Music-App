@@ -35,7 +35,9 @@ use super::transfer::{
 use super::{LooperConfig, MAX_TRACKS};
 use crate::error::EngineError;
 use crate::model::LoopMode;
-use crate::transport::{first_grid_index_at_or_after, grid_frame, LoopFit, MusicalPosition, TransportState};
+use crate::transport::{
+    first_grid_index_at_or_after, grid_frame, LoopFit, MusicalPosition, OverdubStart, TransportState,
+};
 
 const COMMAND_CAPACITY: usize = 64;
 const SNAPSHOT_CAPACITY: usize = 8;
@@ -1173,16 +1175,23 @@ impl LooperCore {
         if self.tracks[ti].layers.is_empty() || self.master.is_none() {
             return Err(RejectReason::TrackEmpty);
         }
-        let start = match self.transport.mode {
-            LoopMode::Free => {
-                self.ensure_running_free();
-                self.t
-            }
+        match self.transport.mode {
+            LoopMode::Free => self.ensure_running_free(),
             LoopMode::Synced => {
                 if matches!(self.run, RunState::Stopped | RunState::Paused) {
                     self.play();
                 }
+            }
+        }
+        let start = match (self.transport.overdub_start, self.transport.mode) {
+            (OverdubStart::Immediate, LoopMode::Free) => self.t,
+            (OverdubStart::Immediate, LoopMode::Synced) | (OverdubStart::NextBar, _) => {
                 self.next_bar_at_or_after(self.t)
+            }
+            (OverdubStart::LoopStart, _) => {
+                let m = self.master.ok_or(RejectReason::TrackEmpty)?;
+                let (cycle, phase) = m.locate(self.t);
+                m.cycle_start(if phase == 0 { cycle } else { cycle + 1 })
             }
         };
         self.begin(ti, Recording { kind: RecKind::Overdub, start, end: None, lat: self.latency })

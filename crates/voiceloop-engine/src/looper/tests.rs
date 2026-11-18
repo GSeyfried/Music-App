@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::model::LoopMode;
-use crate::transport::{grid_frame, LoopFit, LoopLength, TransportState};
+use crate::transport::{grid_frame, LoopFit, LoopLength, OverdubStart, TransportState};
 
 use super::LooperCommand as C;
 
@@ -28,6 +28,8 @@ fn config(fade: u32) -> LooperConfig {
 fn transport(sample_rate: u32, mode: LoopMode) -> TransportState {
     let mut t = TransportState { sample_rate, mode, ..Default::default() };
     t.loop_fit = LoopFit::Exact;
+    // Most tests exercise the original timing; the overdub-start tests set it explicitly.
+    t.overdub_start = OverdubStart::Immediate;
     t.metronome.enabled = false;
     t.metronome.count_in_bars = 0;
     t
@@ -456,6 +458,47 @@ fn fractional_period_has_no_accumulated_drift() {
     for (k, &f) in expected.iter().enumerate() {
         assert_eq!(grid_frame(k as i64 + 1, bar) as usize, f);
     }
+}
+
+#[test]
+fn overdub_waits_for_the_next_loop_start_when_set() {
+    let mut t = transport(1_000, LoopMode::Free);
+    t.overdub_start = OverdubStart::LoopStart;
+    let mut r = Rig::new(config(0), t);
+    r.send(C::Record { track: 0 });
+    r.silence(997);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(300); // mid-loop
+    r.send(C::Overdub { track: 0 });
+    r.silence(1);
+    let s = r.snap();
+    assert_eq!(s.tracks[0].state, TrackState::Armed);
+    let start = s.tracks[0].record_start.expect("armed overdub has a start");
+    assert_eq!(start % 997, 0, "overdub must start on a loop boundary, got {start}");
+    assert!(start > 997, "must be the next boundary, not one already passed");
+    r.silence((start as usize) - 997 - 300);
+    assert_eq!(r.snap().tracks[0].state, TrackState::Overdubbing);
+}
+
+#[test]
+fn overdub_next_bar_in_free_mode_and_cancel_while_armed() {
+    let mut t = transport(1_000, LoopMode::Free); // 120 BPM 4/4: a bar is 2000 frames
+    t.overdub_start = OverdubStart::NextBar;
+    let mut r = Rig::new(config(0), t);
+    r.send(C::Record { track: 0 });
+    r.silence(4_000);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(500);
+    r.send(C::Overdub { track: 0 });
+    r.silence(1);
+    let start = r.snap().tracks[0].record_start.unwrap();
+    assert_eq!(start % 2_000, 0);
+    // Stopping while armed cancels without adding a layer.
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1);
+    let s = r.snap();
+    assert_eq!(s.tracks[0].layers, 1);
+    assert_eq!(s.tracks[0].record_start, None);
 }
 
 #[test]

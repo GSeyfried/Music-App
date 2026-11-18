@@ -52,6 +52,9 @@ export interface LoopLength {
 
 export type LoopFit = "exact" | "nearestBeat" | "roundDown" | "roundUp";
 
+/** Where a requested overdub starts; the track is armed (with a countdown) until then. */
+export type OverdubStart = "immediate" | "nextBar" | "loopStart";
+
 export interface TransportState {
   playState: PlayState;
   /** Beats per minute; a beat is the time-signature denominator note (7/8 counts eighths). */
@@ -62,6 +65,7 @@ export interface TransportState {
   loopLength: LoopLength;
   /** How a free first take is fitted to a whole-beat repeating length. */
   loopFit: LoopFit;
+  overdubStart: OverdubStart;
   position: FramePos;
   sampleRate: number;
 }
@@ -74,6 +78,7 @@ export const defaultTransport: TransportState = {
   mode: "free",
   loopLength: { bars: 2, beats: 0 },
   loopFit: "nearestBeat",
+  overdubStart: "loopStart",
   position: 0,
   sampleRate: 48_000,
 };

@@ -46,6 +46,16 @@ pub enum LoopFitDoc {
     RoundUp,
 }
 
+/// Where a requested overdub begins (mirrors the engine's `OverdubStart`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum OverdubStartDoc {
+    Immediate,
+    NextBar,
+    #[default]
+    LoopStart,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum TrackKind {
@@ -130,6 +140,7 @@ pub struct TransportDoc {
     pub mode: LoopMode,
     pub loop_length: LoopLengthDoc,
     pub loop_fit: LoopFitDoc,
+    pub overdub_start: OverdubStartDoc,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -143,6 +154,7 @@ impl Default for TransportDoc {
             mode: LoopMode::Free,
             loop_length: LoopLengthDoc::default(),
             loop_fit: LoopFitDoc::default(),
+            overdub_start: OverdubStartDoc::default(),
             extra: Extra::new(),
         }
     }

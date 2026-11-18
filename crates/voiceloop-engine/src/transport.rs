@@ -97,6 +97,20 @@ pub enum LoopFit {
     RoundUp,
 }
 
+/// When an overdub requested on a playing loop starts capturing. Until then
+/// the track is Armed, and the UI counts down to the start frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum OverdubStart {
+    /// Start at once (Free mode) or at the next bar (Synced mode).
+    Immediate,
+    /// Start at the next bar line.
+    NextBar,
+    /// Start at the next loop boundary (the loop's 0).
+    #[default]
+    LoopStart,
+}
+
 impl Default for LoopLength {
     fn default() -> Self {
         Self { bars: 2, beats: 0 }
@@ -117,6 +131,8 @@ pub struct TransportState {
     pub loop_length: LoopLength,
     /// Beat fitting for the first take in Free mode.
     pub loop_fit: LoopFit,
+    /// Where an overdub begins after it is requested.
+    pub overdub_start: OverdubStart,
     /// Current position on the authoritative clock (informational in persisted files).
     pub position: FramePos,
     pub sample_rate: u32,
@@ -132,6 +148,7 @@ impl Default for TransportState {
             mode: LoopMode::Free,
             loop_length: LoopLength::default(),
             loop_fit: LoopFit::default(),
+            overdub_start: OverdubStart::default(),
             position: 0,
             sample_rate: 48_000,
         }

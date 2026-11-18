@@ -361,6 +361,11 @@ fn transport_doc(t: &TransportState, base: &TransportDoc) -> TransportDoc {
         crate::transport::LoopFit::RoundDown => voiceloop_project::doc::LoopFitDoc::RoundDown,
         crate::transport::LoopFit::RoundUp => voiceloop_project::doc::LoopFitDoc::RoundUp,
     };
+    d.overdub_start = match t.overdub_start {
+        crate::transport::OverdubStart::Immediate => voiceloop_project::doc::OverdubStartDoc::Immediate,
+        crate::transport::OverdubStart::NextBar => voiceloop_project::doc::OverdubStartDoc::NextBar,
+        crate::transport::OverdubStart::LoopStart => voiceloop_project::doc::OverdubStartDoc::LoopStart,
+    };
     d.metronome.enabled = m.enabled;
     d.metronome.subdivision = m.subdivision;
     d.metronome.accent_downbeat = m.accent_downbeat;
@@ -391,6 +396,11 @@ fn transport_state(d: &TransportDoc, sample_rate: u32) -> TransportState {
             voiceloop_project::doc::LoopFitDoc::NearestBeat => crate::transport::LoopFit::NearestBeat,
             voiceloop_project::doc::LoopFitDoc::RoundDown => crate::transport::LoopFit::RoundDown,
             voiceloop_project::doc::LoopFitDoc::RoundUp => crate::transport::LoopFit::RoundUp,
+        },
+        overdub_start: match d.overdub_start {
+            voiceloop_project::doc::OverdubStartDoc::Immediate => crate::transport::OverdubStart::Immediate,
+            voiceloop_project::doc::OverdubStartDoc::NextBar => crate::transport::OverdubStart::NextBar,
+            voiceloop_project::doc::OverdubStartDoc::LoopStart => crate::transport::OverdubStart::LoopStart,
         },
         sample_rate,
         ..TransportState::default()

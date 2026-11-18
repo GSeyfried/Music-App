@@ -69,6 +69,11 @@ describe("MockEngine", () => {
     expect(lastNotice()).toEqual({ kind: "rejected", reason: "nothingToUndo" });
 
     await engine.looper({ type: "overdub", track: 0 });
+    // Default overdub start is the next loop boundary: armed until the loop's 0.
+    expect(latest().tracks[0].state).toBe("armed");
+    const start = latest().tracks[0].recordStart!;
+    expect((start - 0) % latest().loopPeriodFrames!).toBeLessThan(2);
+    for (let i = 0; i < 60 && latest().tracks[0].state === "armed"; i++) mock.tick(0.033);
     expect(latest().tracks[0].state).toBe("overdubbing");
     mock.tick(0.1);
     await engine.looper({ type: "stopRecording", track: 0 });

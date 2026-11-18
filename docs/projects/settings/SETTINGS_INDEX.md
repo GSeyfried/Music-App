@@ -29,6 +29,7 @@ Scopes: app / project / track / session.
 | `transport.bpm` | Tempo | Beats per minute. | PENDING: confirm | project | Transport bar; loop-circle beat ticks (proposed) | exists |
 | `transport.timeSignature` | Time signature | Beats per bar and beat unit. | PENDING: confirm | project | Transport bar; loop-circle measure ticks (proposed) | exists |
 | `transport.loopMode` / `loopLength` / `loopFit` | Loop length and fit | How long new loops are, in bars/beats, and how recordings fit. | PENDING: confirm | project | Transport bar | exists |
+| `transport.overdubStart` | Overdub start | When an overdub begins after you press Overdub. Loop start waits for the loop's 0 and counts down on the track; Next bar waits for the next bar line; Now starts at once (in Metronome mode, at the next bar). | Loop start | project | Transport bar; "in N" countdown on the track ring | exists |
 | `metronome.enabled` | Metronome | Play a click. | PENDING: confirm | project | Transport bar | exists |
 | `metronome.subdivision` | Click subdivision | Clicks per beat. | PENDING: confirm | project | Transport bar | exists |
 | `metronome.accentDownbeat` | Accent downbeat | Make the first beat of each bar louder. | PENDING: confirm | project | Transport bar | exists |
