@@ -459,6 +459,11 @@ impl Practice {
     }
 
     /// Audio stopped: any take in progress is abandoned, the clock forgets everything.
+    /// A take is arming, capturing or finishing (it needs the microphone).
+    pub fn is_active(&self) -> bool {
+        self.session.is_some()
+    }
+
     pub fn audio_stopped(&mut self) {
         if self.session.take().is_some() {
             self.message = Some("audio stopped during the take".into());

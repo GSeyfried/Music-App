@@ -153,6 +153,8 @@ fn build_table() -> Box<[f32]> {
 pub struct InputBridge {
     sample_rate: f64,
     cushion: usize,
+    /// Cushion at construction; restored by [`InputBridge::reattach`].
+    initial_cushion: usize,
     max_cushion: usize,
     primed: bool,
     /// False until the stream has primed once; start-up silence is not an underrun.
@@ -196,6 +198,7 @@ impl InputBridge {
         Self {
             sample_rate: sr as f64,
             cushion,
+            initial_cushion: cushion,
             max_cushion,
             primed: false,
             started: false,
@@ -227,6 +230,40 @@ impl InputBridge {
 
     pub fn is_primed(&self) -> bool {
         self.primed
+    }
+
+    /// Input has primed at least once since construction or the last
+    /// [`InputBridge::reattach`] (real input is flowing).
+    pub fn has_started(&self) -> bool {
+        self.started
+    }
+
+    /// A different input stream now feeds the ring (the microphone was closed
+    /// and opened again, see `looper/input_link.rs`). Start over as if new:
+    /// prime again, re-measure the target fill, count input positions from 0.
+    /// The mapping epoch advances (old anchors no longer apply) but this is a
+    /// planned change, not a discontinuity, so the counter is not touched.
+    /// Realtime-safe: no allocation (the filter table is kept).
+    pub fn reattach(&mut self) {
+        self.cushion = self.initial_cushion;
+        self.primed = false;
+        self.started = false;
+        self.first_call = true;
+        self.history = [0.0; HALF_TAPS];
+        self.frac = 0.0;
+        self.ratio = 1.0;
+        self.ppm = 0.0;
+        self.integral = 0.0;
+        self.fill_ema = 0.0;
+        self.target = None;
+        self.measure_sum = 0.0;
+        self.measure_frames = 0.0;
+        self.measure_min = f64::MAX;
+        self.max_block = 0;
+        self.input_clock = None;
+        self.clock_mode = false;
+        self.consumed = 0;
+        self.epoch = self.epoch.wrapping_add(1);
     }
 
     /// Current correction in ppm (input frames per output frame = 1 + ppm·1e-6).
@@ -623,6 +660,29 @@ mod tests {
         assert_eq!(bridge.epoch(), 0);
         bridge.note_input_gap(100);
         assert_eq!((bridge.input_position(), bridge.epoch(), bridge.discontinuities()), (100.0, 1, 1));
+    }
+
+    #[test]
+    fn reattach_starts_over_without_counting_a_discontinuity() {
+        let (mut bridge, mut tx, mut rx) = rig();
+        let mut block = [0.0f32; 256];
+        push(&mut tx, 1, 1_000);
+        assert_eq!(bridge.fill(&mut rx, &mut block).delivered, 256);
+        assert!(bridge.has_started());
+        // The old stream goes away; a new ring takes its place.
+        let (mut tx2, mut rx2) = RingBuffer::<f32>::new(CAP);
+        bridge.reattach();
+        assert_eq!((bridge.epoch(), bridge.discontinuities()), (1, 0), "epoch moves, no discontinuity");
+        assert_eq!(bridge.input_position(), 0.0);
+        assert!(!bridge.has_started() && !bridge.is_primed());
+        // Start-up silence on the new stream is not an underrun.
+        let r = bridge.fill(&mut rx2, &mut block);
+        assert_eq!(r, BridgeReport::default());
+        push(&mut tx2, 10_001, 600);
+        let r = bridge.fill(&mut rx2, &mut block);
+        assert_eq!(r.delivered, 256);
+        assert_eq!(block[0], 10_001.0, "the new stream's first frame comes first");
+        assert_eq!(bridge.discontinuities(), 0);
     }
 
     // ----- Multi-minute clock-mismatch simulations -----

@@ -29,11 +29,13 @@ use crate::error::EngineError;
 use crate::hardware::{
     self, AudioDiagnostics, CalibrationOutcome, DevicesChanged, Hardware, HardwareAction, SessionAction,
 };
+use crate::looper::input_link::InputFlow;
 use crate::looper::io::{LooperPlayback, OutputInfo};
 use crate::looper::{
-    LayerSummary, LayerTiming, LooperCommand, LooperConfig, LooperNotice, LooperSnapshot, LooperState,
+    LayerSummary, LayerTiming, LooperCommand, LooperConfig, LooperNotice, LooperSnapshot, LooperState, TrackState,
 };
 use crate::meter::{amplitude_to_db, MeterFrame};
+use crate::mic::{self, InputNeeds, InputReason, InputStatus, MicAction, MicDemand, MicState, MicWaiting};
 use crate::midi_in::{MidiBatch, MidiPortInfo};
 use crate::model::AudioDevice;
 use crate::platform::{self, MicPermission, SessionEvent, SessionInfo, SessionRequest};
@@ -66,6 +68,8 @@ pub struct LevelReading {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatus {
+    /// Audio is running (started and not stopped). The microphone opens only
+    /// when something needs it: see `input` (and `capture`, set while it is open).
     pub capturing: bool,
     /// Input monitoring (input → speakers) is active. Opt-in, off by default.
     pub monitoring: bool,
@@ -81,6 +85,8 @@ pub struct EngineStatus {
     pub unsaved_changes: bool,
     /// Microphone permission as the platform reports it (`unknown` on macOS).
     pub mic_permission: MicPermission,
+    /// Microphone state and why it is open ("mic only when needed", `mic.rs`).
+    pub input: InputStatus,
 }
 
 /// Pitch frames produced since the previous update (about three per event at
@@ -203,6 +209,7 @@ enum Command {
     UsePreviewSamples(std::path::PathBuf, Reply<u32>),
     PreviewPlay(PreviewRequest, Reply<PreviewStarted>),
     PreviewStop(Reply<()>),
+    SetInputNeeds(InputNeeds, Reply<EngineStatus>),
     Shutdown,
 }
 
@@ -387,6 +394,14 @@ impl Engine {
         self.request(Command::PreviewStop)
     }
 
+    /// What the frontend needs the microphone for (replaces the previous set)
+    /// and how long to keep it open afterwards. The engine adds its own
+    /// reasons (recording, monitoring, calibration, a Practice take); the mic
+    /// opens while any reason exists. See `mic.rs`.
+    pub fn set_input_needs(&self, needs: InputNeeds) -> Result<EngineStatus, EngineError> {
+        self.request(|r| Command::SetInputNeeds(needs, r))
+    }
+
     /// Stop audio, release devices and buffers, and join the control thread.
     pub fn shutdown(&self) {
         let _ = self.inner.tx.send(Command::Shutdown);
@@ -425,7 +440,25 @@ struct ControlLoop {
     /// When the current run of exact-zero meter frames began.
     silent_since: Option<Instant>,
     silence_warned: bool,
+    /// Audio was started (output, and input when needed) and not stopped.
+    audio_on: bool,
+    /// Why the mic is wanted and when it closes (`mic.rs`).
+    mic: MicDemand,
+    /// Record / overdub / calibration requests waiting for input to flow.
+    mic_waiting: MicWaiting,
+    /// The input failed to open; do not retry before this.
+    mic_retry_at: Option<Instant>,
+    /// Keep the mic for a forwarded record command until the looper reports it.
+    record_grace_until: Option<Instant>,
+    /// A Practice take was refused because the mic was closed: hold it open meanwhile.
+    practice_grace_until: Option<Instant>,
+    /// Input state last sent in a `status` event.
+    last_input: Option<InputStatus>,
 }
+
+/// How long a forwarded record/overdub (or a refused Practice start) holds the mic
+/// before the looper or Practice state shows it.
+const MIC_GRACE: Duration = Duration::from_secs(2);
 
 impl ControlLoop {
     fn new(sink: EventSink) -> Self {
@@ -452,12 +485,19 @@ impl ControlLoop {
             last_emit: Instant::now(),
             silent_since: None,
             silence_warned: false,
+            audio_on: false,
+            mic: MicDemand::default(),
+            mic_waiting: MicWaiting::default(),
+            mic_retry_at: None,
+            record_grace_until: None,
+            practice_grace_until: None,
+            last_input: None,
         }
     }
 
     fn status(&self) -> EngineStatus {
         EngineStatus {
-            capturing: self.capture.is_some(),
+            capturing: self.audio_on,
             monitoring: self.playback.as_ref().is_some_and(|p| p.monitor().enabled),
             capture: self.capture.as_ref().map(|c| c.info()),
             output: self.playback.as_ref().map(|p| p.output_info()),
@@ -466,12 +506,13 @@ impl ControlLoop {
             audio_config: self.hw.config.clone(),
             unsaved_changes: self.project.has_unsaved_changes(),
             mic_permission: platform::mic_permission(),
+            input: self.input_status(Instant::now()),
         }
     }
 
     fn run(mut self, rx: mpsc::Receiver<Command>) {
         loop {
-            let timeout = if self.capture.is_some() {
+            let timeout = if self.audio_on {
                 LEVEL_EVENT_INTERVAL.saturating_sub(self.last_emit.elapsed())
             } else {
                 Duration::from_millis(250)
@@ -503,7 +544,8 @@ impl ControlLoop {
             }
             self.drain_analysis();
             self.tick_practice();
-            if self.capture.is_some() && self.last_emit.elapsed() >= LEVEL_EVENT_INTERVAL {
+            self.update_mic();
+            if self.audio_on && self.last_emit.elapsed() >= LEVEL_EVENT_INTERVAL {
                 self.last_emit = Instant::now();
                 self.emit_level();
                 self.emit_looper();
@@ -653,7 +695,15 @@ impl ControlLoop {
             }
             Command::StartLatencyCalibration(apply, reply) => {
                 let idle = self.latest_snapshot.is_none_or(|s| s.run == crate::looper::RunState::Stopped);
-                let _ = reply.send(self.hw.start_calibration(self.playback.as_mut(), idle, apply));
+                // The test needs input flowing: wait for the mic (it opens for the calibration).
+                let result = if self.input_flowing() {
+                    self.hw.start_calibration(self.playback.as_mut(), idle, apply)
+                } else {
+                    self.hw.check_calibration(self.playback.as_ref(), idle).map(|()| {
+                        self.mic_waiting.push_calibration(apply, Instant::now());
+                    })
+                };
+                let _ = reply.send(result);
             }
             Command::RequestMicPermission(reply) => {
                 let _ = reply.send(Ok(self.hw.request_mic_permission()));
@@ -672,6 +722,15 @@ impl ControlLoop {
                 let _ = reply.send(self.project.request(request, self.playback.as_mut(), self.practice.library()));
             }
             Command::Practice(request, reply) => {
+                let starts = matches!(request, practice::Request::StartReference(_) | practice::Request::StartAttempt { .. });
+                if starts && self.audio_on && self.mic_state() != MicState::On {
+                    // Takes are timed on the input clock: the mic must already run.
+                    self.practice_grace_until = Some(Instant::now() + mic::START_TIMEOUT);
+                    let _ = reply.send(Err(EngineError::Busy(
+                        "the microphone is starting; start the take again in a moment".into(),
+                    )));
+                    return;
+                }
                 let io = practice_io!(self);
                 let result = self.practice.handle(request, &io);
                 self.flush_practice();
@@ -700,8 +759,166 @@ impl ControlLoop {
                 let result = self.playback.as_mut().map_or(Ok(()), |p| p.preview.stop());
                 let _ = reply.send(result);
             }
+            Command::SetInputNeeds(needs, reply) => {
+                self.mic.set_needs(&needs);
+                self.mic_retry_at = None; // a new request may try again at once
+                self.update_mic();
+                let _ = reply.send(Ok(self.status()));
+            }
             Command::Shutdown => unreachable!("handled in run loop"),
         }
+    }
+
+    // ---- microphone on demand (mic.rs) ------------------------------------------------
+
+    /// Real input reaches the looper (or, without a looper, the input runs).
+    fn input_flowing(&self) -> bool {
+        self.mic_state() == MicState::On
+    }
+
+    fn mic_state(&self) -> MicState {
+        match (&self.capture, &self.playback) {
+            (None, _) => MicState::Off,
+            (Some(_), Some(p)) => match p.input.flow() {
+                InputFlow::Flowing => MicState::On,
+                _ => MicState::Opening,
+            },
+            (Some(c), None) if c.stats.anchor.read().is_some() => MicState::On,
+            (Some(_), None) => MicState::Opening,
+        }
+    }
+
+    /// Reasons the engine itself has for the mic right now.
+    fn engine_reasons(&self, now: Instant) -> Vec<InputReason> {
+        let mut reasons = Vec::new();
+        if !self.audio_on {
+            return reasons;
+        }
+        let looper_records = self.playback.is_some()
+            && self.latest_snapshot.is_some_and(|s| {
+                s.tracks.iter().take(s.track_count as usize).any(|t| {
+                    matches!(t.state, TrackState::Armed | TrackState::Recording | TrackState::Overdubbing)
+                })
+            });
+        if looper_records || self.mic_waiting.has_looper() || self.record_grace_until.is_some_and(|t| now < t) {
+            reasons.push(InputReason::Record);
+        }
+        if self.playback.is_some() && self.hw.config.monitor.enabled {
+            reasons.push(InputReason::Monitor);
+        }
+        if self.hw.calibrating() || self.mic_waiting.has_calibration() {
+            reasons.push(InputReason::Calibration);
+        }
+        if self.practice.is_active() || self.practice_grace_until.is_some_and(|t| now < t) {
+            reasons.push(InputReason::Practice);
+        }
+        reasons
+    }
+
+    fn input_status(&self, now: Instant) -> InputStatus {
+        let engine = self.engine_reasons(now);
+        InputStatus {
+            mic: self.mic_state(),
+            reasons: if self.audio_on { self.mic.reasons(&engine) } else { Vec::new() },
+            hold_ms: self.mic.hold_ms(),
+            closing_in_ms: self.capture.as_ref().and(self.mic.closing_in(now)).map(|d| d.as_millis() as u32),
+            waiting: self.mic_waiting.count(),
+        }
+    }
+
+    /// Open or close the mic as the reasons require, release requests waiting
+    /// for it, and send a `status` event when the mic state changed.
+    fn update_mic(&mut self) {
+        let now = Instant::now();
+        if self.audio_on {
+            let engine = self.engine_reasons(now);
+            match self.mic.decide(&engine, self.capture.is_some(), now) {
+                MicAction::Open if self.mic_retry_at.is_none_or(|t| now >= t) => {
+                    if let Err(e) = self.open_mic() {
+                        self.mic_retry_at = Some(now + mic::RETRY_AFTER);
+                        (self.sink)(EngineEvent::Error(e));
+                    }
+                }
+                MicAction::Close => self.close_mic(),
+                _ => {}
+            }
+            let released = self.mic_waiting.take(self.input_flowing(), now);
+            if released.timed_out {
+                if !released.looper.is_empty() {
+                    (self.sink)(EngineEvent::Error(EngineError::PermissionOrUnavailable(
+                        "the microphone did not start in time, so recording was cancelled".into(),
+                    )));
+                }
+                if released.calibration.is_some() {
+                    self.calibration_failed("the microphone did not start in time".into());
+                }
+            } else {
+                for command in released.looper {
+                    if let Err(e) = self.send_looper(command) {
+                        (self.sink)(EngineEvent::Error(e));
+                    }
+                }
+                if let Some(apply) = released.calibration {
+                    let idle = self.latest_snapshot.is_none_or(|s| s.run == crate::looper::RunState::Stopped);
+                    if let Err(e) = self.hw.start_calibration(self.playback.as_mut(), idle, apply) {
+                        self.calibration_failed(e.to_string());
+                    }
+                }
+            }
+        }
+        let input = self.input_status(now);
+        if self.last_input.as_ref().is_none_or(|last| !last.same_as(&input)) {
+            self.last_input = Some(input);
+            (self.sink)(EngineEvent::Status(self.status()));
+        }
+    }
+
+    fn calibration_failed(&self, message: String) {
+        (self.sink)(EngineEvent::Calibration(hardware::CalibrationOutcome {
+            result: None,
+            error: Some(crate::calibration::CalibrationFailure::Aborted(message)),
+            applied: false,
+        }));
+    }
+
+    /// Open the input stream (attached to the running output, which keeps playing).
+    fn open_mic(&mut self) -> Result<(), EngineError> {
+        let opened = hardware::open_capture(&self.hw.config, self.playback.as_mut())?;
+        let hardware::CaptureOpened { capture, analysis_rx, analysis_dropped, warnings } = opened;
+        // Analysis is optional: if its thread cannot start, input still runs.
+        match AnalysisWorker::start(self.analysis_config, capture.info.sample_rate, analysis_rx, analysis_dropped) {
+            Ok(worker) => self.analysis = Some(worker),
+            Err(e) => (self.sink)(EngineEvent::Warning(EngineWarning::AnalysisUnavailable(e.to_string()))),
+        }
+        self.capture = Some(capture);
+        self.latest = None;
+        self.peak_since_emit = 0.0;
+        self.channel_peaks = [0.0; crate::meter::MAX_METER_CHANNELS];
+        self.dropped = 0;
+        self.last_end_frame = 0;
+        self.silent_since = None;
+        self.silence_warned = false;
+        self.hw.capture_opened();
+        self.mic_retry_at = None;
+        for warning in warnings {
+            (self.sink)(EngineEvent::Warning(warning));
+        }
+        Ok(())
+    }
+
+    /// Detach and stop the input stream; output and loops keep running.
+    fn close_mic(&mut self) {
+        if let Some(cap) = self.capture.take() {
+            hardware::close_capture(cap, self.playback.as_mut());
+        }
+        if let Some(worker) = self.analysis.take() {
+            worker.stop();
+        }
+        self.pitch_pending.clear();
+        self.latest = None;
+        // Input frames restart at 0 on the next open: the input→transport mapping starts over.
+        self.practice.audio_stopped();
+        self.flush_practice();
     }
 
     fn send_looper(&mut self, command: LooperCommand) -> Result<(), EngineError> {
@@ -721,6 +938,20 @@ impl ControlLoop {
             if self.playback.is_none() {
                 self.transport = transport;
                 return Ok(());
+            }
+        }
+        if self.playback.is_some() {
+            // Mic only when needed: a take waits ("arms") until input flows.
+            if self.mic_waiting.on_command(&command) {
+                return Ok(()); // it cancelled a take that was still waiting for the mic
+            }
+            let records = matches!(command, LooperCommand::Record { .. } | LooperCommand::Overdub { .. });
+            if records && (!self.input_flowing() || self.mic_waiting.must_queue(&command)) {
+                self.mic_waiting.push_looper(command, Instant::now());
+                return Ok(());
+            }
+            if records {
+                self.record_grace_until = Some(Instant::now() + MIC_GRACE);
             }
         }
         let result = match self.playback.as_mut() {
@@ -744,30 +975,16 @@ impl ControlLoop {
         if let Some(info) = platform::prepare_audio(&session)? {
             (self.sink)(EngineEvent::AudioSessionInfo(info));
         }
-        // Devices, rate, buffer size, routes, and the stream pair: see `hardware::open_audio`.
+        // Devices, rate, buffer size, routes, and the output: see `hardware::open_audio`.
+        // The input opens separately, only while something needs it (`update_mic`).
         let opened = hardware::open_audio(&config, &self.looper_config, self.transport)?;
-        let hardware::Opened { capture, playback, analysis_rx, analysis_dropped, looper_problem, warnings, resolved } =
-            opened;
+        let hardware::Opened { playback, looper_problem, warnings, resolved } = opened;
 
-        // Analysis is optional: if its thread cannot start, audio still runs.
-        match AnalysisWorker::start(self.analysis_config, capture.info.sample_rate, analysis_rx, analysis_dropped) {
-            Ok(worker) => self.analysis = Some(worker),
-            Err(e) => (self.sink)(EngineEvent::Warning(EngineWarning::AnalysisUnavailable(e.to_string()))),
-        }
-
-        self.capture = Some(capture);
         self.playback = playback;
         if let (Some(p), Some(bank)) = (self.playback.as_mut(), self.preview_bank.clone()) {
             let _ = p.preview.set_bank(bank);
         }
-        self.latest = None;
         self.latest_snapshot = None;
-        self.peak_since_emit = 0.0;
-        self.channel_peaks = [0.0; crate::meter::MAX_METER_CHANNELS];
-        self.dropped = 0;
-        self.last_end_frame = 0;
-        self.silent_since = None;
-        self.silence_warned = false;
         self.hw.reset_clock();
         for warning in warnings {
             (self.sink)(EngineEvent::Warning(warning));
@@ -781,6 +998,9 @@ impl ControlLoop {
         }
         self.hw.config = resolved;
         self.hw.autosave(&*self.sink);
+        self.audio_on = true;
+        self.mic_retry_at = None;
+        self.update_mic(); // opens the mic now if something already needs it
         Ok(self.status())
     }
 
@@ -800,6 +1020,11 @@ impl ControlLoop {
         }
         self.pitch_pending.clear();
         self.latest_snapshot = None;
+        self.latest = None;
+        self.audio_on = false;
+        self.mic_waiting.clear();
+        self.record_grace_until = None;
+        self.practice_grace_until = None;
         self.practice.audio_stopped();
         self.flush_practice();
     }
@@ -831,7 +1056,7 @@ impl ControlLoop {
     }
 
     fn apply_hardware_action(&mut self, action: HardwareAction) {
-        if self.capture.is_none() && self.playback.is_none() {
+        if !self.audio_on {
             return;
         }
         match action {
@@ -868,7 +1093,7 @@ impl ControlLoop {
         if let Some(action) = self.hw.poll_hotplug(self.capture.as_ref(), self.playback.as_ref(), sink) {
             self.apply_hardware_action(action);
         }
-        let running = self.capture.is_some();
+        let running = self.audio_on;
         match self.hw.poll_session(running, &*self.sink) {
             Some(SessionAction::Stop) => {
                 self.stop_audio();
@@ -1040,6 +1265,23 @@ mod tests {
         assert!(!status.capturing);
         engine.shutdown();
         assert_eq!(engine.status(), Err(EngineError::EngineStopped));
+    }
+
+    #[test]
+    fn input_needs_are_kept_while_audio_is_stopped_and_the_mic_stays_off() {
+        let engine = Engine::start(Box::new(|_| {}));
+        let status = engine.status().unwrap();
+        assert_eq!(status.input.mic, MicState::Off);
+        assert_eq!(status.input.hold_ms, mic::DEFAULT_HOLD_MS);
+        let needs = InputNeeds { reasons: vec![InputReason::Pitch, InputReason::Record], hold_ms: Some(3_000) };
+        let status = engine.set_input_needs(needs).unwrap();
+        assert_eq!(status.input.mic, MicState::Off, "nothing opens until audio starts");
+        assert!(status.input.reasons.is_empty(), "no reasons are reported while audio is stopped");
+        assert_eq!(status.input.hold_ms, 3_000);
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["input"]["mic"], "off");
+        assert_eq!(json["capturing"], false);
+        engine.shutdown();
     }
 
     #[test]
