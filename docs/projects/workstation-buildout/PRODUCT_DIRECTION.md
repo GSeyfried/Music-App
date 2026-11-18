@@ -43,6 +43,23 @@ Tracks and layers should ultimately be saveable, restorable, collapsible, adjust
 - bounce, consolidation, and export without losing the original work unexpectedly;
 - clear visual distinction between tracks, layers/takes, and rendered audio.
 
+### Track and layer lanes (user direction, 2026-11-18)
+
+Tracks and layers will eventually be shown as their own items in timeline
+lanes, as in GarageBand, instead of being adjusted through small inspector
+buttons. Each lane (a track, or a layer expanded beneath its track) is
+something you work on directly:
+
+- drag to move it in time, which replaces the current per-layer **nudge** buttons;
+- trim the start and end;
+- stretch and warp the timing (time-stretch, warp markers);
+- plus the other per-lane editing above (split, duplicate, mute, rename, promote, bounce).
+
+The per-layer nudge and timing readout (ROADMAP step 4) are a stopgap. Keep
+their engine parts (layer offset, onset timing) so the lane view can reuse
+them. `PENDING`: the lane/region data model, how warping relates to the
+loop grid, and whether stretch is realtime or rendered offline.
+
 The repository already contains substantial project persistence and export infrastructure, but no project UI. Region trimming, arrangement editing, and layer detail controls are future work rather than hidden features. See [UNWIRED_FEATURES.md](UNWIRED_FEATURES.md).
 
 ## Advanced audio tools

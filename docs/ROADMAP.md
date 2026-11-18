@@ -234,6 +234,11 @@ and expose layer/take detail without flattening every overdub into a track.
 Then add nondestructive trim/arrangement primitives in independently testable
 slices. Do not combine this milestone with an effects system.
 
+Target UI: GarageBand-style lanes, where each track and layer is its own item
+you can move, trim, stretch and warp directly. Lanes replace the interim
+per-layer nudge buttons. See
+[PRODUCT_DIRECTION.md](projects/workstation-buildout/PRODUCT_DIRECTION.md#track-and-layer-lanes-user-direction-2026-11-18).
+
 ### 5. Prove VoiceLoop Pocket offline on a physical device
 
 Install full Xcode; build the smallest Tauri iOS shell; implement/verify the
