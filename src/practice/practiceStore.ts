@@ -27,6 +27,7 @@ import {
   type ReferenceDetail,
   type ReferenceSummary,
   type ScoringConfig,
+  type Take,
   type Trend,
 } from "./types";
 
@@ -334,6 +335,25 @@ export class PracticeStore {
     });
   }
 
+  /**
+   * Move a reference to another key or octave (semitones, e.g. ±1 or ±12).
+   * Its notes and pitch curve are shifted and it is re-imported under the
+   * same id (import replaces matching ids). Earlier attempts keep the scores
+   * they were given against the old key.
+   */
+  transposeReference(id: string, semitones: number): Promise<unknown> {
+    if (!semitones) return Promise.resolve();
+    return this.attempt(async () => {
+      const lib = await this.client.call("practice_export_library");
+      const ref = lib.references.find((r) => r.id === id);
+      if (!ref) return;
+      const moved: Reference = { ...ref, take: transposeTake(ref.take, semitones) };
+      await this.client.call("practice_import_library", { library: { formatVersion: lib.formatVersion, references: [moved] }, replace: false });
+      await this.loadReferences();
+      await this.select(id);
+    });
+  }
+
   private markHandEdit(before: ScoringConfig, patch: Partial<ScoringConfig>): void {
     const current = getAppSetting("practice.difficulty");
     const next = difficultyAfterEdit(current, before, patch);
@@ -361,4 +381,13 @@ export class PracticeStore {
       this.set({ config });
     });
   }
+}
+
+/** A take moved by `semitones`: notes and every pitch frame shift together. */
+export function transposeTake(take: Take, semitones: number): Take {
+  return {
+    ...take,
+    notes: take.notes.map((n) => ({ ...n, note: n.note + semitones, midi: n.midi + semitones })),
+    pitch: take.pitch.map((p) => (p.midi === null ? p : { ...p, midi: p.midi + semitones })),
+  };
 }

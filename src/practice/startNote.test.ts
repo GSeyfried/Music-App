@@ -63,3 +63,19 @@ describe("ignore octave display", () => {
     expect(displayOctaveShift(report(false))).toBe(0);
   });
 });
+
+import { transposeTake } from "./practiceStore";
+
+describe("transposeTake", () => {
+  it("moves notes and pitch together, leaving unpitched frames alone", () => {
+    const take = {
+      sampleRate: 48000, durationFrames: 1, onsets: [], grid: null, timing: {},
+      notes: [{ startFrame: 0, endFrame: 10, note: 60, midi: 60.1, cents: 10, stabilityCents: 5, clarity: 1, frames: 10 }],
+      pitch: [{ frame: 0, midi: 60.1, clarity: 1 }, { frame: 1, midi: null, clarity: 0 }],
+    } as unknown as Parameters<typeof transposeTake>[0];
+    const t = transposeTake(take, -12);
+    expect(t.notes[0].note).toBe(48);
+    expect(t.pitch[0].midi).toBeCloseTo(48.1);
+    expect(t.pitch[1].midi).toBeNull();
+  });
+});

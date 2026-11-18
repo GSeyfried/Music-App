@@ -308,6 +308,31 @@ function PlayTakeButton({ take }: { take: Take }) {
   );
 }
 
+/** Move a reference to another key or octave so it sits in your range. */
+function TransposeControl({ referenceId, disabled }: { referenceId: string; disabled?: boolean }) {
+  const store = usePracticeStore();
+  const busy = usePractice((s) => s.busy);
+  const off = disabled || busy;
+  const move = (n: number) => void store.transposeReference(referenceId, n);
+  return (
+    <div className="pl-transpose" role="group" aria-label="Move reference">
+      <span className="stepper-label">Move</span>
+      <Button variant="outline" size="sm" disabled={off} aria-label="Down an octave" onPress={() => move(-12)}>
+        −8va
+      </Button>
+      <Button variant="outline" size="sm" disabled={off} aria-label="Down a semitone" onPress={() => move(-1)}>
+        −½
+      </Button>
+      <Button variant="outline" size="sm" disabled={off} aria-label="Up a semitone" onPress={() => move(1)}>
+        +½
+      </Button>
+      <Button variant="outline" size="sm" disabled={off} aria-label="Up an octave" onPress={() => move(12)}>
+        +8va
+      </Button>
+    </div>
+  );
+}
+
 /** Octaves offered for scales (C2..C5 starting notes). */
 const SCALE_OCTAVES = [2, 3, 4, 5];
 
@@ -600,7 +625,10 @@ function ReferenceView({ ready }: { ready: boolean }) {
           {key ? ` · probably ${key}` : ""}
           {s.take.uncertainNotes > 0 ? ` · ${s.take.uncertainNotes} unclear note${s.take.uncertainNotes > 1 ? "s" : ""}` : ""}
         </p>
-        <PlayTakeButton take={detail.take} />
+        <div className="pl-row">
+          <PlayTakeButton take={detail.take} />
+          <TransposeControl referenceId={s.id} disabled={phase !== "idle"} />
+        </div>
         {phase === "idle" && <ReferenceCurve take={detail.take} label={`Pitch of ${s.name}: ${detail.take.notes.map((n) => noteLabel(n.note)).join(" ")}`} />}
       </Widget>
       {phase === "idle" && (
