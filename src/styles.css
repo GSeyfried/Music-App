@@ -712,6 +712,117 @@ input[type="range"] {
   color: var(--text-dim);
 }
 
+/* ---- Project, import, export -------------------------------------------- */
+
+.project-trigger-name {
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.text-input {
+  width: 100%;
+  min-height: var(--hit);
+  padding: 0 var(--s-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.project-path {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--fs-xs) var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.project-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.project-actions-stack {
+  flex-direction: column;
+}
+
+.project-actions-stack .btn {
+  justify-content: center;
+}
+
+.project-progress {
+  display: grid;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  text-transform: capitalize;
+}
+
+.project-progress progress {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.project-check {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: var(--hit);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.project-check input {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+}
+
+.recent-projects {
+  display: grid;
+  gap: var(--s-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recent-projects li {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.recent-projects li > button:first-child {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--hit);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  padding: var(--s-2) var(--s-3);
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.recent-projects li > button:first-child span {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
 .device-row {
   display: flex;
   align-items: flex-end;
@@ -725,6 +836,11 @@ input[type="range"] {
   background: var(--border);
   border-radius: var(--r-md);
   overflow: hidden;
+}
+
+.layer-list {
+  padding: 0;
+  list-style: none;
 }
 
 .diag-row {

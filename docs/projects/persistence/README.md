@@ -23,6 +23,8 @@ Also includes the looper-core fixes from the realtime audit
 | Realtime-safe layer export/import between looper and control thread | `crates/voiceloop-engine/src/looper/transfer.rs`, `processor.rs` (`service_jobs`, `restore`) | bit-identical round-trip tests pass |
 | Engine glue: requests, worker threads, events, rate conversion, import fit rules | `crates/voiceloop-engine/src/project.rs` | unit tests pass; full flow needs hardware |
 | Tauri commands `project_command`, `find_recovery`, `discard_recovery` | `src-tauri/src/lib.rs` | compiles |
+| Typed project/recovery contract, external store, recent-project list and safe quit | `src/project/` | typechecks; component/store tests pass |
+| Native project, WAV and MIDI dialogs | `src/engine/bridge.ts`, `@tauri-apps/plugin-dialog` | packaged Open dialog launched on macOS |
 | RT audit #2 Stop drains the latency tail; #3 Pause refused while recording; #6 realtime caps; #8 saturating counters + transport frame limit | `looper/processor.rs`, `looper/mod.rs` | tests pass |
 
 `voiceloop-project` is pure Rust (serde, serde_json, thiserror only): no
@@ -300,9 +302,10 @@ fallback to previous save, damaged/missing audio, refusal to overwrite
 foreign folders, interrupted save; recovery slot; mixdown/stem exactness and
 alignment; looper export/import bit-identical round trips; RT fixes.
 
-**Not verified (needs hardware or a DAW):** the full Tauri flow in the
-running app (dialogs are not wired yet); export/import timing against live
-audio on CoreAudio; opening the exports in REAPER, GarageBand and Logic.
+**Not verified (needs hardware or a DAW):** saving and reopening real recorded
+loops, crash-recovery restore/discard, export/import timing against live audio
+on CoreAudio, and opening exports in REAPER, GarageBand and Logic. The packaged
+Project panel and native Open dialog were launched successfully on macOS.
 
 ### Manual DAW check: REAPER (`/Applications/REAPER.app`)
 

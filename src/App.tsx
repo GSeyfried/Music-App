@@ -12,6 +12,8 @@ import type { EngineClient } from "./engine/client";
 import { shortcutKeys } from "./lib/shortcuts";
 import { PracticeLab } from "./workspaces/PracticeLab";
 import { Studio } from "./workspaces/Studio";
+import { ProjectProvider, useProject } from "./project/ProjectContext";
+import { ProjectPanel } from "./project/ProjectPanel";
 
 type WorkspaceId = "studio" | "practice";
 
@@ -33,6 +35,9 @@ function EngineBadge() {
 function Shell() {
   const [workspace, setWorkspace] = useState<WorkspaceId>("studio");
   const ui = useUi();
+  const project = useProject((state) => state.project);
+  const projectName = project?.name || "Untitled";
+  const projectLabel = project?.unsavedChanges ? `${projectName} · Unsaved` : projectName;
   useLiveShortcuts();
   return (
     <div className="app">
@@ -56,6 +61,15 @@ function Shell() {
           ))}
         </nav>
         <div className="topbar-end">
+          <Button
+            variant="ghost"
+            icon="more"
+            className="project-trigger"
+            aria-label={`Project: ${projectName}${project?.unsavedChanges ? ", unsaved changes" : ""}. Open project, import, and export`}
+            onPress={() => ui.setOverlay("project")}
+          >
+            <span className="project-trigger-name">{projectLabel}</span>
+          </Button>
           <EngineBadge />
           <MidiIndicator />
           <InputCluster />
@@ -84,6 +98,7 @@ function Shell() {
       <SettingsSheet />
       <ShortcutSheet />
       <TrackInspector />
+      <ProjectPanel />
     </div>
   );
 }
@@ -91,9 +106,11 @@ function Shell() {
 export default function App({ client }: { client?: EngineClient }) {
   return (
     <EngineProvider client={client}>
-      <UiProvider>
-        <Shell />
-      </UiProvider>
+      <ProjectProvider>
+        <UiProvider>
+          <Shell />
+        </UiProvider>
+      </ProjectProvider>
     </EngineProvider>
   );
 }

@@ -140,4 +140,29 @@ describe("quick actions and details", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: /Details/ }));
     expect(await screen.findByRole("dialog", { name: "Track 1 details" })).toBeTruthy();
   });
+
+  it("shows every recorded layer in the centered track-details modal", async () => {
+    const { mock } = await started();
+    const track = screen.getByRole("region", { name: "Track 1" });
+
+    fireEvent.click(within(track).getByRole("button", { name: "Record track 1" }));
+    await within(track).findByRole("button", { name: "Stop track 1" });
+    act(() => mock.tick(1));
+    fireEvent.click(within(track).getByRole("button", { name: "Stop track 1" }));
+    await waitFor(() => expect(within(track).getByText("1 layer")).toBeTruthy());
+
+    fireEvent.click(within(track).getByRole("button", { name: "Overdub track 1" }));
+    act(() => mock.tick(1));
+    fireEvent.click(within(track).getByRole("button", { name: "Stop track 1" }));
+    await waitFor(() => expect(within(track).getByText("2 layers")).toBeTruthy());
+
+    fireEvent.doubleClick(screen.getByRole("button", { name: "Select track 1" }));
+    const dialog = await screen.findByRole("dialog", { name: "Track 1 details" });
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(dialog.parentElement?.className).toContain("sheet-center");
+    expect(within(dialog).getByText("Layer 1")).toBeTruthy();
+    expect(within(dialog).getByText("Base loop")).toBeTruthy();
+    expect(within(dialog).getByText("Layer 2")).toBeTruthy();
+    expect(within(dialog).getByText("Overdub")).toBeTruthy();
+  });
 });

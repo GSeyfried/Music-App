@@ -113,6 +113,7 @@ describe("engine events parse from the Rust JSON", () => {
         "audioSessionInfo",
         "audioDiagnostics",
         "calibration",
+        "project",
         ...PRACTICE_EVENT_TYPES,
       ].sort(),
     );

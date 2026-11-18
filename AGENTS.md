@@ -57,6 +57,29 @@ On the Windows PC: only `npm run typecheck` and `npm run refs:verify`.
 - Never commit credentials, tokens, or `.env` files.
 - Confirm the active GitHub account is `GSeyfried` before any push.
 
+## Integration checkpoints
+
+The user has given standing authorization for **local integration** after a
+feature build-out passes its required checks and its relevant functionality is
+confirmed in a native app launch. At that checkpoint, the coordinating agent
+should:
+
+1. Make sure no agent is still editing and preserve all completed work in
+   local commits on the appropriate feature branches.
+2. Merge every completed feature branch into local `main`, resolve integration
+   issues, then run the required checks and launch the integrated app again.
+3. Remove merged local worktrees and delete merged local feature branches only
+   after verifying they have no commits unique from `main` (for example with
+   `git branch --merged main`). Never delete an unmerged branch or active
+   worktree.
+
+This standing authorization covers local commits, local merges, and cleanup of
+merged local branches/worktrees at a verified integration checkpoint. It does
+**not** authorize pushing, deleting remote branches, deploying, or changing
+cloud resources; those still require a direct request. If hardware-dependent
+functionality was not exercised, record that limitation rather than treating
+the launch as hardware verification.
+
 ## Documentation
 
 - General docs live in `docs/`.

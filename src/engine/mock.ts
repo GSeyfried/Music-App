@@ -9,6 +9,7 @@
 import { defaultTransport, type AudioDevice, type TransportState } from "../models/domain";
 import { DEFAULT_AUDIO_CONFIG } from "./protocol";
 import { MockPractice } from "../practice/mockPractice";
+import type { OpKind, OpResult, ProjectInfo, ProjectRequest } from "../project/types";
 import type {
   AnalysisConfig,
   AudioConfig,
@@ -250,6 +251,18 @@ export class MockEngine implements EngineTransport {
   private calibrationPending: { remaining: number; apply: boolean } | null = null;
   private diagnosticsAccum = 0;
   private tuning = 440;
+  private nextProjectOp = 1;
+  private project: ProjectInfo = {
+    id: "mock-project",
+    name: "Untitled",
+    path: null,
+    sampleRate: 48_000,
+    trackNames: ["Track 1", "Track 2"],
+    midiClips: [[], []],
+    pendingLoad: false,
+    unsavedChanges: false,
+    recoveryDir: null,
+  };
 
   // Input clock and the simulated voice.
   private inputFrame = 0;
@@ -335,6 +348,12 @@ export class MockEngine implements EngineTransport {
         return [...this.startupWarningList];
       case "start_latency_calibration":
         return this.startCalibration(Boolean(args.apply));
+      case "project_command":
+        return this.projectCommand(args.request as ProjectRequest);
+      case "find_recovery":
+        return null;
+      case "discard_recovery":
+        return null;
 
       default:
         if (command.startsWith("practice_")) return this.practice.invoke(command, args);
@@ -655,7 +674,16 @@ export class MockEngine implements EngineTransport {
   private status(): EngineStatus {
     const audioConfig = this.audioSettings().audio;
     if (!this.capturing) {
-      return { capturing: false, monitoring: false, capture: null, output: null, looper: false, analysis: false, audioConfig };
+      return {
+        capturing: false,
+        monitoring: false,
+        capture: null,
+        output: null,
+        looper: false,
+        analysis: false,
+        audioConfig,
+        unsavedChanges: this.project.unsavedChanges,
+      };
     }
     const block = this.bufferSize ?? 512;
     const counters = { requestedBufferSize: this.bufferSize, blockFrames: block, reportedLatencyFrames: block, discontinuities: 0, lostFrames: 0 };
@@ -684,7 +712,96 @@ export class MockEngine implements EngineTransport {
       looper: true,
       analysis: this.analysisEnabled,
       audioConfig,
+      unsavedChanges: this.project.unsavedChanges,
     };
+  }
+
+  private projectCommand(request: ProjectRequest): { opId: number | null; project: ProjectInfo } {
+    if (request.type === "info") return { opId: null, project: { ...this.project } };
+    if (request.type === "setRecovery") {
+      this.project = { ...this.project, recoveryDir: request.dir };
+      return { opId: null, project: { ...this.project } };
+    }
+    if (request.type === "setMetadata") {
+      this.project = {
+        ...this.project,
+        name: request.name ?? this.project.name,
+        trackNames: request.trackNames ?? this.project.trackNames,
+        unsavedChanges: true,
+      };
+      return { opId: null, project: { ...this.project } };
+    }
+    if (request.type === "new") {
+      this.project = {
+        ...this.project,
+        id: `mock-project-${this.nextProjectOp}`,
+        name: request.name,
+        path: null,
+        unsavedChanges: false,
+      };
+      return { opId: null, project: { ...this.project } };
+    }
+
+    const opId = this.nextProjectOp++;
+    let op: OpKind;
+    let result: OpResult;
+    switch (request.type) {
+      case "save": {
+        if (!this.project.path) throw { kind: "invalid", message: "Save As is required first" } satisfies EngineError;
+        op = "save";
+        result = { type: "saved", path: this.project.path };
+        this.project = { ...this.project, unsavedChanges: false };
+        break;
+      }
+      case "saveAs":
+        op = "save";
+        this.project = { ...this.project, path: request.path, unsavedChanges: false };
+        result = { type: "saved", path: request.path };
+        break;
+      case "open":
+        op = "open";
+        this.project = { ...this.project, name: request.path.split("/").pop()?.replace(/\.voiceloop$/, "") ?? "Project", path: request.path };
+        result = { type: "opened", path: request.path, warnings: [], loadedIntoLooper: this.capturing };
+        break;
+      case "exportMixdown":
+        op = "exportMixdown";
+        result = { type: "exported", files: [request.path], frames: this.sampleRate * 4 };
+        break;
+      case "exportStems":
+        op = "exportStems";
+        result = { type: "exported", files: this.project.trackNames.map((name) => `${request.dir}/${name}.wav`), frames: this.sampleRate * 4 };
+        break;
+      case "exportReaper":
+        op = "exportReaper";
+        result = { type: "exported", files: [`${request.dir}/${this.project.name}.rpp`], frames: this.sampleRate * 4 };
+        break;
+      case "importAudio":
+        op = "importAudio";
+        this.project = { ...this.project, unsavedChanges: true };
+        result = { type: "audioImported", track: request.track, frames: this.sampleRate * 4, trimmedFrames: 0, paddedFrames: 0, resampledFrom: null };
+        break;
+      case "exportMidi":
+        op = "exportMidi";
+        result = { type: "midiExported", path: request.path, notes: request.notes.length };
+        break;
+      case "importMidi":
+        op = "importMidi";
+        this.project = { ...this.project, unsavedChanges: true };
+        result = {
+          type: "midiImported",
+          track: request.track,
+          clip: { id: `clip-${opId}`, name: "Imported MIDI", startFrame: 0, lengthFrames: this.sampleRate * 4, notes: [] },
+          bpm: this.transport.bpm,
+          timeSignature: this.transport.timeSignature,
+        };
+        break;
+      case "autosave":
+        op = "autosave";
+        result = { type: "autosaved", savedAt: new Date().toISOString() };
+        break;
+    }
+    queueMicrotask(() => this.emit({ type: "project", payload: { kind: "done", opId, op, result, project: { ...this.project } } }));
+    return { opId, project: { ...this.project } };
   }
 
   private startInput(deviceId: string | null, remember = true): EngineStatus {

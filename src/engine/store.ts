@@ -388,6 +388,11 @@ export class EngineStore {
       case "practiceTake":
         this.set({ practiceTakes: [...this.snapshot.practiceTakes, event.payload].slice(-PRACTICE_TAKE_HISTORY) });
         return;
+      case "project":
+        if (event.payload.kind === "done") {
+          this.set({ status: { ...this.snapshot.status, unsavedChanges: event.payload.project.unsavedChanges } });
+        }
+        return;
       case "audioDiagnostics":
         live.audioDiagnostics = event.payload;
         return;

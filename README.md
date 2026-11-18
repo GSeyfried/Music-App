@@ -1,15 +1,29 @@
 # VoiceLoop (working title)
 
-A local-first music workstation with two workspaces sharing one native audio engine:
+A modular, local-first music workstation. The current app has two active
+workspaces sharing one native audio engine:
 
-- **Studio:** live looping, overdubbing, metronome and time signatures, and later synths, effects, and editing.
-- **Practice Lab:** real-time pitch and rhythm feedback against reference melodies you record yourself.
+- **Studio:** live looping, overdubbing, transport, metronome, routing, metering,
+  and live pitch feedback.
+- **Practice Lab:** live tuner and pitch history plus reference recording,
+  scored attempts, note-by-note feedback, and practice history.
+
+The longer product direction adds Composition, Live Performance, Music Library,
+and an offline-first iPhone/iPad experience called VoiceLoop Pocket. These are
+directional workspaces, not claims of current implementation. See
+[the roadmap](docs/ROADMAP.md) and
+[product direction](docs/projects/workstation-buildout/PRODUCT_DIRECTION.md).
 
 Rust audio engine (CPAL) · Tauri 2 desktop shell · React + TypeScript UI. Offline; no server.
 
-> **Status: Milestone 0 (foundation).** Device enumeration, microphone capture,
-> and a live input-level meter work end to end. Transport, looping, and analysis
-> are placeholders. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status (2026-11-17): active workstation build-out.** Studio looping,
+> transport, pitch analysis, hardware settings, MIDI input management, and
+> latency calibration are implemented through the UI, with hardware validation
+> still incomplete. Project persistence/import/export and the full Practice Lab
+> workflow are connected to React and covered by automated tests; real audio,
+> recovery, external-DAW, and hardware procedures remain. The roadmap uses
+> an end-to-end integration matrix so backend completion is not mistaken for a
+> finished user feature.
 
 ## Repository layout
 
@@ -74,5 +88,7 @@ Monitoring (playing input through the speakers) is off.
 - [Architecture](docs/ARCHITECTURE.md)
 - [Decisions](docs/DECISIONS.md), including Rust/Tauri vs JUCE/Tracktion
 - [Roadmap](docs/ROADMAP.md)
+- [Current end-to-end integration audit](docs/projects/workstation-buildout/UNWIRED_FEATURES.md)
+- [Expanded product direction](docs/projects/workstation-buildout/PRODUCT_DIRECTION.md)
 - [Reference package assessment](docs/REFERENCE_PACKAGE_ASSESSMENT.md)
 - [Reference packages: how to restore](reference-packages/README.md)

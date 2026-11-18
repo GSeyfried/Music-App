@@ -20,6 +20,10 @@ Rust tests in CI must use synthetic data and must not enumerate, open, or
 otherwise require audio devices. The headless hardware meter example is not a
 CI test.
 
+Timing correctness has a dedicated deterministic and hardware test matrix in
+[TIMING_TEST_PLAN.md](TIMING_TEST_PLAN.md). Run its fast gate with
+`bash scripts/test-timing.sh`.
+
 ## What CI cannot verify
 
 GitHub-hosted runners cannot verify microphone permissions, real input/output

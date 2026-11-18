@@ -14,6 +14,9 @@
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { appDataDir, join } from "@tauri-apps/api/path";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { createEngine, type EngineClient } from "./client";
 import { MockEngine } from "./mock";
 import { ENGINE_EVENT, type EngineError, type EngineTransport } from "./protocol";
@@ -23,6 +26,60 @@ export { createEngine, type EngineClient, type TransportKind } from "./client";
 export { describeError, describeNotice, describeWarning, describeUnpitched } from "./messages";
 
 export const nativeAvailable = (): boolean => isTauri();
+
+const singlePath = (value: string | string[] | null): string | null => (typeof value === "string" ? value : null);
+
+/** Native filesystem choices. Keeping these here preserves the one-Tauri-import boundary. */
+export const projectDialogs = {
+  openProject: async () =>
+    nativeAvailable() ? singlePath(await open({ directory: true, multiple: false, title: "Open VoiceLoop project" })) : null,
+  saveProject: async (name: string) =>
+    nativeAvailable() ? await save({ title: "Save VoiceLoop project", defaultPath: `${name || "Untitled"}.voiceloop` }) : null,
+  saveMixdown: async (name: string) =>
+    nativeAvailable()
+      ? await save({ title: "Export mixdown", defaultPath: `${name || "Mixdown"}.wav`, filters: [{ name: "WAV", extensions: ["wav"] }] })
+      : null,
+  chooseExportFolder: async (title: string) =>
+    nativeAvailable() ? singlePath(await open({ directory: true, multiple: false, title })) : null,
+  openAudio: async () =>
+    nativeAvailable()
+      ? singlePath(await open({ multiple: false, title: "Import audio", filters: [{ name: "Audio", extensions: ["wav"] }] }))
+      : null,
+  saveMidi: async (name: string) =>
+    nativeAvailable()
+      ? await save({ title: "Export MIDI", defaultPath: `${name || "Melody"}.mid`, filters: [{ name: "MIDI", extensions: ["mid", "midi"] }] })
+      : null,
+  openMidi: async () =>
+    nativeAvailable()
+      ? singlePath(await open({ multiple: false, title: "Import MIDI", filters: [{ name: "MIDI", extensions: ["mid", "midi"] }] }))
+      : null,
+};
+
+export async function recoveryDirectory(): Promise<string | null> {
+  if (!nativeAvailable()) return null;
+  return join(await appDataDir(), "recovery");
+}
+
+let allowNextClose = false;
+
+/** Intercept native close requests until the project UI resolves unsaved work. */
+export async function onNativeCloseRequested(handler: () => void): Promise<() => void> {
+  if (!nativeAvailable()) return () => {};
+  return getCurrentWindow().onCloseRequested((event) => {
+    if (allowNextClose) {
+      allowNextClose = false;
+      return;
+    }
+    event.preventDefault();
+    handler();
+  });
+}
+
+export async function continueNativeClose(): Promise<void> {
+  if (!nativeAvailable()) return;
+  allowNextClose = true;
+  await getCurrentWindow().close();
+}
 
 const tauriTransport: EngineTransport = {
   kind: "native",

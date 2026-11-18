@@ -327,7 +327,9 @@ assembled from the asserted fields plus the struct definitions.
 | @testing-library/dom | 10.4.x | MIT |
 | jsdom | 26.1.x | MIT |
 
-All are actively maintained. There are no new runtime dependencies.
+All are actively maintained. Project dialogs add the official
+`@tauri-apps/plugin-dialog` v2 runtime package, matching the registered Rust
+plugin; no filesystem plugin or direct React-side filesystem access is used.
 
 ## Not verified against the real engine
 
@@ -355,25 +357,23 @@ All are actively maintained. There are no new runtime dependencies.
    `MockEngine.apply` (the switch is exhaustive).
 4. **New error, warning, or reject kind**: extend the union. The
    `Record<Kind, …>` tables in `messages.ts` fail the typecheck until text exists.
-5. **Device, MIDI, practice, or project state**: add snapshot fields in
-   `store.ts` and actions in `createActions` (`EngineContext.tsx`). The practice
-   workflow goes in the `ComparePlaceholder` slot in `workspaces/PracticeLab.tsx`.
+5. **Device and MIDI state** lives in the engine store. Practice and project
+   workflows use dedicated external stores (`src/practice/`, `src/project/`) so
+   their slower command state does not burden the live audio snapshot.
 6. Domain types that mirror `model.rs` / `transport.rs` stay in
    `src/models/domain.ts`. Engine-protocol types live in `protocol.ts` and are
    re-exported from `bridge.ts`.
 
 ## PENDING
 
-- PENDING: Practice (reference / attempt / compare) and project commands/events
-  have native contracts but are not represented in the TypeScript protocol,
-  store or UI. MIDI port management is wired; MIDI performance mappings,
-  instruments and clip recording/playback are not.
-- PENDING: Rust `PitchUpdate.transportMap` is implemented, but the TypeScript
-  `PitchUpdate` omits it, so pitch cannot yet be drawn against bars and beats.
+- Practice and project commands/events are represented in the TypeScript
+  protocol, dedicated stores and UI. MIDI performance mappings, instruments
+  and MIDI clip playback remain PENDING.
+- `PitchUpdate.transportMap` is mirrored and used by Practice Lab.
 - PENDING: Loopback calibration has engine, Tauri and Settings UI support, but
   it still needs physical cable/device verification.
-- PENDING: `LooperConfig` (track count, pool size) has no Tauri command, so
-  the UI shows whatever count the engine sends (2 by default).
+- PENDING: advanced `LooperConfig` pool/duration controls have no general UI;
+  normal track add/remove works live up to the 16-track capacity.
 - PENDING: Light theme. The tokens are ready, but only the dark palette is
   defined.
 - PENDING: Metronome gain and accent are not exposed (`gainDb`,
@@ -401,7 +401,7 @@ What I did:
 The real fix is outside the repo: free disk space, or exclude this folder
 from iCloud Desktop & Documents sync. That is the user's call.
 
-## Practice events (other agent's types)
+## Practice events
 
 Another agent added `src/practice/types.ts` and hooked `PracticeEvent` into
 the `EngineEvent` union. The store now handles those events generically:
@@ -410,8 +410,8 @@ the `EngineEvent` union. The store now handles those events generically:
 - `practiceProgress` goes to `live.practiceProgress`.
 - `practiceTake` goes to `snapshot.practiceTakes` (the last 32).
 
-The tag-list test includes `PRACTICE_EVENT_TYPES`. The practice UI itself is
-not wired yet.
+The tag-list test includes `PRACTICE_EVENT_TYPES`; the Practice store and full
+workflow consume them.
 
 ## Round 3 status (stopped early at the token limit)
 
@@ -425,17 +425,24 @@ Done (typecheck clean, 136 vitest tests pass, `npm run build` OK; not rendered o
   - `audioSession` / `audioSessionInfo` events are handled. Interruptions show calm info toasts.
   - The `audioRestarted` warning becomes the info toast "Audio restarted after a device change — your loops were kept" only when the engine message says loops were kept. Otherwise it stays a normal warning.
 
-PENDING (round 3 scope not started):
+Completed after the round-3 handoff:
 
 - The project workflow UI against `docs/projects/persistence/INTERFACE.md`:
   - `project_command`, `find_recovery`, `discard_recovery` types
   - new / open / save / save-as
-  - the unsaved indicator and the "Save first?" guard before stop-input or quit
+  - unsaved state and Save / Don't save / Cancel on native quit
   - the recovery prompt
   - exports (mixdown, stems, MIDI)
   - WAV import
   - progress, done and failed events
   - recent projects in localStorage
-- Dialogs: `tauri-plugin-dialog` is registered in Rust and its capabilities are set, but the JS package `@tauri-apps/plugin-dialog` is not installed in `package.json`. Import it only in `bridge.ts`, with a typed-path fallback.
-- REAPER .rpp export: not in the persistence INTERFACE.
+- Dialogs: `@tauri-apps/plugin-dialog` is installed and imported only in
+  `bridge.ts`; the packaged native Open dialog was launched successfully.
+- REAPER `.rpp` export is exposed with the other export formats.
+
+Still PENDING:
+
+- Guard Save / Don't save / Cancel before in-app New/Open (the current flow
+  asks for explicit discard confirmation; quit has the full three-way prompt).
+- Execute save/open/recovery/import/export against real recorded audio.
 - Moving the keyboard shortcuts onto the shared command list.

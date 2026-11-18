@@ -201,6 +201,12 @@ export function TransportBar() {
       {!synced && !c.modeLocked && (
         <p className="hint">Free mode: your first take sets the loop length. Synced mode: the loop length comes from tempo × bars.</p>
       )}
+      {tr.metronome.enabled && (
+        <p className="hint" role="note">
+          <Icon name="speaker" size={16} />
+          Use headphones while Click is on so the speaker click is not recorded into overdubs.
+        </p>
+      )}
     </section>
   );
 }

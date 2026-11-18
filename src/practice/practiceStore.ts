@@ -144,6 +144,10 @@ export class PracticeStore {
         // Audio stopped: the engine abandons takes; clear the live trace.
         if (!e.payload.capturing) this.resetLive();
         return;
+      case "project":
+        // New/Open replaces the Practice library stored with the project.
+        if (e.payload.kind === "done" && (e.payload.op === "new" || e.payload.op === "open")) void this.refresh();
+        return;
       default:
         return;
     }

@@ -30,7 +30,7 @@ export function TrackInspector() {
     rows.push(["Take", `from ${formatSeconds(t.recordStart, sr)}${t.recordEnd !== null ? ` to ${formatSeconds(t.recordEnd, sr)}` : " (open)"}`]);
   }
   return (
-    <Sheet title={`Track ${selectedTrack + 1} details`} open onClose={() => setOverlay(null)}>
+    <Sheet title={`Track ${selectedTrack + 1} details`} open side="center" onClose={() => setOverlay(null)}>
       <section className="sheet-section" style={{ ["--tc" as string]: `var(--track-${(selectedTrack % 8) + 1})` }}>
         <dl className="diag">
           {rows.map(([k, v]) => (
@@ -40,6 +40,23 @@ export function TrackInspector() {
             </div>
           ))}
         </dl>
+        <section className="sheet-section" aria-labelledby="track-layers-heading">
+          <h3 id="track-layers-heading">Layers</h3>
+          {t.layers > 0 ? (
+            <ol className="diag layer-list" aria-label={`Track ${selectedTrack + 1} layers`}>
+              <li className="diag-row"><span>Layer 1</span><span>Base loop</span></li>
+              {Array.from({ length: Math.max(0, t.layers - 1) }, (_, index) => (
+                <li className="diag-row" key={`layer-${index + 2}`}>
+                  <span>Layer {index + 2}</span>
+                  <span>Overdub</span>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="hint">No recorded layers yet.</p>
+          )}
+          {t.redoLayers > 0 ? <p className="hint">{t.redoLayers} undone overdub layer{t.redoLayers === 1 ? "" : "s"} available to redo.</p> : null}
+        </section>
         <label className="gain">
           <span className="stepper-label">Level</span>
           <input
@@ -69,8 +86,8 @@ export function TrackInspector() {
           ))}
         </div>
         <p className="hint">
-          Layers, trimming and per-layer editing come with the project model (PENDING). Right-click a track, or use its ⋯
-          button, for these same actions.
+          Layer audio editing and trimming are not exposed by the current engine snapshot yet. Right-click a track, or use its ⋯ button,
+          for the same track actions.
         </p>
       </section>
     </Sheet>

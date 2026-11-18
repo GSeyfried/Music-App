@@ -6,6 +6,7 @@ import { deviceLabel } from "../lib/hardware";
 import { Icon } from "./ui/Icon";
 import { Button } from "./ui/controls";
 import { LevelMeter } from "./LevelMeter";
+import "./InputControls.css";
 
 export function DeviceSelect() {
   const devices = useEngineState((s) => s.devices);
@@ -15,6 +16,7 @@ export function DeviceSelect() {
   const kind = useEngineState((s) => s.transportKind);
   const actions = useEngineActions();
   const changed = useEngineState((s) => s.devicesChangedSeq);
+  const hint = devices.length === 0 ? "Connect a microphone or audio interface, then refresh." : "This is the input used by the looper and tuner.";
   // hardware-io: the engine reports device hot-plug; re-list when it does.
   useEffect(() => {
     if (changed > 0) void actions.refreshDevices();
@@ -24,6 +26,7 @@ export function DeviceSelect() {
       <label className="field grow">
         <span className="stepper-label">Input device</span>
         <select
+          aria-describedby="input-device-hint"
           value={selected ?? ""}
           disabled={capturing || busy || devices.length === 0}
           onChange={(e) => actions.selectDevice(e.currentTarget.value || null)}
@@ -37,6 +40,9 @@ export function DeviceSelect() {
             </option>
           ))}
         </select>
+        <span id="input-device-hint" className="device-hint">
+          {hint}
+        </span>
       </label>
       <Button
         variant="ghost"
@@ -82,7 +88,7 @@ export function StartCard({ purpose }: { purpose: string }) {
       <div className="start-icon">
         <Icon name="mic" size={36} />
       </div>
-      <h2>Start listening</h2>
+      <h2>Choose an input to get started</h2>
       <p>{purpose}</p>
       {kind === "mock" && <p className="sim-note">Simulated engine: a scripted singer stands in for your microphone.</p>}
       <div className="start-controls">

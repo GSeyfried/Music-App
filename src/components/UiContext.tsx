@@ -6,7 +6,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import { useEngineState } from "../engine/EngineContext";
 
 /** "inspector" shows details for the selected track. */
-export type Overlay = null | "settings" | "help" | "inspector";
+export type Overlay = null | "settings" | "help" | "inspector" | "project";
 
 export interface MenuRequest {
   track: number;

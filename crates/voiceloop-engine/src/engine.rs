@@ -33,9 +33,9 @@ use crate::looper::io::{LooperPlayback, OutputInfo};
 use crate::looper::{LooperCommand, LooperConfig, LooperNotice, LooperSnapshot, LooperState};
 use crate::meter::{amplitude_to_db, MeterFrame};
 use crate::midi_in::{MidiBatch, MidiPortInfo};
-use crate::practice::{self, Practice, PracticeIo, PracticeProgress, PracticeStatus, PracticeTakeEvent, TransportMap};
 use crate::model::AudioDevice;
 use crate::platform::{self, MicPermission, SessionEvent, SessionInfo, SessionRequest};
+use crate::practice::{self, Practice, PracticeIo, PracticeProgress, PracticeStatus, PracticeTakeEvent, TransportMap};
 use crate::project::{ProjectEvent, ProjectGlue, ProjectReply, ProjectRequest};
 use crate::routing::{AudioConfig, InputRoute, MonitorConfig, OutputRoute};
 use crate::settings::AudioSettings;
@@ -985,8 +985,7 @@ mod tests {
     #[test]
     fn looper_commands_need_audio_but_transport_can_be_preset() {
         let engine = Engine::start(Box::new(|_| {}));
-        let mut t = TransportState::default();
-        t.bpm = 90.0;
+        let mut t = TransportState { bpm: 90.0, ..TransportState::default() };
         assert!(engine.looper(LooperCommand::SetTransport { transport: t }).is_ok());
         t.bpm = 1.0;
         assert!(matches!(engine.looper(LooperCommand::SetTransport { transport: t }), Err(EngineError::Invalid(_))));

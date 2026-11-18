@@ -229,7 +229,11 @@ fn practice_get_attempt(
 }
 
 #[tauri::command]
-fn practice_delete_attempt(engine: State<'_, Engine>, reference_id: String, attempt_id: String) -> Result<(), EngineError> {
+fn practice_delete_attempt(
+    engine: State<'_, Engine>,
+    reference_id: String,
+    attempt_id: String,
+) -> Result<(), EngineError> {
     engine.practice_delete_attempt(reference_id, attempt_id)
 }
 
@@ -260,7 +264,11 @@ fn practice_export_library(engine: State<'_, Engine>) -> Result<PracticeLibrary,
 }
 
 #[tauri::command]
-fn practice_import_library(engine: State<'_, Engine>, library: PracticeLibrary, replace: bool) -> Result<(), EngineError> {
+fn practice_import_library(
+    engine: State<'_, Engine>,
+    library: PracticeLibrary,
+    replace: bool,
+) -> Result<(), EngineError> {
     engine.practice_import_library(library, replace)
 }
 

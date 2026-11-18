@@ -263,12 +263,14 @@ export function Sheet({
   onClose,
   children,
   side = "right",
+  dismissible = true,
 }: {
   title: string;
   open: boolean;
   onClose: () => void;
   children: ReactNode;
   side?: "right" | "center";
+  dismissible?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -276,11 +278,14 @@ export function Sheet({
   }, [open]);
   if (!open) return null;
   return (
-    <div className={`sheet-backdrop sheet-${side}`} onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div
+      className={`sheet-backdrop sheet-${side}`}
+      onPointerDown={(e) => dismissible && e.target === e.currentTarget && onClose()}
+    >
       <div className="sheet" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} ref={ref}>
         <header className="sheet-head">
           <h2>{title}</h2>
-          <Button variant="ghost" icon="close" aria-label="Close" onPress={onClose} />
+          {dismissible ? <Button variant="ghost" icon="close" aria-label="Close" onPress={onClose} /> : null}
         </header>
         <div className="sheet-body">{children}</div>
       </div>

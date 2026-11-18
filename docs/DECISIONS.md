@@ -76,7 +76,7 @@ algorithms (papers) or permissive sources.
 
 ## D-008 Device identity = device name (Open)
 
-CPAL 0.16 offers no stable device id, so names are used. Duplicate names or
+The adopted CPAL device API offers no stable cross-platform device id, so names are used. Duplicate names or
 renames are possible. Revisit when CPAL exposes ids.
 
 ## D-009 Model types mirrored by hand in Rust and TS (Open)

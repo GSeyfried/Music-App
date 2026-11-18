@@ -18,6 +18,7 @@
 
 import type { AudioDevice, TransportState } from "../models/domain";
 import type { PracticeCommands, PracticeEvent, TransportMap } from "../practice/types";
+import type { ProjectCommands, ProjectEngineEvent } from "../project/types";
 
 // ---- Status -----------------------------------------------------------------
 
@@ -240,6 +241,8 @@ export interface EngineStatus {
   audioConfig?: AudioConfig;
   /** macOS reports "unknown" (a denial shows up as the silentInput warning). */
   micPermission?: MicPermission;
+  /** Project data changed since the last save/open/new. */
+  unsavedChanges?: boolean;
 }
 
 export type MicPermission = "granted" | "denied" | "undetermined" | "unknown";
@@ -558,6 +561,7 @@ export type EngineEvent =
   | { type: "calibration"; payload: CalibrationOutcome }
   | { type: "audioSession"; payload: SessionEvent }
   | { type: "audioSessionInfo"; payload: SessionInfo }
+  | ProjectEngineEvent
   // Practice Lab (docs/projects/practice-lab/INTERFACE.md); consumed by src/practice.
   | PracticeEvent;
 
@@ -580,6 +584,7 @@ export const EVENT_TYPES: readonly EngineEventType[] = [
   "calibration",
   "audioSession",
   "audioSessionInfo",
+  "project",
   "practiceState",
   "practiceProgress",
   "practiceTake",
@@ -605,7 +610,7 @@ export function parseEngineEvent(raw: unknown): EngineEvent | null {
  * Tauri command table: command name -> argument object and result. Argument
  * keys are camelCase (Tauri maps them to the Rust snake_case parameters).
  */
-export interface EngineCommands extends PracticeCommands {
+export interface EngineCommands extends PracticeCommands, ProjectCommands {
   list_input_devices: { args: undefined; result: AudioDevice[] };
   start_input: { args: { deviceId: string | null }; result: EngineStatus };
   stop_input: { args: undefined; result: EngineStatus };

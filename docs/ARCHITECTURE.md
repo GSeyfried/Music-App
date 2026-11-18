@@ -1,7 +1,11 @@
 # Architecture
 
-VoiceLoop is a local-first desktop app (macOS first, iOS later). There is no
-backend server; everything runs and is stored on the device.
+VoiceLoop is a modular, local-first music workstation (macOS first, iOS/iPadOS
+later). There is no required backend server; audio, analysis and project data
+run and remain on the device. Studio and Practice Lab are the current
+workspaces. Composition, Live Performance, Music Library and VoiceLoop Pocket
+are directional workspaces that should reuse the same engine and project
+infrastructure rather than create parallel stacks.
 
 ```text
 ┌──────────────────────────── React + TypeScript (src/) ────────────────────────────┐
@@ -24,20 +28,21 @@ backend server; everything runs and is stored on the device.
 └───────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Components
+## Components and current integration
 
 | # | Component | Location | Status |
 | --- | --- | --- | --- |
-| 1 | Audio device management | `engine/src/devices.rs` | Enumerate inputs, default selection. Verified on Windows |
-| 2 | Audio engine and routing | `engine/src/engine.rs`, `capture.rs`, `looper/io.rs` | Input capture verified (Windows). Output stream + input→looper ring: **written, unverified** |
-| 3 | Master clock and transport | `engine/src/looper/processor.rs`, `transport.rs` | Sample clock, count-in, pause/resume, musical position: **written + unit tests, not yet run** |
-| 4 | Recording and looping | `engine/src/looper/` | Free and Metronome modes, 2 tracks, overdub, undo, mute, level: **written + unit tests, not yet run** |
-| 5 | MIDI I/O | (planned) `engine/src/midi.rs` using midir | M4 |
-| 6 | Pitch and rhythm analysis | (planned) `crates/voiceloop-analysis` | M2 |
-| 7 | DSP and effects | (planned) `crates/voiceloop-dsp` | M4 |
-| 8 | Session/project persistence | `engine/src/model.rs` (types), `looper/pool.rs` (`StorageSink` interface) | Types and interface only |
-| 9 | Frontend | `src/` | Workspaces, device UI, meter, transport and track strips wired to the engine (Tauri side unverified) |
-| 10 | App↔engine communication | `src-tauri/src/lib.rs`, `src/engine/bridge.ts` | 5 commands plus one event stream |
+| 1 | Audio devices, routes, monitoring, settings and calibration | `engine/src/{devices,routing,hardware,settings,calibration}.rs` | Rust, Tauri and Settings UI implemented; built-in Mac testing partial; H4n/physical loopback pending |
+| 2 | Audio engine and drift bridge | `engine/src/engine.rs`, `capture.rs`, `looper/{io,bridge}.rs` | Implemented and simulated; external two-clock hardware validation pending |
+| 3 | Master clock and transport | `engine/src/looper/processor.rs`, `transport.rs` | Implemented, unit-tested and UI-wired; hardware timing pending |
+| 4 | Recording and looping | `engine/src/looper/` | Free/synced modes, overdub layers, undo/redo, mute/solo/gain and UI; live add/remove up to a 16-track capacity |
+| 5 | MIDI input | `engine/src/midi_in.rs`, `hardware.rs` | Port/event backend, Tauri, React and Settings UI implemented; musical mappings/playback absent |
+| 6 | Pitch, rhythm and theory analysis | `crates/voiceloop-analysis`, `engine/src/analysis.rs` | Live tuner/curve end to end; Practice and theory services exceed their current UI; real-voice validation pending |
+| 7 | Practice service | `engine/src/practice/` | Capture, scoring, history and library wired through Tauri to the React workflow; real-voice validation pending |
+| 8 | Session/project persistence | `crates/voiceloop-project`, `engine/src/project.rs` | Package, recovery, import/export, typed React store and native dialogs implemented/tested; real save/recovery/DAW flow pending |
+| 9 | DSP effects and instruments | future crate/service boundary | Metronome click only; synths, effects, percussion and advanced pitch processing are not implemented |
+| 10 | Frontend | `src/` | Studio, Practice Lab, hardware, project/recovery, import and export workflows implemented |
+| 11 | App↔engine communication | `src-tauri/src/lib.rs`, `src/engine/bridge.ts` | One event stream and typed commands, including project and Practice contracts; raw audio never crosses it |
 
 `engine/` = `crates/voiceloop-engine/`.
 
@@ -59,9 +64,16 @@ backend server; everything runs and is stored on the device.
 6. **Recordings are immutable.** Overdubs are separate layers, and corrections
    create derived clips (`derivedFrom`).
 7. **Analysis is separate from processing.**
-8. **Monitoring is off.** The output carries loops and the metronome only;
-   live input is never routed to the speakers, and a recorded sample is never
-   heard in the frame it was recorded.
+8. **Monitoring is off by default.** When explicitly enabled, bridged input is
+   mixed into output after the looper, gain-slewed and limited; it is never fed
+   back into the recording path. This prevents software loopback, but cannot
+   prevent speakers from bleeding acoustically into a microphone.
+9. **Completion is vertical.** A backend capability remains partial until its
+   Tauri contract, React state, visible controls/feedback and required hardware
+   verification are complete. See `docs/ROADMAP.md`.
+10. **Local-first is the baseline.** Core recording, looping, analysis and
+    project operations do not depend on a network. Optional synchronization or
+    AI-assisted tools must remain separable from the offline core.
 
 ## Looper (Milestone 1A)
 
@@ -74,11 +86,12 @@ backend server; everything runs and is stored on the device.
 | Control thread | streams, `LayerRecycler`, ring ends | commands in, events out |
 
 Input and output are separate CPAL streams with independent hardware clocks.
-The output bridge (`looper/io.rs`) **primes** (waits for ~10 ms of input),
-substitutes silence on **underrun** (counted), and skips backlog beyond 8×
-the prime level to correct **drift** (counted). The input device is opened at
-the output device's sample rate. If it can't run at that rate, the looper is
-disabled with a `looperUnavailable` warning while metering continues.
+The output bridge (`looper/bridge.rs`) primes an input cushion, substitutes
+silence on counted underruns, and normally corrects clock drift with a
+fill-controlled fractional sinc reader. Discontinuities and emergency drops
+remain counted diagnostics. The input and output negotiate a shared nominal
+rate; incompatible configurations fail or adjust explicitly rather than
+silently changing musical timing.
 
 ### Looper timing
 
@@ -111,9 +124,10 @@ Both modes use the same layer writer and the same playback path.
 - A track holds a stack of layers (`Box<[f32]>`, mono). Playback sums them × gain.
 - Recording **adds** into a zeroed layer at the loop phase of `t − latency`.
   Multi-pass overdubs accumulate into one layer, and Undo pops the newest layer.
-- **Latency compensation:** `SetInputLatency` (frames). It is applied to every
-  recording that follows a reference (metronome, or an existing loop), and not
-  to a free first take. It is set by hand for now; loopback calibration comes later.
+- **Latency compensation:** `SetInputLatency` (frames) applies to base takes and
+  overdubs, including the in-flight tail after Stop. A loopback calibration
+  command and detector now exist and can apply the measured value; physical
+  cable/device verification remains pending.
 - **Edge fades** (default 64 frames ≈ 1.3 ms): ramp-in at each recording start;
   ramp-out at scheduled ends; the free first take's tail is faded after Stop.
   Loop boundaries never move.
@@ -128,27 +142,27 @@ Both modes use the same layer writer and the same playback path.
   thread**, so the audio thread never frees, allocates, or memsets large buffers.
 - Out of buffers → `poolExhausted` notice; too many layers → `layerLimit`; free
   first take hits `max_loop_seconds` → auto-closed with `maxLengthReached`.
-- Future disk streaming: the `StorageSink` trait (`looper/pool.rs`) defines
-  where raw takes will go. It is not implemented.
+- Project save/open transfers layer buffers through preallocated job rings to
+  the control side, where immutable float WAV files are written. General disk
+  streaming during playback is not implemented.
 
-## Engine API (current)
+## Engine API groups (current)
 
-| Command (Tauri) | Engine method | Returns |
+| Group | Tauri surface | Frontend status |
 | --- | --- | --- |
-| `list_input_devices` | `Engine::list_input_devices` | `AudioDevice[]` |
-| `start_input { deviceId? }` | `Engine::start_input` | `EngineStatus` (starts input **and** looper output) |
-| `stop_input` | `Engine::stop_input` | `EngineStatus` (stops both, releases devices and buffers) |
-| `engine_status` | `Engine::status` | `EngineStatus` |
-| `looper_command { command }` | `Engine::looper` | `()`. Results arrive as `looper` / `looperNotice` events |
+| Core audio/looper/analysis | device list, start/stop, status, `looper_command`, `set_analysis_config` | Wired to Studio/Practice live tuner |
+| Hardware | device/route/monitor settings, MIDI ports, diagnostics, latency calibration | Wired to Settings and indicators; hardware coverage incomplete |
+| Projects | `project_command`, `find_recovery`, `discard_recovery` | Typed store and Project panel: new/open/save, recovery, recent projects, import/export |
+| Practice | reference/attempt capture, library/history/configuration commands | Typed store and full reference/attempt/results/history workflow |
 
-`LooperCommand` (JSON `{type, ...}`): `setTransport`, `play`, `stop`, `pause`,
-`resume`, `record`, `overdub`, `stopRecording`, `setTrackPlaying`, `setMute`,
-`setGain`, `undo`, `clear`, `clearAll`, `setInputLatency`. `setTransport` is also
-accepted before audio starts and applies on start.
+`LooperCommand` (JSON `{type, ...}`) includes transport, play/pause/restart,
+record/overdub/stop, track play/mute/solo/gain, undo/redo, clear and input
+latency. `setTransport` is accepted before audio starts and applies on start.
 
-Event `engine://event` types: `level`, `status`, `error`, `warning`
-(`silentInput`, `looperUnavailable`), `looper` (`LooperState`, ~30 Hz),
-`looperNotice` (`rejected {reason}`, `maxLengthReached {track}`).
+The single `engine://event` stream includes status, errors/warnings, level,
+looper, pitch/note/onset, device/MIDI/diagnostic/calibration, project and
+Practice events. The TypeScript parser and feature stores handle every current
+tag; unknown future tags are ignored rather than crashing an older UI.
 
 Errors are typed: `noInputDevice`, `deviceNotFound`,
 `permissionOrUnavailable`, `unsupportedFormat`, `backend`, `invalid`,
@@ -157,22 +171,23 @@ Errors are typed: `noInputDevice`, `deviceNotFound`,
 Shutdown: `RunEvent::Exit` → `Engine::shutdown()` → the control thread stops
 input, then output (dropping the looper and its buffers), and is joined.
 
-## Project storage (planned format)
+## Project storage
 
 ```
-MySong.voiceloop/            folder (macOS can present it as a package)
-  project.json               Project → Sessions → Tracks/Clips, references, takes
-  audio/take-0001.wav        immutable source recordings
-  audio/derived/…            processed derivatives
-  analysis/<take-id>.json    pitch/rhythm observations (re-computable cache)
+My Song.voiceloop/                 folder; package presentation is host work
+  project.json                     versioned current document
+  project.previous.json            automatic previous-save fallback
+  audio/layer-<content hash>.wav   immutable 32-bit-float layer audio
 ```
 
 ## Platform notes
 
-- **macOS:** `src-tauri/Info.plist` supplies `NSMicrophoneUsageDescription`;
-  `Entitlements.plist` adds `com.apple.security.device.audio-input` for
-  hardened-runtime signing. CPAL uses CoreAudio. Not yet built or tested on a Mac.
+- **macOS:** the development app and a debug app bundle launch. Prior milestones
+  verified microphone capture; the latest CPAL 0.18.2 handoff verified launch,
+  UI and built-in device enumeration only, so audio flows require retesting.
 - **Windows:** CPAL uses WASAPI. Input capture was verified there in Milestone 0;
   builds are no longer run on the Windows work PC.
-- **iOS (M5):** Tauri 2 mobile plus CPAL's iOS host. Needs AVAudioSession
-  configuration, which can provide true duplex I/O.
+- **iOS/iPadOS:** engine/analysis portability has compile-level evidence, and
+  the frontend has touch foundations. Full Xcode, an AVAudioSession platform
+  layer, Tauri device build, storage/interrupt handling and physical-device
+  latency testing are still required. Core Pocket workflows must remain offline.

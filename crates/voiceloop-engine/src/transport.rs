@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn first_grid_index_is_exact_at_boundaries() {
-        let step = 2123.893_805_309_734_6;
+        let step = 2_123.893_805_309_734_6;
         for i in 0..1_000 {
             let f = grid_frame(i, step);
             assert_eq!(first_grid_index_at_or_after(f, step), i);

@@ -29,6 +29,23 @@ describe("App with the simulated engine", () => {
     act(() => mock.tick(0.033));
   });
 
+  it("explains which input drives the first-run workspace", async () => {
+    mockApp();
+    expect(await screen.findByRole("heading", { name: "Choose an input to get started" })).toBeTruthy();
+    const input = screen.getByRole("combobox");
+    expect(input.getAttribute("aria-describedby")).toBe("input-device-hint");
+    expect(screen.getByText("This is the input used by the looper and tuner.")).toBeTruthy();
+  });
+
+  it("warns that speaker click can be recorded into overdubs", async () => {
+    mockApp();
+    await waitFor(() => expect(screen.getAllByRole("button", { name: /Start input/ }).length).toBeGreaterThan(0));
+    fireEvent.click(screen.getAllByRole("button", { name: /Start input/ })[0]);
+    const click = await screen.findByRole("button", { name: "Metronome click" });
+    if (click.getAttribute("aria-pressed") !== "true") fireEvent.click(click);
+    expect(await screen.findByText(/Use headphones while Click is on/)).toBeTruthy();
+  });
+
   it("records on a track via the pad and via the R shortcut", async () => {
     const { mock } = mockApp();
     await waitFor(() => screen.getAllByRole("button", { name: /Start input/ }));
