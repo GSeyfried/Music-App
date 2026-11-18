@@ -203,7 +203,8 @@ pub enum ChordQuality {
 }
 
 /// Chord shapes as semitone offsets from the root, with a display suffix.
-const CHORD_SHAPES: [(ChordQuality, &[u8], &str); 11] = [
+/// Shared with `chord` (audio chord recognition builds its templates from it).
+pub(crate) const CHORD_SHAPES: [(ChordQuality, &[u8], &str); 11] = [
     (ChordQuality::Major, &[0, 4, 7], ""),
     (ChordQuality::Minor, &[0, 3, 7], "m"),
     (ChordQuality::Diminished, &[0, 3, 6], "dim"),
@@ -248,8 +249,8 @@ impl Chord {
 /// lowest note wins; otherwise the first root in pitch-class order.
 ///
 /// This names chords from *known* notes (MIDI input, or several monophonic
-/// loop tracks analysed separately). It does not extract chords from mixed
-/// audio; that needs polyphonic pitch analysis, which is not built.
+/// loop tracks analysed separately). For chords in mixed audio see
+/// [`crate::chord`].
 pub fn identify_chord(midi_notes: &[i32]) -> Option<Chord> {
     let bass = (*midi_notes.iter().min()?).rem_euclid(12) as u8;
     let mask = midi_notes.iter().fold(0u16, |m, n| m | 1 << n.rem_euclid(12));
