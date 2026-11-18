@@ -110,6 +110,28 @@ describe("EngineStore event handling", () => {
     expect(store.getSnapshot().looper?.tracks[0].solo).toBe(true);
   });
 
+  it("stores layer summaries by track/layer and trims them on undo and clear", () => {
+    const store = new EngineStore();
+    const base = Array.from({ length: 128 }, (_, i) => i / 127);
+    const overdub = Array.from({ length: 128 }, (_, i) => (127 - i) / 127);
+    store.applyEvent({ type: "looper", payload: LOOPER_STATE });
+    store.applyEvent({ type: "layerSummary", payload: { track: 0, layer: 0, bins: base } });
+    store.applyEvent({ type: "layerSummary", payload: { track: 0, layer: 1, bins: overdub } });
+    expect(store.getSnapshot().layerSummaries[0]).toEqual([base, overdub]);
+
+    const undoTracks = [{ ...LOOPER_STATE.tracks[0], layers: 1, redoLayers: 2 }, LOOPER_STATE.tracks[1]];
+    store.applyEvent({ type: "looper", payload: { ...LOOPER_STATE, tracks: undoTracks } });
+    expect(store.getSnapshot().layerSummaries[0]).toEqual([base]);
+
+    // Redo re-emits the preserved engine summary for the restored layer.
+    store.applyEvent({ type: "layerSummary", payload: { track: 0, layer: 1, bins: overdub } });
+    expect(store.getSnapshot().layerSummaries[0]).toEqual([base, overdub]);
+
+    const clearedTracks = [{ ...LOOPER_STATE.tracks[0], layers: 0, redoLayers: 0 }, LOOPER_STATE.tracks[1]];
+    store.applyEvent({ type: "looper", payload: { ...LOOPER_STATE, tracks: clearedTracks } });
+    expect(store.getSnapshot().layerSummaries).toEqual({});
+  });
+
   it("status: stopping capture clears live level, warnings, and the looper", () => {
     const store = new EngineStore();
     store.applyEvent({ type: "status", payload: running });

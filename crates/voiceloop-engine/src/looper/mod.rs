@@ -35,8 +35,8 @@ use crate::transport::{MusicalPosition, TransportState};
 pub use click::Accent;
 pub use pool::{LayerRecycler, StorageSink};
 pub use processor::{
-    soft_limit, LooperCommand, LooperCore, LooperHandles, LooperNotice, LooperSnapshot, RejectReason, RunState,
-    TrackSnapshot, TrackState, LIMIT_KNEE, MAX_TRANSPORT_FRAME,
+    soft_limit, LayerSummary, LooperCommand, LooperCore, LooperHandles, LooperNotice, LooperSnapshot, RejectReason,
+    RunState, TrackSnapshot, TrackState, LIMIT_KNEE, MAX_TRANSPORT_FRAME,
 };
 
 /// Hard upper bound on tracks (snapshot and plan arrays are sized by this).
@@ -48,6 +48,9 @@ pub use processor::{
 /// reads, which stay bounded by `pool_layers` whatever the track count.
 /// 16 is ample for "at least 10 usable tracks" and keeps snapshots small.
 pub const MAX_TRACKS: usize = 16;
+
+/// Fixed wire-format resolution of one completed layer around its loop.
+pub const LAYER_SUMMARY_BINS: usize = 128;
 
 /// Realtime work bounds. Every layer is a pool buffer, so `pool_layers`
 /// bounds both the layers summed per output sample and the buffers released

@@ -7,7 +7,7 @@
 // crates/voiceloop-engine/src/looper/processor.rs (not a port of its DSP).
 
 import { defaultTransport, type AudioDevice, type TransportState } from "../models/domain";
-import { DEFAULT_AUDIO_CONFIG } from "./protocol";
+import { DEFAULT_AUDIO_CONFIG, LAYER_SUMMARY_BINS } from "./protocol";
 import { MockPractice } from "../practice/mockPractice";
 import type { OpKind, OpResult, ProjectInfo, ProjectRequest } from "../project/types";
 import type {
@@ -999,6 +999,7 @@ export class MockEngine implements EngineTransport {
         if (tr.redo === 0) return "nothingToRedo";
         tr.redo -= 1;
         tr.layers += 1;
+        this.emitLayerSummary(cmd.track, tr.layers - 1);
         return null;
       case "clear":
         this.clear(cmd.track);
@@ -1008,6 +1009,9 @@ export class MockEngine implements EngineTransport {
         if (this.tracks.length === 1) return "trackLimit";
         this.clear(cmd.track);
         this.tracks.splice(cmd.track, 1);
+        this.tracks.slice(cmd.track).forEach((shifted, track) => {
+          for (let layer = 0; layer < shifted.layers; layer += 1) this.emitLayerSummary(cmd.track + track, layer);
+        });
         return null;
     }
   }
@@ -1050,11 +1054,14 @@ export class MockEngine implements EngineTransport {
   }
 
   private stop(): void {
-    for (const tr of this.tracks) {
+    for (const [track, tr] of this.tracks.entries()) {
       if (!tr.rec) continue;
       if (this.t <= tr.rec.start) this.discard(tr);
       else if (tr.rec.kind === "firstTake") this.finishFirstTake(tr);
-      else tr.rec = null;
+      else {
+        tr.rec = null;
+        this.emitLayerSummary(track, tr.layers - 1);
+      }
     }
     this.run = "stopped";
     this.t = 0;
@@ -1095,6 +1102,7 @@ export class MockEngine implements EngineTransport {
             ),
           );
     this.origin = rec.start;
+    this.emitLayerSummary(this.tracks.indexOf(tr), tr.layers - 1);
   }
 
   private canAddLayer(tr: MockTrack): RejectReason | null {
@@ -1192,6 +1200,18 @@ export class MockEngine implements EngineTransport {
     if (this.transport.mode === "free" && !this.hasContent() && !this.anyRecording()) this.period = null;
   }
 
+  /** Browser-only stand-in: deterministic 128-bin musical-looking envelopes. */
+  private emitLayerSummary(track: number, layer: number): void {
+    if (track < 0 || layer < 0) return;
+    const bins = Array.from({ length: LAYER_SUMMARY_BINS }, (_, bin) => {
+      const phase = (bin / LAYER_SUMMARY_BINS) * Math.PI * 2;
+      const body = 0.12 + 0.32 * Math.abs(Math.sin(phase * (2 + layer) + track * 0.7));
+      const accents = bin % 16 < 3 ? 0.28 * (1 - (bin % 16) / 3) : 0;
+      return Math.min(1, body + accents + layer * 0.05);
+    });
+    this.emit({ type: "layerSummary", payload: { track, layer, bins } });
+  }
+
   private advanceLooper(frames: number): void {
     if (this.run === "countIn") {
       this.countInLeft -= frames;
@@ -1207,6 +1227,7 @@ export class MockEngine implements EngineTransport {
       if (!rec) return;
       if (rec.end !== null && this.t >= rec.end) {
         tr.rec = null;
+        this.emitLayerSummary(i, tr.layers - 1);
       } else if (rec.kind === "firstTake" && this.t - rec.start >= MAX_LOOP_SECONDS * this.sampleRate) {
         this.finishFirstTake(tr);
         this.notice({ kind: "maxLengthReached", track: i });

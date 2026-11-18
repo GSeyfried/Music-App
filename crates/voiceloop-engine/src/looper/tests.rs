@@ -118,6 +118,14 @@ impl Rig {
         }
         v
     }
+
+    fn summaries(&mut self) -> Vec<LayerSummary> {
+        let mut v = Vec::new();
+        while let Ok(summary) = self.h.summaries.pop() {
+            v.push(summary);
+        }
+        v
+    }
 }
 
 fn impulse(at: u64) -> impl FnMut(u64) -> f32 {
@@ -157,6 +165,58 @@ impl EditableLayerContract {
 
 fn rejected(reason: RejectReason) -> LooperNotice {
     LooperNotice::Rejected { reason }
+}
+
+#[test]
+fn completed_layer_emits_exact_peak_bins() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(128, |frame| match frame {
+        3 => -0.75,
+        127 => 0.4,
+        _ => 0.0,
+    });
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1);
+
+    let summaries = r.summaries();
+    assert_eq!(summaries.len(), 1);
+    let summary = summaries[0];
+    assert_eq!((summary.track, summary.layer), (0, 0));
+    assert_eq!(summary.bins.len(), LAYER_SUMMARY_BINS);
+    assert_eq!(summary.bins[3], 0.75);
+    assert_eq!(summary.bins[127], 0.4);
+    assert!(summary.bins.iter().enumerate().all(|(i, &peak)| i == 3 || i == 127 || peak == 0.0));
+}
+
+#[test]
+fn undo_trims_by_layer_count_and_redo_reemits_identical_summary() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(128, |_| 0.25);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1);
+    r.summaries();
+
+    r.send(C::Overdub { track: 0 });
+    // Two passes accumulate into one immutable layer; the final peak is 0.5.
+    r.run(256, |_| 0.25);
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1);
+    let recorded = r.summaries();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].layer, 1);
+    assert!(recorded[0].bins.iter().all(|&peak| peak == 0.5));
+
+    r.send(C::Undo { track: 0 });
+    r.silence(1);
+    assert_eq!(r.snap().tracks[0].layers, 1);
+    assert!(r.summaries().is_empty());
+
+    r.send(C::Redo { track: 0 });
+    r.silence(1);
+    assert_eq!(r.snap().tracks[0].layers, 2);
+    assert_eq!(r.summaries(), recorded);
 }
 
 // ---- configuration and memory ---------------------------------------------
@@ -1353,6 +1413,12 @@ fn assert_round_trip(t: TransportState) {
     assert!(matches!(import(&mut wrong_rate, &captured), Err(TransferError::DoesNotFit(_))), "resample first");
     let mut b = Rig::new(LooperConfig { pool_layers: 8, ..config(16) }, transport(1_000, LoopMode::Free));
     import(&mut b, &captured).expect("import into a new looper");
+    let restored_summaries = b.summaries();
+    assert_eq!(
+        restored_summaries.iter().map(|s| (s.track, s.layer)).collect::<Vec<_>>(),
+        vec![(0, 0), (0, 1), (1, 0)],
+        "every restored active layer emits a summary"
+    );
     assert!(render_from_start(&mut b, 5_000) == original, "bit-identical in a fresh looper");
     let again = export(&mut b).unwrap();
     assert_eq!(again.tracks, captured.tracks, "export of the import is identical");

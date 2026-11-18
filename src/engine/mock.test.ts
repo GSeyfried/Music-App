@@ -55,7 +55,7 @@ describe("MockEngine", () => {
   });
 
   it("records a free first take, overdubs, undoes and redoes", async () => {
-    const { mock, engine, latest, lastNotice } = await setup();
+    const { mock, engine, events, latest, lastNotice } = await setup();
     await engine.startInput(null);
     await engine.looper({ type: "record", track: 0 });
     expect(latest().tracks[0].state).toBe("recording");
@@ -64,6 +64,9 @@ describe("MockEngine", () => {
     await engine.looper({ type: "stopRecording", track: 0 });
     expect(latest().loopPeriodFrames).toBeGreaterThan(40_000);
     expect(latest().tracks[0]).toMatchObject({ state: "playing", layers: 1 });
+    const baseSummary = events.find((event) => event.type === "layerSummary");
+    expect(baseSummary?.type === "layerSummary" && baseSummary.payload).toMatchObject({ track: 0, layer: 0 });
+    expect(baseSummary?.type === "layerSummary" && baseSummary.payload.bins).toHaveLength(128);
 
     await engine.looper({ type: "undo", track: 0 });
     expect(lastNotice()).toEqual({ kind: "rejected", reason: "nothingToUndo" });
@@ -86,6 +89,7 @@ describe("MockEngine", () => {
     expect(latest().freeLayers).toBe(free); // redo keeps the buffer reserved
     await engine.looper({ type: "redo", track: 0 });
     expect(latest().tracks[0]).toMatchObject({ layers: 2, redoLayers: 0 });
+    expect(events.filter((event) => event.type === "layerSummary" && event.payload.layer === 1)).toHaveLength(2);
     await engine.looper({ type: "redo", track: 0 });
     expect(lastNotice()).toEqual({ kind: "rejected", reason: "nothingToRedo" });
   });

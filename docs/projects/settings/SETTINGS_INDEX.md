@@ -101,6 +101,7 @@ tuning; only the first few are likely user-facing.
 | `notes.colorMap` | Note colors | The color for each of the 12 note names. | Hue wheel, C = red (PENDING: tuned palette) | app | Pitch curve, piano roll, staff, loop rings, tuner | exists |
 | `notes.accuracyEncoding` | Accuracy shading | How accuracy and stability show on note colors: brightness, saturation or opacity. | Saturation | app | Same as note colors | exists |
 | `view.loopRingLayers` | Layer rings | Show each loop layer's loudness as its own ring around the track circle. | on | app | Track card ring | proposed |
+| `view.loopRingBins` | Layer ring resolution | Number of equal loop slices in each compact per-layer peak summary. Fixed as part of the engine/frontend wire contract. | 128 | app | Track card ring | exists |
 | `view.loopRingTicks` | Beat and bar ticks | Show beat and bar marks around the loop circle. | on | app | Track card ring | exists |
 | `view.playheadEmphasis` | Playhead highlight | Brighten and enlarge the part of the loop being played. | on | app | Track card ring | exists |
 | `view.timingReadout` | Timing readout | After each take, show how far your hits landed from the beat. | on | app | Track card | proposed |

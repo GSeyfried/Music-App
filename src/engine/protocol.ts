@@ -404,6 +404,17 @@ export interface LooperState {
   trackCapacity?: number;
 }
 
+/** Mirrors Rust `looper::LAYER_SUMMARY_BINS`; fixed wire-format resolution. */
+export const LAYER_SUMMARY_BINS = 128;
+
+export interface LayerSummary {
+  track: number;
+  /** Layer stack index; zero is the base take. */
+  layer: number;
+  /** Peak absolute sample in each equal slice of the loop, clamped to 0..1. */
+  bins: number[];
+}
+
 /** Mirrors `looper::LooperConfig` (serde camelCase, every field defaulted). */
 export interface LooperConfig {
   maxTracks: number;
@@ -552,6 +563,7 @@ export type EngineEvent =
   | { type: "warning"; payload: EngineWarning }
   | { type: "looper"; payload: LooperState }
   | { type: "looperNotice"; payload: LooperNotice }
+  | { type: "layerSummary"; payload: LayerSummary }
   | { type: "pitch"; payload: PitchUpdate }
   | { type: "note"; payload: NoteEvent }
   | { type: "onset"; payload: Onset }
@@ -575,6 +587,7 @@ export const EVENT_TYPES: readonly EngineEventType[] = [
   "warning",
   "looper",
   "looperNotice",
+  "layerSummary",
   "pitch",
   "note",
   "onset",

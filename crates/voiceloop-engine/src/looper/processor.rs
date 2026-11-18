@@ -24,15 +24,15 @@
 use std::sync::mpsc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use super::click::{accent_for, db_to_gain, ClickVoice};
 use super::pool::{self, LayerBuf, LayerRecycler, LayerSource};
 use super::transfer::{
-    Chunk, Inventory, JobKind, LayerJob, LayerSlot, ParkedLooper, ParkedTrack, RestorePlan, TrackPlan, JOBS_PER_BLOCK,
-    JOB_CAPACITY,
+    Chunk, Inventory, JobKind, LayerJob, LayerSlot, ParkedLooper, ParkedTrack, RestorePlan, TrackPlan, CHUNK_FRAMES,
+    JOBS_PER_BLOCK, JOB_CAPACITY,
 };
-use super::{LooperConfig, MAX_TRACKS};
+use super::{LooperConfig, LAYER_SUMMARY_BINS, MAX_POOL_LAYERS, MAX_TRACKS};
 use crate::error::EngineError;
 use crate::model::LoopMode;
 use crate::transport::{
@@ -239,11 +239,31 @@ pub struct LooperSnapshot {
     pub epoch: u64,
 }
 
+/// Compact, UI-safe peak envelope for one immutable loop layer.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayerSummary {
+    pub track: u8,
+    /// Layer stack index; zero is the base take.
+    pub layer: u8,
+    #[serde(serialize_with = "serialize_summary_bins")]
+    pub bins: [f32; LAYER_SUMMARY_BINS],
+}
+
+fn serialize_summary_bins<S>(bins: &[f32; LAYER_SUMMARY_BINS], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    bins.as_slice().serialize(serializer)
+}
+
 /// Control-thread ends of the looper's rings.
 pub struct LooperHandles {
     pub commands: Producer<LooperCommand>,
     pub snapshots: Consumer<LooperSnapshot>,
     pub notices: Consumer<LooperNotice>,
+    /// Completed layer summaries; raw samples never leave the looper.
+    pub summaries: Consumer<LayerSummary>,
     pub recycler: LayerRecycler,
     /// Layer export/import requests (see [`super::transfer`]); at most
     /// [`JOBS_PER_BLOCK`] are served per callback.
@@ -313,11 +333,22 @@ struct Recording {
     lat: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SummaryState {
+    Recording,
+    Scanning { cursor: usize, bins: [f32; LAYER_SUMMARY_BINS] },
+    Ready { bins: [f32; LAYER_SUMMARY_BINS], emitted: bool },
+}
+
 struct Track {
     /// Base take first, then overdubs. Capacity fixed at construction.
     layers: Vec<LayerBuf>,
+    /// Kept parallel with `layers`; inline arrays are allocated before audio starts.
+    summaries: Vec<SummaryState>,
     /// Layers removed by Undo, newest last. Capacity fixed at construction.
     redo: Vec<LayerBuf>,
+    /// Kept parallel with `redo`, so Undo/Redo preserves the exact summary.
+    redo_summaries: Vec<SummaryState>,
     rec: Option<Recording>,
     playing: bool,
     muted: bool,
@@ -400,6 +431,7 @@ pub struct LooperCore {
     cmd_rx: Consumer<LooperCommand>,
     snap_tx: Producer<LooperSnapshot>,
     notice_tx: Producer<LooperNotice>,
+    summary_tx: Producer<LayerSummary>,
     frames_processed: u64,
     /// Publish a snapshot at most every this many frames (~10 ms).
     snapshot_interval: u64,
@@ -426,6 +458,7 @@ impl LooperCore {
         let (cmd_tx, cmd_rx) = RingBuffer::new(COMMAND_CAPACITY);
         let (snap_tx, snap_rx) = RingBuffer::new(SNAPSHOT_CAPACITY);
         let (notice_tx, notice_rx) = RingBuffer::new(NOTICE_CAPACITY);
+        let (summary_tx, summary_rx) = RingBuffer::new(MAX_POOL_LAYERS);
         let (jobs_tx, job_rx) = RingBuffer::new(JOB_CAPACITY);
         let (job_tx, results_rx) = RingBuffer::new(JOB_CAPACITY);
         let (park_tx, park_rx) = mpsc::channel();
@@ -443,7 +476,9 @@ impl LooperCore {
         for i in 0..config.track_capacity {
             let tr = Track {
                 layers: Vec::with_capacity(config.max_layers_per_track),
+                summaries: Vec::with_capacity(config.max_layers_per_track),
                 redo: Vec::with_capacity(config.max_layers_per_track),
+                redo_summaries: Vec::with_capacity(config.max_layers_per_track),
                 rec: None,
                 playing: true,
                 muted: false,
@@ -496,6 +531,7 @@ impl LooperCore {
             cmd_rx,
             snap_tx,
             notice_tx,
+            summary_tx,
             frames_processed: 0,
             snapshot_interval: (sample_rate as u64 / 100).max(1),
             // Publish on the first block so the UI sees state immediately.
@@ -505,6 +541,7 @@ impl LooperCore {
             commands: cmd_tx,
             snapshots: snap_rx,
             notices: notice_rx,
+            summaries: summary_rx,
             recycler,
             jobs: jobs_tx,
             job_results: results_rx,
@@ -580,6 +617,7 @@ impl LooperCore {
         if self.drain.is_some() || self.any_recording() {
             self.touch(); // recorded samples changed layer content
         }
+        self.service_summaries();
         self.frames_processed = self.frames_processed.saturating_add(n as u64);
         self.frames_since_snapshot = self.frames_since_snapshot.saturating_add(n as u64);
         if self.frames_since_snapshot >= self.snapshot_interval {
@@ -693,6 +731,62 @@ impl LooperCore {
         if let Some(tr) = self.tracks.get_mut(ti) {
             tr.rec = None;
             tr.playing = true;
+            if let Some(summary) = tr.summaries.last_mut() {
+                *summary = SummaryState::Scanning { cursor: 0, bins: [0.0; LAYER_SUMMARY_BINS] };
+            }
+        }
+    }
+
+    /// Completed buffers are immutable, so their exact peak envelope can be
+    /// scanned in bounded chunks after recording. This avoids per-sample
+    /// approximation (important for cancelling multi-pass overdubs) while the
+    /// callback still does no allocation, locking, blocking, logging, or I/O.
+    fn service_summaries(&mut self) {
+        if self.loading {
+            return;
+        }
+        let Some(master) = self.master else { return };
+        let frames = (master.period.ceil().max(0.0) as usize).min(self.max_frames);
+        if frames == 0 {
+            return;
+        }
+
+        let mut budget = CHUNK_FRAMES;
+        for tr in &mut self.tracks {
+            for (layer, state) in tr.layers.iter().zip(tr.summaries.iter_mut()) {
+                if budget == 0 {
+                    break;
+                }
+                let SummaryState::Scanning { cursor, bins } = state else { continue };
+                let end = cursor.saturating_add(budget).min(frames);
+                for index in *cursor..end {
+                    let bin = index * LAYER_SUMMARY_BINS / frames;
+                    let sample = layer.get(index).copied().unwrap_or(0.0).abs();
+                    let peak = if sample.is_finite() { sample.min(1.0) } else { 0.0 };
+                    bins[bin] = bins[bin].max(peak);
+                }
+                budget -= end - *cursor;
+                *cursor = end;
+                if end == frames {
+                    *state = SummaryState::Ready { bins: *bins, emitted: false };
+                }
+            }
+        }
+
+        // Ready summaries remain queued in-place when the ring is full, so an
+        // event is never silently lost. Redo marks its preserved state un-emitted.
+        for (track, tr) in self.tracks.iter_mut().enumerate() {
+            for (layer, state) in tr.summaries.iter_mut().enumerate() {
+                let SummaryState::Ready { bins, emitted } = state else { continue };
+                if *emitted {
+                    continue;
+                }
+                let event = LayerSummary { track: track as u8, layer: layer as u8, bins: *bins };
+                if self.summary_tx.push(event).is_err() {
+                    return;
+                }
+                *emitted = true;
+            }
         }
     }
 
@@ -813,6 +907,7 @@ impl LooperCore {
                 if let Some(buf) = tr.layers.pop() {
                     self.pool.release(buf);
                 }
+                tr.summaries.pop();
             }
         }
         if self.transport.mode == LoopMode::Free && !self.has_content() {
@@ -1116,6 +1211,7 @@ impl LooperCore {
     fn release_redo(pool: &mut LayerSource, tr: &mut Track) {
         while let Some(buf) = tr.redo.pop() {
             pool.release(buf);
+            tr.redo_summaries.pop();
         }
     }
 
@@ -1126,6 +1222,7 @@ impl LooperCore {
         // A new take invalidates this track's redo history.
         Self::release_redo(&mut self.pool, tr);
         tr.layers.push(buf); // within capacity: checked by check_can_add_layer
+        tr.summaries.push(SummaryState::Recording);
         tr.rec = Some(rec);
         tr.timing_suspect = false;
         tr.playing = true;
@@ -1234,8 +1331,10 @@ impl LooperCore {
         }
         self.epoch = self.epoch.wrapping_add(1);
         if let Some(buf) = tr.layers.pop() {
+            let summary = tr.summaries.pop().unwrap_or(SummaryState::Recording);
             if tr.redo.len() < tr.redo.capacity() {
                 tr.redo.push(buf);
+                tr.redo_summaries.push(summary);
             } else {
                 self.pool.release(buf);
             }
@@ -1252,7 +1351,13 @@ impl LooperCore {
             return Err(RejectReason::LayerLimit);
         }
         let buf = tr.redo.pop().ok_or(RejectReason::NothingToRedo)?;
+        let mut summary =
+            tr.redo_summaries.pop().unwrap_or(SummaryState::Scanning { cursor: 0, bins: [0.0; LAYER_SUMMARY_BINS] });
+        if let SummaryState::Ready { emitted, .. } = &mut summary {
+            *emitted = false;
+        }
         tr.layers.push(buf);
+        tr.summaries.push(summary);
         self.touch();
         Ok(())
     }
@@ -1266,6 +1371,8 @@ impl LooperCore {
         tr.gain = 1.0;
         tr.level = if self.any_solo { 0.0 } else { 1.0 };
         tr.timing_suspect = false;
+        tr.summaries.clear();
+        tr.redo_summaries.clear();
         self.tracks.push(tr); // within capacity: total tracks never exceed track_capacity
         self.touch();
         Ok(())
@@ -1282,6 +1389,15 @@ impl LooperCore {
         self.clear(ti)?; // releases layers and redo history to the recycler
         let tr = self.tracks.remove(ti); // moves at most MAX_TRACKS small structs; no allocation
         self.spare.push(tr);
+        // Track indices are part of the frontend key. Re-emit every shifted
+        // ready summary so replacing/removing a middle track cannot mislabel it.
+        for shifted in self.tracks.iter_mut().skip(ti) {
+            for summary in &mut shifted.summaries {
+                if let SummaryState::Ready { emitted, .. } = summary {
+                    *emitted = false;
+                }
+            }
+        }
         self.any_solo = self.tracks.iter().any(|t| t.solo);
         if self.transport.mode == LoopMode::Free && !self.has_content() && !self.any_recording() {
             self.master = None;
@@ -1312,6 +1428,7 @@ impl LooperCore {
         while let Some(buf) = tr.layers.pop() {
             self.pool.release(buf);
         }
+        tr.summaries.clear();
         Self::release_redo(&mut self.pool, tr);
         if self.transport.mode == LoopMode::Free && !self.has_content() && !self.any_recording() {
             self.master = None;
@@ -1461,11 +1578,13 @@ impl LooperCore {
             for _ in 0..tp.layers {
                 if let Some(buf) = self.pool.acquire() {
                     tr.layers.push(buf);
+                    tr.summaries.push(SummaryState::Scanning { cursor: 0, bins: [0.0; LAYER_SUMMARY_BINS] });
                 }
             }
             for _ in 0..tp.redo {
                 if let Some(buf) = self.pool.acquire() {
                     tr.redo.push(buf);
+                    tr.redo_summaries.push(SummaryState::Scanning { cursor: 0, bins: [0.0; LAYER_SUMMARY_BINS] });
                 }
             }
             tr.gain = if tp.gain.is_finite() { tp.gain.clamp(0.0, 2.0) } else { 1.0 };
