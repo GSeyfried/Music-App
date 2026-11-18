@@ -1,6 +1,6 @@
 # Per-track loop settings
 
-Status: **plan** (2026-11-18). Nothing built yet.
+Status: **plan confirmed** (2026-11-18). Building slice 1.
 
 ## What the user asked for
 
@@ -22,7 +22,7 @@ stop and position. One bar grid for everything.
 | Mode | How long the loop is | Where it starts | Replaces today's |
 | --- | --- | --- | --- |
 | **Bars** | N bars + M beats on the song's grid | the next bar line | Metronome mode |
-| **Multiple** | ×¼, ×½, ×1, ×2, ×3, ×4 … of the base loop (the first Multiple track recorded sets the base, like a hardware looper) | the next start of the base loop | Free mode, which today is effectively "every track ×1" |
+| **Multiple** | ×¼, ×½, ×1, ×1.5, ×2, ×3, ×4, ×8, ×16 of the base loop (the first Multiple track recorded sets the base, like a hardware looper) | the next start of the base loop | Free mode, which today is effectively "every track ×1" |
 | **Free** | whatever the take is (fit-first-take applies) | when you press Record; the loop runs on its own clock and drifts against the others | (new) |
 
 Also per track:
@@ -80,14 +80,29 @@ in Metronome mode).
 5. **UI:** select a track and the transport bar edits its settings; rings per
    track; registry defaults and `SETTINGS_INDEX.md` rows.
 
+## Decisions (user, 2026-11-18)
+
+- The motivating case: a kick drum on every 4th beat (a short Bars loop) under
+  a very long recorder loop (a long Free or Multiple track). Each track loops
+  its own beat; polyrhythms are welcome.
+- Global "song builder" settings cover the whole song (tempo, meter, click,
+  and later the arrangement).
+- New tracks start from the registry defaults (they don't copy the selected
+  track).
+- Add a **Duplicate track** action on existing tracks: the same loop settings
+  and a copy of the layers (still nondestructive), as a new track.
+- Multiple ratios: ×¼, ×½, ×1, ×1.5, ×2, ×3, ×4, ×8, ×16.
+- **Restart** sends every track, Free ones included, back to its own start.
+  Timing fixes for individual layers belong to the track-lane (DAW) editor,
+  not to loop settings.
+
 ## PENDING
 
-- Should a new track copy the selected track's settings, or use the registry
-  defaults? (Plan: the registry defaults.)
-- Multiple mode: which ratios (is ×⅓ or ×1.5 wanted)? And what happens to the
-  base loop if the track that set it is cleared? (Plan: the base stays until
-  every Multiple track is empty.)
-- Free mode: should "Restart" realign free tracks to their own starts, or
-  leave them where they are?
-- Count-in per track when the song is already playing: none (the count-in
-  only applies from stopped). Confirm.
+- Memory: ×8/×16 or a long Free loop can exceed `looper.maxLoopSeconds` (30 s
+  by default, the same for every layer). This needs layer memory sized to each
+  loop's length (looper-01 README) or a higher per-track limit. Until then,
+  refuse with a clear message.
+- If the track that set the Multiple base is cleared, the base stays until
+  every Multiple track is empty.
+- Count-in only applies when starting from stopped, using the recording
+  track's count-in.
