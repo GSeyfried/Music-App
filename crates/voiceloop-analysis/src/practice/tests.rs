@@ -534,3 +534,42 @@ fn free_started_takes_align_by_notes_but_still_report_grid_errors() {
     let grid = r.timing.grid.as_ref().expect("click-tightness report");
     assert!((grid.mean_ms - 40.0).abs() < 15.0, "{grid:?}");
 }
+
+/// The pattern found in real fluid singing (2026-11-18 Practice export): each
+/// held note is preceded by a ~0.1 s slide piece at an in-between pitch that
+/// runs straight into it. Without merging, the slide was matched (wrong pitch)
+/// and the held note counted as an extra, capping accuracy near 50%.
+#[test]
+fn legato_slide_pieces_are_merged_into_the_note_they_lead_to() {
+    // Reference: C D E F, 450 ms each.
+    let reference = synthetic_take(&[(0, 450, 60.0, 0.95), (450, 450, 62.0, 0.95), (900, 450, 64.0, 0.95), (1_350, 450, 65.0, 0.95)]);
+    // Sung: on C, then for each next note a 100 ms slide piece, 20 ms gap, then the held note.
+    let attempt = synthetic_take(&[
+        (0, 430, 60.0, 0.95),
+        (430, 100, 61.0, 0.9),
+        (550, 330, 62.0, 0.95),
+        (880, 100, 63.1, 0.9),
+        (1_000, 330, 64.0, 0.95),
+        (1_330, 90, 64.6, 0.9),
+        (1_440, 400, 65.0, 0.95),
+    ]);
+    let merged = merge_legato(&attempt.notes, &ScoringConfig::default(), SR);
+    assert_eq!(merged.len(), 4, "{merged:#?}");
+    assert_eq!(merged[1].start_frame, 430 * 48, "the merged note starts where the slide began");
+    assert_eq!(merged[1].note, 62, "and keeps the held note's label");
+
+    let r = score_attempt(&reference, &attempt, &ScoringConfig::default());
+    assert_eq!((r.counts.right_notes, r.counts.extra, r.counts.missed), (4, 0, 0), "{:#?}", r.notes);
+    assert!(r.scores.accuracy.unwrap() > 99.0);
+
+    // Merging off: the old behaviour (extras appear).
+    let off = ScoringConfig { legato_glide_ms: 0.0, ..ScoringConfig::default() };
+    assert!(score_attempt(&reference, &attempt, &off).counts.extra > 0);
+}
+
+#[test]
+fn separate_short_notes_are_not_merged() {
+    // Staccato: short notes with clear gaps stay notes.
+    let take = synthetic_take(&[(0, 120, 60.0, 0.95), (300, 120, 62.0, 0.95), (600, 120, 64.0, 0.95)]);
+    assert_eq!(merge_legato(&take.notes, &ScoringConfig::default(), SR).len(), 3);
+}

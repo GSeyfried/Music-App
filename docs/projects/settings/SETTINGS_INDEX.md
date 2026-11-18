@@ -80,6 +80,7 @@ tuning; only the first few are likely user-facing.
 | `practice.octaveInvariant` | Ignore octave | Count the right note in any octave as correct. | off | app | Tolerance toggles | exists |
 | `practice.tempoTolerant` | Ignore tempo | Score rhythm relative to your own tempo. | off | app | Tolerance toggles | exists |
 | `practice.minClarity` / `minPitchFrames` / `edgeTrimMs` / `gridSubdivision` / `gridSnapTolerance` | Advanced detection | Low-level note-detection tuning. | 0.8 / 4 / 40 / 4 / 0.25 | app | (none) | exists |
+| `practice.legatoGlideMs` / `legatoGapMs` | Legato slides | When you slide smoothly between notes, sung pieces up to this long (ms) that run straight into a note (gap up to `legatoGapMs`) count as part of that note, not as notes of their own. 0 turns it off. | 160 / 50 | app | (none; scoring) | exists (engine ScoringConfig) |
 | `practice.maxTakeSeconds` | Maximum take length | Longest reference or attempt recording. | 60 s | app | Record button | exists |
 | `practice.preRollMs` | Pre-roll | Audio kept from just before you press record. | 250 ms | app | (none) | exists |
 | `practice.latencyOverrideMs` | Latency override | Overrides the measured latency for practice scoring only. | None | app | (none) | exists |

@@ -419,6 +419,12 @@ pub struct ScoringConfig {
     pub note_timing_threshold_ms: f32,
     /// Individual notes this far from the take's typical intonation are called out.
     pub note_pitch_threshold_cents: f32,
+    /// Legato: a sung note this short (ms) that runs straight into a
+    /// neighbour is a slide between notes, not a note of its own, and is merged
+    /// into the note it leads to (or comes from). 0 turns merging off.
+    pub legato_glide_ms: f32,
+    /// ... "runs straight into": the silence between them is at most this (ms).
+    pub legato_gap_ms: f32,
 }
 
 impl Default for ScoringConfig {
@@ -437,6 +443,8 @@ impl Default for ScoringConfig {
             grid_snap_tolerance: 0.25,
             note_timing_threshold_ms: 60.0,
             note_pitch_threshold_cents: 25.0,
+            legato_glide_ms: 160.0,
+            legato_gap_ms: 50.0,
         }
     }
 }
@@ -455,6 +463,10 @@ impl ScoringConfig {
         }
         if !(self.grid_snap_tolerance > 0.0 && self.grid_snap_tolerance <= 0.5) {
             return Err("gridSnapTolerance must be in (0, 0.5]");
+        }
+        let ms = |v: f32| v.is_finite() && (0.0..=1_000.0).contains(&v);
+        if !ms(self.legato_glide_ms) || !ms(self.legato_gap_ms) {
+            return Err("legatoGlideMs and legatoGapMs must be within 0..=1000");
         }
         Ok(())
     }
@@ -940,9 +952,79 @@ fn round1(v: f32) -> f32 {
 
 /// Score `attempt` against `reference`. See the module docs and
 /// `docs/projects/practice-lab/README.md` for the formulas.
+/// Merge legato slides into the notes they connect (see
+/// [`ScoringConfig::legato_glide_ms`]). Singing smoothly from note to note
+/// makes the segmenter split each note into a short slide piece at an
+/// in-between pitch plus the held note; matched by onset, the slide would be
+/// judged instead of the held note, and the held note would count as an extra.
+///
+/// A short note is merged into the next note when it runs straight into it,
+/// otherwise into the previous one if that runs straight into it. The merged
+/// note starts at the earlier onset (the singer began moving to the note
+/// there) and keeps the held note's label; its pitch is measured later from
+/// the curve with the usual edge trimming.
+pub fn merge_legato(notes: &[NoteEvent], cfg: &ScoringConfig, sample_rate: u32) -> Vec<NoteEvent> {
+    let frames = |ms: f32| (ms as f64 * sample_rate as f64 / 1_000.0) as u64;
+    let (glide, gap) = (frames(cfg.legato_glide_ms), frames(cfg.legato_gap_ms));
+    let mut out: Vec<NoteEvent> = Vec::with_capacity(notes.len());
+    if glide == 0 {
+        out.extend_from_slice(notes);
+        return out;
+    }
+    let short = |n: &NoteEvent| n.duration_frames() <= glide;
+    let join = |into: &mut NoteEvent, piece: &NoteEvent| {
+        into.start_frame = into.start_frame.min(piece.start_frame);
+        into.end_frame = into.end_frame.max(piece.end_frame);
+        let total = (into.frames + piece.frames).max(1) as f32;
+        into.clarity = (into.clarity * into.frames as f32 + piece.clarity * piece.frames as f32) / total;
+        into.frames += piece.frames;
+    };
+    let mut pending: Vec<NoteEvent> = Vec::new(); // slide pieces waiting for the note they lead to
+    for n in notes {
+        let follows = |a: &NoteEvent| n.start_frame.saturating_sub(a.end_frame) <= gap;
+        if short(n) {
+            // A slide piece: hold it until we know whether a note follows straight on.
+            let chained = pending.last().is_none_or(follows);
+            if !chained {
+                flush_pieces(&mut out, &mut pending, gap);
+            }
+            pending.push(*n);
+            continue;
+        }
+        let mut held = *n;
+        if pending.last().is_some_and(follows) {
+            for p in pending.drain(..) {
+                join(&mut held, &p);
+            }
+        } else {
+            flush_pieces(&mut out, &mut pending, gap);
+        }
+        out.push(held);
+    }
+    flush_pieces(&mut out, &mut pending, gap);
+    out
+}
+
+/// Pieces with no held note straight after them: join the previous held note
+/// if they follow it straight on, otherwise keep them as (short) notes.
+fn flush_pieces(out: &mut Vec<NoteEvent>, pending: &mut Vec<NoteEvent>, gap: u64) {
+    for p in pending.drain(..) {
+        match out.last_mut() {
+            Some(prev) if p.start_frame.saturating_sub(prev.end_frame) <= gap => {
+                let total = (prev.frames + p.frames).max(1) as f32;
+                prev.clarity = (prev.clarity * prev.frames as f32 + p.clarity * p.frames as f32) / total;
+                prev.end_frame = prev.end_frame.max(p.end_frame);
+                prev.frames += p.frames;
+            }
+            _ => out.push(p),
+        }
+    }
+}
+
 pub fn score_attempt(reference: &Take, attempt: &Take, cfg: &ScoringConfig) -> AttemptReport {
     let sr = reference.sample_rate.max(1);
-    let attempt = attempt.resampled(sr);
+    let mut attempt = attempt.resampled(sr);
+    attempt.notes = merge_legato(&attempt.notes, cfg, sr);
     let ms = |frames: f64| (frames * 1_000.0 / sr as f64) as f32;
 
     // Reference targets, in the reference's own take frames (no rebasing, so grid alignment can be exact).

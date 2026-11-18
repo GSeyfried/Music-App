@@ -200,3 +200,42 @@ PENDING:
   preview yet.
 - With "mic only when needed" (hardware-io), the output stream should run
   without the input, so previews still use the engine with the mic off.
+
+## Legato singing was scored as extra notes (fixed 2026-11-18)
+
+**Found from real takes** (the C♯ major scale attempts in the autosaved
+project). Singing smoothly from note to note made the note detector split
+each note into a ~0.1 s slide piece at an in-between pitch, followed by the
+held note. Two things went wrong:
+
+- The scorer matched the reference note to the slide piece by onset, judged
+  it a wrong pitch, and counted the well-sung held note as an **extra**.
+- Accuracy is right ÷ (reference notes + extras), so 8–13 extras capped it
+  near 50% even with perfect pitch.
+
+**Fix:** `merge_legato` in `crates/voiceloop-analysis/src/practice.rs`.
+Before matching, a sung piece no longer than `legatoGlideMs` (160) that runs
+into a note (gap ≤ `legatoGapMs`, 50) is merged into it. The merged note's
+onset is where the slide began, and its pitch is still measured from the
+curve with edge trimming. If no note follows, the piece joins the previous
+note. Separate short (staccato) notes are not merged.
+
+Re-scoring the real attempts (`cargo run -p voiceloop-engine --example rescore -- <library or export JSON> [--detail]`):
+
+| Attempt | Accuracy | Extras |
+| --- | --- | --- |
+| 1 | 30 → 40 | 8 → 0 |
+| 3 | 41 → 48 | 12 → 6 |
+| 4 | 39 → 67 | 13 → 0 |
+
+What remains is real intonation (many notes 50–100¢ off) and notes that were
+skipped (for example F♯ in attempt 4, sung only as a slide on the way to G♯).
+Attempt 2 recorded no notes at all (the input was probably silent).
+
+PENDING:
+- Pitch stability does not separate slide pieces from short held notes
+  (slides 25–35¢ spread, held notes 12–35¢), so the rule uses length and
+  adjacency only.
+- Should accuracy count extras at all for Easy / Super Easy?
+- Existing attempts keep their old scores until re-scored (Difficulty change
+  or the tolerance toggles re-score the open result).

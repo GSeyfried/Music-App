@@ -35,6 +35,10 @@ export interface ScoringConfig {
   gridSnapTolerance: number;
   noteTimingThresholdMs: number;
   notePitchThresholdCents: number;
+  /** Legato: sung pieces this short (ms) that run straight into a note are slides, merged into it. 0 = off. Older engines omit it. */
+  legatoGlideMs?: number;
+  /** Largest silence (ms) between a slide piece and the note it joins. */
+  legatoGapMs?: number;
 }
 
 export const DEFAULT_SCORING: ScoringConfig = {
@@ -51,6 +55,8 @@ export const DEFAULT_SCORING: ScoringConfig = {
   gridSnapTolerance: 0.25,
   noteTimingThresholdMs: 60,
   notePitchThresholdCents: 25,
+  legatoGlideMs: 160,
+  legatoGapMs: 50,
 };
 
 export const DEFAULT_PRACTICE_CONFIG: PracticeConfig = {
