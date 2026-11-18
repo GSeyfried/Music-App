@@ -35,6 +35,8 @@ export interface AppSettings {
   "notes.colorMap": string[];
   "notes.accuracyEncoding": AccuracyEncoding;
   "notation.view": "pianoRoll" | "staff" | "both";
+  /** Grid steps per beat when turning sung timing into note values. */
+  "notation.gridSubdivision": number;
 }
 
 export type AppSettingId = keyof AppSettings;
@@ -53,6 +55,7 @@ export const APP_DEFAULTS: AppSettings = {
   "notes.colorMap": DEFAULT_NOTE_COLORS,
   "notes.accuracyEncoding": "saturation",
   "notation.view": "pianoRoll",
+  "notation.gridSubdivision": 4,
 };
 
 interface Base {
@@ -175,6 +178,20 @@ export const SETTINGS: SettingDef[] = [
       { value: "staff", label: "Staff" },
       { value: "both", label: "Both" },
     ],
+  },
+  {
+    id: "notation.gridSubdivision",
+    source: "app",
+    kind: "number",
+    min: 1,
+    max: 8,
+    step: 1,
+    label: "Notation grid",
+    description:
+      "How finely sung timing is rounded for the staff: steps per beat. 4 rounds to sixteenth notes in 4/4; 2 to eighths (cleaner but less exact).",
+    category: "Practice",
+    tier: "advanced",
+    scope: "app",
   },
   // ---- Appearance -----------------------------------------------------------
   {
