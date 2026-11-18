@@ -144,3 +144,4 @@ tuning; only the first few are likely user-facing.
 | `practice.startNote.maxDriftCents` | Start note steadiness | How far (cents) the sung note may wander while it is being captured. | 35 | app | Scale card | exists (internal) |
 | `practice.startNote.holdMs` | Start note hold | How long (ms) to hold the note for "Start from my note". | 600 ms | app | Scale card | exists (internal) |
 | `view.livePitchPanel` | Live pitch panel | Show the tuner and pitch curve beside the tracks in Studio. Pitch analysis only runs while something needs it (this panel, Practice Lab, Games, or pitch-reactive colors). | off | app | Studio "Live pitch" toggle; tuner, pitch curve | exists |
+| `practice.scale.followRange` | Fit scales to my range | When you pick a key, start the scale in the octave that fits the range from the Range Finder (Games tab). | on | app | Scale card octave; "Fit my range" buttons | exists |

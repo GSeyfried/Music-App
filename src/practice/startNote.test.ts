@@ -79,3 +79,18 @@ describe("transposeTake", () => {
     expect(t.pitch[1].midi).toBeNull();
   });
 });
+
+import { octaveForRange, octavesToFit } from "./range";
+
+describe("fit to my range", () => {
+  it("puts a C major scale inside a C3–C5 or a low A2–A4 range", () => {
+    expect(octaveForRange(0, 12, 48, 72)).toBe(3); // C3..C4 or C4..C5 both fit; middle closest wins
+    expect(octaveForRange(0, 12, 45, 69)).toBe(3); // A2..A4: C3..C4
+    expect(octaveForRange(7, 12, 45, 69)).toBe(3); // G2 is below A2, so G3..G4
+  });
+  it("moves references by whole octaves toward the range", () => {
+    expect(octavesToFit([60, 62, 64], 40, 55)).toBe(-12);
+    expect(octavesToFit([48, 50], 45, 69)).toBe(12);
+    expect(octavesToFit([], 45, 69)).toBe(0);
+  });
+});

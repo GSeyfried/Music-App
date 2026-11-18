@@ -50,6 +50,7 @@ export interface AppSettings {
   "view.timingReadout": boolean;
   "view.livePitchPanel": boolean;
   "practice.scale.instrument": "piano";
+  "practice.scale.followRange": boolean;
   "practice.startNote.minClarity": number;
   "practice.startNote.maxDriftCents": number;
   "practice.startNote.holdMs": number;
@@ -105,6 +106,7 @@ export const APP_DEFAULTS: AppSettings = {
   "view.livePitchPanel": false,
   "widgets.hidden": [],
   "practice.scale.instrument": "piano",
+  "practice.scale.followRange": true,
   "practice.startNote.minClarity": 0.85,
   "practice.startNote.maxDriftCents": 35,
   "practice.startNote.holdMs": 600,
@@ -533,6 +535,16 @@ export const SETTINGS: SettingDef[] = [
     tier: "advanced",
     scope: "app",
     options: [{ value: "piano", label: "Piano" }],
+  },
+  {
+    id: "practice.scale.followRange",
+    source: "app",
+    kind: "bool",
+    label: "Fit scales to my range",
+    description: "When you pick a key, start the scale in the octave that fits the range from the Range Finder (Games tab).",
+    category: "Practice scales",
+    tier: "advanced",
+    scope: "app",
   },
   {
     id: "audio.previewVolume",

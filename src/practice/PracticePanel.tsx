@@ -31,6 +31,7 @@ import { AdvancedOptions } from "../settings/AdvancedOptions";
 import { Widget } from "../components/ui/Widgets";
 import { getAppSetting, setAppSetting, useAppSetting } from "../settings/appSettings";
 import { evenNotes, playPreview } from "../audio/instruments";
+import { octaveForRange, octavesToFit } from "./range";
 import { START_NOTE_IDLE, stepStartNote, tonicAndOctave, type StartNoteState } from "./startNote";
 import { settingById, type Difficulty } from "../settings/registry";
 import { SCALE_KINDS, SCALE_LABELS, TONIC_NAMES, scaleDefaults, scaleName, scaleNotes, scaleReference } from "./scales";
@@ -309,9 +310,12 @@ function PlayTakeButton({ take }: { take: Take }) {
 }
 
 /** Move a reference to another key or octave so it sits in your range. */
-function TransposeControl({ referenceId, disabled }: { referenceId: string; disabled?: boolean }) {
+function TransposeControl({ referenceId, notes, disabled }: { referenceId: string; notes: number[]; disabled?: boolean }) {
   const store = usePracticeStore();
   const busy = usePractice((s) => s.busy);
+  const low = useAppSetting("voice.rangeLowMidi");
+  const high = useAppSetting("voice.rangeHighMidi");
+  const fit = octavesToFit(notes, low, high);
   const off = disabled || busy;
   const move = (n: number) => void store.transposeReference(referenceId, n);
   return (
@@ -328,6 +332,15 @@ function TransposeControl({ referenceId, disabled }: { referenceId: string; disa
       </Button>
       <Button variant="outline" size="sm" disabled={off} aria-label="Up an octave" onPress={() => move(12)}>
         +8va
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        disabled={off || fit === 0}
+        title={fit === 0 ? "Already in your range" : undefined}
+        onPress={() => move(fit)}
+      >
+        Fit my range
       </Button>
     </div>
   );
@@ -390,6 +403,17 @@ function ScaleExerciseCard() {
   const fallbackBpm = useAppSetting("practice.scale.defaultBpm");
   const bpm = transport ? Math.round(transport.bpm) : fallbackBpm;
   const count = scaleNotes(tonic, kind, octave, direction).length;
+  const rangeLow = useAppSetting("voice.rangeLowMidi");
+  const rangeHigh = useAppSetting("voice.rangeHighMidi");
+  const followRange = useAppSetting("practice.scale.followRange");
+  const fitOctave = (t: number) => {
+    const span = Math.max(...scaleNotes(t, kind, 4, "up")) - Math.min(...scaleNotes(t, kind, 4, "up"));
+    setAppSetting("practice.scale.octave", octaveForRange(t, span, rangeLow, rangeHigh));
+  };
+  const chooseTonic = (t: number) => {
+    setTonic(t);
+    if (followRange) fitOctave(t);
+  };
   const [playing, setPlaying] = useState<{ stop(): void } | null>(null);
   const play = () => {
     if (playing) {
@@ -425,7 +449,7 @@ function ScaleExerciseCard() {
       </div>
       <p className="hint">Pick a key and scale. It's added to your references, ready to sing.</p>
       <div className="pl-scale-tonic">
-        <Segmented<number> label="Key" value={tonic} options={TONIC_NAMES.map((n, i) => ({ value: i, label: n }))} onChange={setTonic} />
+        <Segmented<number> label="Key" value={tonic} options={TONIC_NAMES.map((n, i) => ({ value: i, label: n }))} onChange={chooseTonic} />
       </div>
       <div className="pl-scale-octave">
         <Segmented<number>
@@ -435,6 +459,9 @@ function ScaleExerciseCard() {
           options={SCALE_OCTAVES.map((o) => ({ value: o, label: noteLabel(12 * (o + 1) + tonic) }))}
           onChange={(o) => setAppSetting("practice.scale.octave", o)}
         />
+        <Button variant="ghost" size="sm" onPress={() => fitOctave(tonic)}>
+          Fit my range
+        </Button>
         <StartFromMyNote
           onFound={(midi) => {
             const t = tonicAndOctave(midi);
@@ -627,7 +654,7 @@ function ReferenceView({ ready }: { ready: boolean }) {
         </p>
         <div className="pl-row">
           <PlayTakeButton take={detail.take} />
-          <TransposeControl referenceId={s.id} disabled={phase !== "idle"} />
+          <TransposeControl referenceId={s.id} notes={detail.take.notes.map((n) => n.note)} disabled={phase !== "idle"} />
         </div>
         {phase === "idle" && <ReferenceCurve take={detail.take} label={`Pitch of ${s.name}: ${detail.take.notes.map((n) => noteLabel(n.note)).join(" ")}`} />}
       </Widget>
