@@ -54,3 +54,17 @@ fifth, or copy a short bongo rhythm. The recognizer and latency rules must be
 specific to voice, acoustic audio, MIDI, or touch input, but successful prompts
 should feed one shared start action. Exact prompts, scoring, accessibility, and
 whether octave matters remain PENDING.
+4. **Play scales and Practice references in the game.** Any scale or reference
+   becomes a course: one opening per note, spaced by the note's duration.
+   Add speed options (slower/faster), which stretch the spacing and timing.
+5. **Song library.** Bundle common public-domain melodies (e.g. Twinkle
+   Twinkle Little Star, Mary Had a Little Lamb, Ode to Joy, Frère Jacques),
+   grouped Easy, Medium and Hard. Copyrighted popular songs are not bundled,
+   even for personal use.
+6. **Bring your own songs (research).** Import a melody from a MIDI or
+   MusicXML file (MIDI import already exists). Getting a playable vocal line
+   from a full mix (MP3, Spotify/Apple Music/YouTube) needs source separation
+   plus pitch tracking, which is a heavy-model task (see
+   polyphonic-analysis). Streaming services do not allow downloading or
+   analysing their audio, so local files the user owns are the only route.
+   PENDING.
