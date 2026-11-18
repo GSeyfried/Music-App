@@ -1748,3 +1748,445 @@ fn track_capacity_is_validated() {
     assert!(LooperConfig { track_capacity: 4, max_tracks: 5, ..ok }.max_loop_frames(1_000).is_err());
     assert!(LooperConfig { track_capacity: 4, max_tracks: 4, ..ok }.max_loop_frames(1_000).is_ok());
 }
+
+// ---- per-track loops (docs/projects/looper-01/PER_TRACK_LOOPS.md) ------------------
+
+use crate::transport::{TrackLoop, TrackLoopMode};
+
+/// Track loop settings for tests: no count-in, exact fit, overdubs start now.
+fn track_loop(mode: TrackLoopMode) -> TrackLoop {
+    TrackLoop {
+        mode,
+        count_in_bars: 0,
+        loop_fit: LoopFit::Exact,
+        overdub_start: OverdubStart::Immediate,
+        ..TrackLoop::DEFAULT
+    }
+}
+
+fn bars(n: u32) -> TrackLoop {
+    TrackLoop { bars: n, ..track_loop(TrackLoopMode::Bars) }
+}
+
+fn multiple(ratio: f64) -> TrackLoop {
+    TrackLoop { ratio, ..track_loop(TrackLoopMode::Multiple) }
+}
+
+/// A quiet impulse: sums of a few stay below the soft limiter's knee, so
+/// output values can be compared exactly.
+fn tick(at: u64) -> impl FnMut(u64) -> f32 {
+    move |f| if f == at { 0.25 } else { 0.0 }
+}
+
+#[test]
+fn new_tracks_follow_the_song_and_report_their_loop() {
+    let mut r = Rig::new(config(0), one_bar_synced());
+    r.silence(1);
+    let t = r.snap().tracks[0];
+    assert_eq!(t.track_loop, TrackLoop::DEFAULT);
+    assert_eq!((t.loop_period, t.loop_phase, t.busy), (Some(2_000.0), 0, false));
+    let json = serde_json::to_value(t).unwrap();
+    assert_eq!(json["loop"]["mode"], "song");
+    assert_eq!(json["loopPeriod"], 2_000.0);
+    assert_eq!(json["loopPhase"], 0);
+    assert_eq!(json["busy"], false);
+
+    let cmd: LooperCommand =
+        serde_json::from_str(r#"{"type":"setTrackLoop","track":1,"settings":{"mode":"bars","bars":4}}"#).unwrap();
+    let settings = TrackLoop { mode: TrackLoopMode::Bars, bars: 4, ..TrackLoop::DEFAULT };
+    assert_eq!(cmd, C::SetTrackLoop { track: 1, settings });
+    let cmd: LooperCommand = serde_json::from_str(r#"{"type":"duplicateTrack","track":0}"#).unwrap();
+    assert_eq!(cmd, C::DuplicateTrack { track: 0 });
+}
+
+#[test]
+fn one_bar_and_four_bar_tracks_meet_on_every_fourth_downbeat() {
+    // 113 BPM at 1 kHz: a fractional beat (530.97 frames), so every boundary
+    // is a rounded absolute grid frame.
+    let mut t = transport(1_000, LoopMode::Free);
+    t.bpm = 113.0;
+    let beat = t.frames_per_beat();
+    let mut r = Rig::new(config(0), t);
+    r.send(C::SetTrackLoop { track: 0, settings: bars(1) });
+    r.send(C::SetTrackLoop { track: 1, settings: bars(4) });
+    // Both start at the first bar line; each hears the downbeat kick once.
+    r.send(C::Record { track: 0 });
+    r.send(C::Record { track: 1 });
+    r.run(1, tick(0));
+    let s = r.snap();
+    assert_eq!((s.tracks[0].record_start, s.tracks[0].record_end), (Some(0), Some(grid_frame(4, beat))));
+    assert_eq!((s.tracks[1].record_start, s.tracks[1].record_end), (Some(0), Some(grid_frame(16, beat))));
+    assert_eq!(s.tracks[0].loop_period, Some(4.0 * beat));
+    assert_eq!(s.tracks[1].loop_period, Some(16.0 * beat));
+
+    let frames = grid_frame(4 * 21, beat) as usize + 10; // 21 bars
+    r.silence(frames - 1);
+    let bar_lines: Vec<usize> = (1..=21).map(|b| grid_frame(4 * b, beat) as usize).collect();
+    assert_eq!(nonzero_from(&r.out, 0), bar_lines, "every hit is on a bar line of the song grid");
+    for (i, &f) in bar_lines.iter().enumerate() {
+        let bar = i + 1;
+        let expected = if bar % 4 == 0 { 0.5 } else { 0.25 };
+        assert_eq!(r.out[f], expected, "bar {bar}");
+    }
+}
+
+#[test]
+fn bars_recording_from_stopped_uses_the_tracks_count_in() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::SetTrackLoop { track: 0, settings: TrackLoop { count_in_bars: 1, ..bars(1) } });
+    r.send(C::Record { track: 0 });
+    r.silence(1);
+    let s = r.snap();
+    assert_eq!((s.run, s.count_in_remaining), (RunState::CountIn, 1_999));
+    assert_eq!(s.tracks[0].state, TrackState::Armed);
+    r.silence(1_999);
+    assert_eq!((r.snap().run, r.core.transport_frame()), (RunState::Running, 0));
+    r.run(4_100, impulse(2_010)); // musical frame 10 of the take
+    assert_eq!(nonzero_from(&r.out, 3_000), vec![4_010, 6_010]);
+}
+
+#[test]
+fn multiple_tracks_follow_the_base_loop() {
+    let mut r = Rig::new(LooperConfig { pool_layers: 8, ..config(0) }, transport(1_000, LoopMode::Free));
+    r.send(C::AddTrack);
+    r.send(C::AddTrack);
+    for (track, ratio) in [(0u8, 1.0), (1, 2.0), (2, 0.5), (3, 1.5)] {
+        r.send(C::SetTrackLoop { track, settings: multiple(ratio) });
+    }
+    // The first Multiple take is free and sets the base: 1000 frames.
+    r.send(C::Record { track: 0 });
+    r.run(1_000, tick(0));
+    r.send(C::StopRecording { track: 0 });
+    r.silence(200); // t = 1200
+                    // ×2 waits for the next base cycle start (2000) and lasts 2000.
+    r.send(C::Record { track: 1 });
+    r.run(1, |_| 0.0);
+    let s = r.snap();
+    assert_eq!((s.tracks[1].record_start, s.tracks[1].record_end), (Some(2_000), Some(4_000)));
+    r.run(2_799, tick(2_500)); // t = 4000; phase 500 of track 1
+                               // ×½ starts on the base cycle start right now.
+    r.send(C::Record { track: 2 });
+    r.run(600, tick(4_100)); // phase 100 of track 2; t = 4600
+                             // ×1.5 starts on a base cycle start too.
+    r.send(C::Record { track: 3 });
+    r.run(1, |_| 0.0);
+    let s = r.snap();
+    assert_eq!((s.tracks[3].record_start, s.tracks[3].record_end), (Some(5_000), Some(6_500)));
+    r.run(7_399, tick(6_200)); // phase 1200 of track 3; t = 12000
+
+    let s = r.snap();
+    let periods: Vec<_> = s.tracks[..4].iter().map(|t| t.loop_period).collect();
+    assert_eq!(periods, vec![Some(1_000.0), Some(2_000.0), Some(500.0), Some(1_500.0)]);
+    assert_eq!(s.loop_period, None, "the song loop is untouched");
+
+    // (origin, period, phase, heard from)
+    let tracks = [
+        (0i64, 1_000i64, 0i64, 1_000i64),
+        (2_000, 2_000, 500, 4_000),
+        (4_000, 500, 100, 4_500),
+        (5_000, 1_500, 1_200, 6_500),
+    ];
+    let mut expected = vec![0.0f32; 12_000];
+    for (origin, period, phase, from) in tracks {
+        let mut f = origin + phase;
+        while f < 12_000 {
+            if f >= from {
+                expected[f as usize] += 0.25;
+            }
+            f += period;
+        }
+    }
+    assert!(r.out[..12_000] == expected[..], "each track repeats on its own multiple of the base");
+
+    // Restart: every track (and the base) back to its own start.
+    r.send(C::Restart);
+    let b = r.out.len();
+    r.silence(3_000);
+    assert_eq!(
+        nonzero_from(&r.out[b..], 0),
+        vec![0, 100, 500, 600, 1_000, 1_100, 1_200, 1_600, 2_000, 2_100, 2_500, 2_600, 2_700]
+    );
+
+    // An overdub that waits for the loop start waits for the track's own start.
+    let od = TrackLoop { overdub_start: OverdubStart::LoopStart, ..multiple(2.0) };
+    r.send(C::SetTrackLoop { track: 1, settings: od }); // allowed while running: not a length change
+    r.send(C::Overdub { track: 1 });
+    r.silence(1);
+    assert_eq!(r.snap().tracks[1].record_start, Some(4_000));
+    assert_eq!(r.snap().tracks[1].track_loop, od);
+    r.send(C::Stop);
+    r.silence(1);
+
+    // The base outlives the track that set it while other Multiple tracks have content.
+    r.send(C::Clear { track: 0 });
+    r.send(C::Record { track: 0 });
+    r.silence(1);
+    assert_eq!(r.snap().tracks[0].record_end, Some(1_000), "a new ×1 take is one base loop");
+    r.send(C::Stop);
+    for track in 0..4 {
+        r.send(C::Clear { track });
+    }
+    r.send(C::Record { track: 0 });
+    r.silence(1);
+    assert_eq!(r.snap().tracks[0].record_end, None, "with every Multiple track empty, the next take sets a new base");
+}
+
+#[test]
+fn a_free_track_keeps_its_own_period_and_drifts_against_the_song() {
+    let mut r = Rig::new(config(0), one_bar_synced());
+    r.send(C::SetTrackLoop { track: 1, settings: track_loop(TrackLoopMode::Free) });
+    r.send(C::Record { track: 0 }); // Song track: one bar, 0..2000
+    r.run(2_300, tick(0));
+    r.send(C::Record { track: 1 }); // Free: starts now (2300)
+    r.run(730, tick(2_400));
+    r.send(C::StopRecording { track: 1 }); // 730 frames, its own origin
+    r.silence(10_000 - 3_030);
+
+    let s = r.snap();
+    let periods = (s.loop_period, s.tracks[0].loop_period, s.tracks[1].loop_period);
+    assert_eq!(periods, (Some(2_000.0), Some(2_000.0), Some(730.0)));
+    let mut expected: Vec<usize> = (1..5).map(|k| 2_000 * k).collect();
+    expected.extend((1..=10).map(|k| 2_400 + 730 * k));
+    expected.sort_unstable();
+    assert_eq!(nonzero_from(&r.out, 0), expected);
+
+    // Restart lines the free loop up with the song again (its own start at 0).
+    r.send(C::Restart);
+    let b = r.out.len();
+    r.silence(3_000);
+    assert_eq!(nonzero_from(&r.out[b..], 0), vec![0, 100, 830, 1_560, 2_000, 2_290]);
+    assert_eq!(r.out[b], 0.25);
+}
+
+#[test]
+fn overdubs_follow_each_tracks_own_clock() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    let bar_od = TrackLoop { overdub_start: OverdubStart::LoopStart, ..bars(1) };
+    r.send(C::SetTrackLoop { track: 0, settings: bar_od });
+    r.send(C::SetTrackLoop { track: 1, settings: track_loop(TrackLoopMode::Free) });
+    r.send(C::Record { track: 0 }); // Bars: 0..2000
+    r.silence(2_000);
+    r.send(C::Record { track: 1 }); // Free: 2000..2700
+    r.silence(700);
+    r.send(C::StopRecording { track: 1 });
+    r.silence(300); // t = 3000
+
+    // Bars overdub from the loop start: the track's next cycle (4000).
+    r.send(C::Overdub { track: 0 });
+    r.silence(1);
+    assert_eq!(r.snap().tracks[0].record_start, Some(4_000));
+    r.run(1_100, impulse(4_100)); // t = 4101
+    r.send(C::StopRecording { track: 0 }); // Bars: ends at the next bar line
+    r.silence(1);
+    assert_eq!(r.snap().tracks[0].record_end, Some(6_000));
+    r.silence(2_098); // t = 6200
+
+    // Free overdub, immediately, at the free loop's phase.
+    r.send(C::Overdub { track: 1 });
+    r.run(100, impulse(6_250)); // phase (6250 - 2000) % 700 = 50
+    r.send(C::StopRecording { track: 1 });
+    r.silence(9_000 - 6_300);
+    assert_eq!(nonzero_from(&r.out, 6_300), vec![6_950, 7_650, 8_100, 8_350]);
+}
+
+#[test]
+fn set_track_loop_refusals() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::SetTrackLoop { track: 0, settings: TrackLoop { ratio: 0.75, ..multiple(1.0) } });
+    r.send(C::SetTrackLoop { track: 9, settings: bars(1) });
+    r.silence(1);
+    assert_eq!(r.notices(), vec![rejected(RejectReason::InvalidTransport), rejected(RejectReason::NoSuchTrack)]);
+
+    r.send(C::SetTrackLoop { track: 0, settings: bars(1) });
+    r.send(C::Record { track: 0 });
+    r.run(2_100, noise(5));
+    assert_eq!(r.snap().tracks[0].state, TrackState::Playing);
+    let before: Vec<f32> = (0..2_000).map(|f| r.core.layer_sample(0, 0, f).unwrap()).collect();
+
+    // Mode change on a track with content.
+    r.send(C::SetTrackLoop { track: 0, settings: track_loop(TrackLoopMode::Free) });
+    // Length change while the transport runs.
+    r.send(C::SetTrackLoop { track: 0, settings: bars(2) });
+    // The grid under a Bars loop with content.
+    let mut faster = transport(1_000, LoopMode::Free);
+    faster.bpm = 100.0;
+    r.send(C::SetTransport { transport: faster });
+    // Count-in, overdub start and fit may change at any time.
+    let tweaks =
+        TrackLoop { count_in_bars: 2, overdub_start: OverdubStart::NextBar, loop_fit: LoopFit::RoundUp, ..bars(1) };
+    r.send(C::SetTrackLoop { track: 0, settings: tweaks });
+    r.silence(1);
+    assert_eq!(
+        r.notices(),
+        vec![
+            rejected(RejectReason::TrackNotEmpty),
+            rejected(RejectReason::TransportLocked),
+            rejected(RejectReason::TransportLocked)
+        ]
+    );
+    assert_eq!(r.snap().tracks[0].track_loop, tweaks);
+
+    // Stopped: the length may change. It changes the repetition, not the samples.
+    r.send(C::Stop);
+    r.send(C::SetTrackLoop { track: 0, settings: TrackLoop { bars: 2, ..tweaks } });
+    r.silence(1);
+    assert!(r.notices().is_empty());
+    assert_eq!(r.snap().tracks[0].loop_period, Some(4_000.0));
+    let after: Vec<f32> = (0..2_000).map(|f| r.core.layer_sample(0, 0, f).unwrap()).collect();
+    assert_eq!(before, after);
+
+    // An empty track accepts anything valid, and follows the song again as Song.
+    r.send(C::SetTrackLoop { track: 1, settings: multiple(16.0) });
+    r.send(C::SetTrackLoop { track: 1, settings: TrackLoop::DEFAULT });
+    r.silence(1);
+    assert!(r.notices().is_empty());
+    assert_eq!(r.snap().tracks[1].loop_period, None, "no song loop yet");
+}
+
+#[test]
+fn loops_longer_than_the_layer_memory_are_refused() {
+    // Layers hold 10 s = 10 000 frames.
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::SetTrackLoop { track: 1, settings: bars(6) }); // 12 000 frames
+    r.silence(1);
+    assert_eq!(r.notices(), vec![rejected(RejectReason::LoopTooLong)]);
+
+    r.send(C::SetTrackLoop { track: 0, settings: multiple(1.0) });
+    r.send(C::Record { track: 0 });
+    r.silence(1_000);
+    r.send(C::StopRecording { track: 0 }); // base: 1000 frames
+    r.send(C::SetTrackLoop { track: 1, settings: multiple(16.0) });
+    r.send(C::SetTrackLoop { track: 1, settings: multiple(8.0) });
+    r.silence(1);
+    assert_eq!(r.notices(), vec![rejected(RejectReason::LoopTooLong)]);
+    assert_eq!(r.snap().tracks[1].track_loop.ratio, 8.0);
+
+    // A tempo change can make an empty Bars track too long: refused at Record.
+    r.send(C::SetTrackLoop { track: 1, settings: bars(4) }); // 8000 at 120 BPM
+    let mut slow = transport(1_000, LoopMode::Free);
+    slow.bpm = 60.0;
+    r.send(C::SetTransport { transport: slow });
+    r.send(C::Record { track: 1 });
+    r.silence(1);
+    assert_eq!(r.notices(), vec![rejected(RejectReason::LoopTooLong)]);
+    assert_eq!(r.snap().tracks[1].layers, 0);
+}
+
+#[test]
+fn duplicate_track_copies_layers_in_bounded_chunks() {
+    // 4 kHz × 10 s = 40 000-frame layers: three chunks per layer.
+    let mut r = Rig::new(LooperConfig { pool_layers: 8, ..config(0) }, transport(4_000, LoopMode::Free));
+    r.send(C::SetTrackLoop { track: 0, settings: track_loop(TrackLoopMode::Free) });
+    r.send(C::Record { track: 0 });
+    // Quiet enough that twice the mix stays below the limiter's knee.
+    let (mut n1, mut n2) = (noise(1), noise(2));
+    r.run(3_000, move |f| 0.5 * n1(f));
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::Overdub { track: 0 });
+    r.run(2_000, move |f| 0.5 * n2(f));
+    r.send(C::StopRecording { track: 0 });
+    r.send(C::SetGain { track: 0, gain: 0.5 });
+    r.send(C::NudgeLayer { track: 0, layer: 1, frames: 7 });
+    r.send(C::Record { track: 1 }); // a Song track that will move to index 2
+    r.silence(4_000);
+    r.send(C::Stop);
+    r.silence(1);
+    r.summaries();
+
+    r.send(C::DuplicateTrack { track: 0 });
+    r.silence(BLOCK);
+    let s = r.snap();
+    assert_eq!(s.track_count, 3);
+    assert!(s.tracks[1].busy && s.tracks[0].busy && !s.tracks[2].busy);
+    assert_eq!(s.tracks[2].layers, 1, "the old track 1 moved down");
+    r.send(C::Record { track: 1 });
+    r.send(C::Clear { track: 0 });
+    r.send(C::RemoveTrack { track: 2 });
+    r.send(C::DuplicateTrack { track: 2 });
+    r.send(C::SetMute { track: 1, muted: true });
+    r.send(C::SetGain { track: 0, gain: 1.0 });
+    r.send(C::NudgeLayer { track: 1, layer: 0, frames: 3 });
+    r.send(C::SetTrackLoop { track: 1, settings: track_loop(TrackLoopMode::Free) });
+    r.silence(BLOCK);
+    assert_eq!(r.notices(), vec![rejected(RejectReason::TrackBusy); 8]);
+
+    let mut blocks = 2;
+    while r.snap().tracks[1].busy {
+        r.silence(BLOCK);
+        blocks += 1;
+        assert!(blocks < 100);
+    }
+    // 2 layers × 40 000 frames at ≤ 16 384 frames per callback.
+    assert!(blocks >= (2 * 40_000usize).div_ceil(super::transfer::CHUNK_FRAMES));
+    let (a, b) = (r.snap().tracks[0], r.snap().tracks[1]);
+    assert!(!a.busy && !b.busy);
+    assert_eq!((b.layers, b.gain, b.track_loop, b.loop_period), (a.layers, a.gain, a.track_loop, a.loop_period));
+    assert_eq!(serde_json::to_value(b.layer_offsets).unwrap(), serde_json::json!([0, 7]));
+    for layer in 0..2 {
+        for f in 0..40_000 {
+            assert_eq!(r.core.layer_sample(1, layer, f), r.core.layer_sample(0, layer, f), "layer {layer} frame {f}");
+        }
+    }
+    // The copy's summaries are reported under its own index.
+    r.silence(1);
+    let copied: Vec<(u8, u8)> = r.summaries().iter().map(|s| (s.track, s.layer)).collect();
+    assert!(copied.contains(&(1, 0)) && copied.contains(&(1, 1)) && copied.contains(&(2, 0)), "{copied:?}");
+
+    // Played together, the copy doubles the original exactly.
+    let out = render_from_start(&mut r, 3_000);
+    r.send(C::Clear { track: 1 });
+    r.send(C::Clear { track: 2 });
+    r.silence(1);
+    let single = render_from_start(&mut r, 3_000);
+    assert!(single.iter().any(|&v| v != 0.0));
+    for (x, y) in out.iter().zip(single.iter()) {
+        assert!((x - 2.0 * y).abs() < 1e-5, "{x} vs 2 × {y}");
+    }
+}
+
+#[test]
+fn per_track_loops_survive_a_stream_restart() {
+    let mut a = Rig::new(LooperConfig { pool_layers: 8, ..config(0) }, one_bar_synced());
+    a.send(C::AddTrack);
+    a.send(C::SetTrackLoop { track: 0, settings: bars(3) });
+    a.send(C::SetTrackLoop { track: 1, settings: multiple(1.0) });
+    a.send(C::SetTrackLoop { track: 2, settings: multiple(1.5) });
+    a.send(C::Record { track: 0 }); // 3 bars: 0..6000
+    a.send(C::Record { track: 1 }); // free base take
+    a.run(900, noise(1));
+    a.send(C::StopRecording { track: 1 }); // base 900
+    a.send(C::Record { track: 2 }); // ×1.5 = 1350, from 900
+    a.run(6_000, noise(2));
+    a.send(C::Stop);
+    a.silence(1);
+    let original = render_from_start(&mut a, 8_000);
+    let before = a.snap();
+    let captured = park(a).into_captured();
+    assert_eq!(captured.tracks[0].layers[0].len(), 6_000);
+    assert_eq!(captured.tracks[2].layers[0].len(), 1_350);
+
+    let mut b = Rig::new(LooperConfig { pool_layers: 8, ..config(0) }, transport(1_000, LoopMode::Free));
+    import(&mut b, &captured).expect("restore");
+    assert!(render_from_start(&mut b, 8_000) == original, "identical playback after the restart");
+    let after = b.snap();
+    for t in 0..3 {
+        assert_eq!(after.tracks[t].track_loop, before.tracks[t].track_loop);
+        assert_eq!(after.tracks[t].loop_period, before.tracks[t].loop_period);
+    }
+    // The base came back too: a new ×2 take is two base loops long.
+    b.send(C::AddTrack);
+    b.send(C::SetTrackLoop { track: 3, settings: multiple(2.0) });
+    b.send(C::Record { track: 3 });
+    b.silence(1);
+    assert_eq!(b.snap().tracks[3].record_end, Some(1_800));
+
+    // A plan without loop info restores Song tracks.
+    let mut plain = captured;
+    for t in &mut plain.tracks {
+        t.plan.clock = super::transfer::TrackClock::default();
+    }
+    let mut c = Rig::new(LooperConfig { pool_layers: 8, ..config(0) }, one_bar_synced());
+    import(&mut c, &plain).expect("restore as Song tracks");
+    let tracks = &c.snap().tracks[..3];
+    assert!(tracks.iter().all(|t| t.track_loop.mode == TrackLoopMode::Song && t.loop_period == Some(2_000.0)));
+}

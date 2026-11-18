@@ -117,6 +117,84 @@ impl Default for LoopLength {
     }
 }
 
+/// The multiples of the base loop a `Multiple` track may use.
+pub const LOOP_RATIOS: [f64; 9] = [0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 8.0, 16.0];
+
+/// How one track's loop lines up with the song
+/// (docs/projects/looper-01/PER_TRACK_LOOPS.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum TrackLoopMode {
+    /// Follow the song transport exactly (the song loop, Free or Metronome).
+    #[default]
+    Song,
+    /// `bars` + `beats` on the song's bar grid.
+    Bars,
+    /// `ratio` × the base loop (set by the first Multiple take).
+    Multiple,
+    /// Its own length and start; runs independently and may drift.
+    Free,
+}
+
+/// One track's loop settings. Values a mode does not use are kept, so
+/// switching modes back restores them.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TrackLoop {
+    pub mode: TrackLoopMode,
+    /// Bars mode: length = `bars` bars + `beats` beats (at least one beat).
+    pub bars: u32,
+    pub beats: u32,
+    /// Multiple mode: one of [`LOOP_RATIOS`].
+    pub ratio: f64,
+    /// Count-in when recording on this track starts the transport (0..=8).
+    pub count_in_bars: u32,
+    pub overdub_start: OverdubStart,
+    /// Fitting of a Free take or the first Multiple take.
+    pub loop_fit: LoopFit,
+}
+
+impl TrackLoop {
+    pub const DEFAULT: Self = Self {
+        mode: TrackLoopMode::Song,
+        bars: 1,
+        beats: 0,
+        ratio: 1.0,
+        count_in_bars: 1,
+        overdub_start: OverdubStart::LoopStart,
+        loop_fit: LoopFit::NearestBeat,
+    };
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.bars > 256 || self.beats > 64 || self.bars + self.beats == 0 {
+            return Err("track loop length must be at least one beat and at most 256 bars");
+        }
+        if !LOOP_RATIOS.contains(&self.ratio) {
+            return Err("track loop ratio must be one of 0.25, 0.5, 1, 1.5, 2, 3, 4, 8, 16");
+        }
+        if self.count_in_bars > 8 {
+            return Err("track count-in must be 0-8 bars");
+        }
+        Ok(())
+    }
+
+    /// Bars mode loop length in beats for a meter of `beats_per_bar`.
+    pub fn beats_per_loop(&self, beats_per_bar: u8) -> u64 {
+        self.bars as u64 * beats_per_bar as u64 + self.beats as u64
+    }
+
+    /// The settings that set how long the loop is (bars, beats, ratio) differ.
+    pub fn length_differs(&self, other: &Self) -> bool {
+        self.bars != other.bars || self.beats != other.beats || self.ratio != other.ratio
+    }
+}
+
+impl Default for TrackLoop {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TransportState {
@@ -405,6 +483,31 @@ mod tests {
         t.bpm = 120.0;
         t.loop_length = LoopLength { bars: 0, beats: 0 };
         assert!(t.validate().is_err());
+    }
+
+    #[test]
+    fn track_loop_defaults_validation_and_wire_format() {
+        let d = TrackLoop::default();
+        assert_eq!(d.mode, TrackLoopMode::Song);
+        assert_eq!((d.bars, d.beats, d.ratio, d.count_in_bars), (1, 0, 1.0, 1));
+        assert_eq!(d.overdub_start, OverdubStart::LoopStart);
+        assert_eq!(d.loop_fit, LoopFit::NearestBeat);
+        assert!(d.validate().is_ok());
+        for r in LOOP_RATIOS {
+            assert!(TrackLoop { ratio: r, ..d }.validate().is_ok());
+        }
+        assert!(TrackLoop { ratio: 0.75, ..d }.validate().is_err());
+        assert!(TrackLoop { bars: 0, beats: 0, ..d }.validate().is_err());
+        assert!(TrackLoop { bars: 0, beats: 1, ..d }.validate().is_ok());
+        assert!(TrackLoop { count_in_bars: 9, ..d }.validate().is_err());
+
+        let json = serde_json::to_value(TrackLoop { mode: TrackLoopMode::Multiple, ..d }).unwrap();
+        assert_eq!(json["mode"], "multiple");
+        assert_eq!(json["countInBars"], 1);
+        assert_eq!(json["overdubStart"], "loopStart");
+        assert_eq!(json["loopFit"], "nearestBeat");
+        let back: TrackLoop = serde_json::from_str(r#"{"mode":"bars","bars":4}"#).unwrap();
+        assert_eq!((back.mode, back.bars, back.ratio), (TrackLoopMode::Bars, 4, 1.0));
     }
 
     #[test]

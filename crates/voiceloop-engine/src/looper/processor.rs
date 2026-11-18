@@ -29,8 +29,8 @@ use serde::{Deserialize, Serialize, Serializer};
 use super::click::{accent_for, db_to_gain, ClickVoice};
 use super::pool::{self, LayerBuf, LayerRecycler, LayerSource};
 use super::transfer::{
-    Chunk, Inventory, JobKind, LayerJob, LayerSlot, ParkedLooper, ParkedTrack, RestorePlan, TrackPlan, CHUNK_FRAMES,
-    JOBS_PER_BLOCK, JOB_CAPACITY,
+    Chunk, Inventory, JobKind, LayerJob, LayerSlot, ParkedLooper, ParkedTrack, RestorePlan, TrackClock, TrackPlan,
+    CHUNK_FRAMES, JOBS_PER_BLOCK, JOB_CAPACITY,
 };
 use super::{
     LayerTimingConfig, LooperConfig, LAYER_SUMMARY_BINS, MAX_LAYERS_PER_TRACK, MAX_POOL_LAYERS, MAX_TIMING_HITS,
@@ -39,7 +39,8 @@ use super::{
 use crate::error::EngineError;
 use crate::model::LoopMode;
 use crate::transport::{
-    first_grid_index_at_or_after, grid_frame, LoopFit, MusicalPosition, OverdubStart, TransportState,
+    first_grid_index_at_or_after, grid_frame, LoopFit, MusicalPosition, OverdubStart, TrackLoop, TrackLoopMode,
+    TransportState,
 };
 
 const COMMAND_CAPACITY: usize = 64;
@@ -129,6 +130,23 @@ pub enum LooperCommand {
     Clear {
         track: u8,
     },
+    /// Change one track's loop settings. An empty track accepts any valid
+    /// settings. On a track with content the mode cannot change
+    /// (`trackNotEmpty`) and the length (bars, beats, ratio) changes only
+    /// while the transport is stopped (`transportLocked`); a length change
+    /// changes how the loop repeats, never its samples. Count-in, overdub
+    /// start and fit can change at any time.
+    SetTrackLoop {
+        track: u8,
+        settings: TrackLoop,
+    },
+    /// Add a track right after `track` with the same loop settings, clock,
+    /// gain, mute, play state and layer offsets, and copy its active layers.
+    /// The copy is spread over callbacks (at most `CHUNK_FRAMES` frames per
+    /// block); both tracks report `busy` until it is done.
+    DuplicateTrack {
+        track: u8,
+    },
     ClearAll,
     /// Round-trip latency compensation for recordings that follow a reference.
     SetInputLatency {
@@ -213,6 +231,16 @@ pub struct TrackSnapshot {
     pub timing_suspect: bool,
     /// Signed playback offsets for the active layers, in frames.
     pub layer_offsets: LayerOffsets,
+    /// This track's loop settings.
+    #[serde(rename = "loop")]
+    pub track_loop: TrackLoop,
+    /// The track's own loop period in frames (`None`: no loop yet).
+    pub loop_period: Option<f64>,
+    /// Frames into the track's own current cycle.
+    pub loop_phase: u64,
+    /// A duplicate is being copied from or into this track: commands that
+    /// change its layers are refused (`trackBusy`), and a copy is silent.
+    pub busy: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -253,6 +281,10 @@ impl TrackSnapshot {
         record_end: None,
         timing_suspect: false,
         layer_offsets: LayerOffsets::EMPTY,
+        track_loop: TrackLoop::DEFAULT,
+        loop_period: None,
+        loop_phase: 0,
+        busy: false,
     };
 }
 
@@ -455,10 +487,14 @@ struct Track {
     level: f32,
     /// See [`TrackSnapshot::timing_suspect`].
     timing_suspect: bool,
-    /// This track's loop clock (phase 0 and period). Today every track follows
-    /// the song loop (`LooperCore::master`), kept in step by `set_master`;
-    /// per-track modes give a track its own (docs/projects/looper-01/PER_TRACK_LOOPS.md).
+    /// This track's loop clock (phase 0 and period). A `Song` track follows
+    /// the song loop (`LooperCore::master`, kept in step by `set_master`);
+    /// other modes have their own (docs/projects/looper-01/PER_TRACK_LOOPS.md).
     clock: Option<Master>,
+    /// Loop settings (mode, length, count-in, overdub start, fit).
+    lp: TrackLoop,
+    /// A duplicate is being copied into this track: silent, and refuses edits.
+    filling: bool,
 }
 
 impl Track {
@@ -469,6 +505,16 @@ impl Track {
             0.0
         }
     }
+}
+
+/// A `DuplicateTrack` copy in progress: layer `layer` of track `src` is
+/// copied into track `dst` from frame `offset`.
+#[derive(Debug, Clone, Copy)]
+struct DupJob {
+    src: usize,
+    dst: usize,
+    layer: usize,
+    offset: usize,
 }
 
 /// Output level above which the soft limiter starts to act (about -1.9 dBFS).
@@ -505,6 +551,11 @@ pub struct LooperCore {
     count_in_total: u64,
     count_in_left: u64,
     master: Option<Master>,
+    /// The base loop of `Multiple` tracks: set by the first Multiple take,
+    /// kept until every Multiple track is empty.
+    base: Option<Master>,
+    /// A `DuplicateTrack` copy in progress (at most one).
+    dup: Option<DupJob>,
     /// Active tracks, in UI order.
     tracks: Vec<Track>,
     /// Preallocated inactive tracks (empty, zero-layer).
@@ -592,6 +643,8 @@ impl LooperCore {
                 level: 1.0,
                 timing_suspect: false,
                 clock: None,
+                lp: TrackLoop::DEFAULT,
+                filling: false,
             };
             if i < config.max_tracks {
                 tracks.push(tr);
@@ -610,6 +663,8 @@ impl LooperCore {
                 as u32,
             min_loop_frames: ((fade as usize) * 2).max(sample_rate as usize / 50).max(1),
             master: Self::synced_master(&transport),
+            base: None,
+            dup: None,
             transport,
             run: RunState::Stopped,
             t: 0,
@@ -660,12 +715,76 @@ impl LooperCore {
         Ok((core, handles))
     }
 
-    /// Set the song loop, and every track's clock with it (spare tracks too, so
-    /// an added track joins in step). No allocation.
+    /// Set the song loop, and the clock of every `Song` track with it (spare
+    /// tracks too, so an added track joins in step). No allocation.
     fn set_master(&mut self, master: Option<Master>) {
         self.master = master;
-        for tr in self.tracks.iter_mut().chain(self.spare.iter_mut()) {
+        for tr in self.tracks.iter_mut() {
+            if tr.lp.mode == TrackLoopMode::Song {
+                tr.clock = master;
+            }
+        }
+        for tr in self.spare.iter_mut() {
             tr.clock = master;
+        }
+    }
+
+    /// The clock of a `Bars` track: phase 0 on bar 1 (frame 0) and an exact
+    /// period of whole beats, so its cycle starts are absolute beat-grid
+    /// frames (`round(n * period)`) that never drift from the click.
+    fn bars_clock(&self, lp: &TrackLoop) -> Master {
+        let beats = lp.beats_per_loop(self.transport.time_signature.numerator).max(1);
+        Master { origin: 0, period: beats as f64 * self.transport.frames_per_beat() }
+    }
+
+    /// The period a track with settings `lp` would loop at, when it can be
+    /// known before recording (Bars always; Multiple once the base exists).
+    fn planned_period(&self, lp: &TrackLoop) -> Option<f64> {
+        match lp.mode {
+            TrackLoopMode::Bars => Some(self.bars_clock(lp).period),
+            TrackLoopMode::Multiple => self.base.map(|b| lp.ratio * b.period),
+            TrackLoopMode::Song | TrackLoopMode::Free => None,
+        }
+    }
+
+    fn fits(&self, period: f64) -> bool {
+        period.is_finite() && period >= 1.0 && period.ceil() as usize <= self.max_frames
+    }
+
+    /// Recompute the clocks that depend on the transport grid (Bars tracks).
+    fn refresh_bars_clocks(&mut self) {
+        for ti in 0..self.tracks.len() {
+            let lp = self.tracks[ti].lp;
+            if lp.mode == TrackLoopMode::Bars {
+                self.tracks[ti].clock = Some(self.bars_clock(&lp));
+            }
+        }
+    }
+
+    fn track_busy(&self, ti: usize) -> bool {
+        self.tracks.get(ti).is_some_and(|tr| tr.filling) || self.dup.is_some_and(|d| d.src == ti)
+    }
+
+    /// Any track in `mode` holds layers (a recording track holds one).
+    fn mode_has_content(&self, mode: TrackLoopMode) -> bool {
+        self.tracks.iter().any(|tr| tr.lp.mode == mode && !tr.layers.is_empty())
+    }
+
+    /// Forget clocks nothing depends on any more: the song loop in Free
+    /// transport mode once no Song track has content, the Multiple base once
+    /// no Multiple track has content, and the clock of an empty Multiple or
+    /// Free track.
+    fn release_unused_clocks(&mut self) {
+        if self.transport.mode == LoopMode::Free && !self.mode_has_content(TrackLoopMode::Song) {
+            self.set_master(None);
+        }
+        if !self.mode_has_content(TrackLoopMode::Multiple) {
+            self.base = None;
+        }
+        for tr in &mut self.tracks {
+            if tr.layers.is_empty() && matches!(tr.lp.mode, TrackLoopMode::Multiple | TrackLoopMode::Free) {
+                tr.clock = None;
+            }
         }
     }
 
@@ -698,6 +817,7 @@ impl LooperCore {
     pub fn process(&mut self, input: &[f32], out: &mut [f32]) {
         self.drain_commands();
         self.service_jobs();
+        self.service_dup();
         let n = input.len().min(out.len());
         self.resync_click();
         for i in 0..n {
@@ -755,7 +875,8 @@ impl LooperCore {
         {
             let (any_solo, slew) = (self.any_solo, self.gain_slew);
             for tr in &mut self.tracks {
-                let target = tr.target_level(any_solo);
+                // A copy being filled stays silent and fades in once complete.
+                let target = if tr.filling { 0.0 } else { tr.target_level(any_solo) };
                 let d = target - tr.level;
                 if d != 0.0 {
                     tr.level = if d.abs() <= slew { target } else { tr.level + slew.copysign(d) };
@@ -876,8 +997,11 @@ impl LooperCore {
 
         let mut budget = CHUNK_FRAMES;
         for (track_index, tr) in self.tracks.iter_mut().enumerate() {
-            // Each track is scanned over its own loop.
+            // Each track is scanned over its own loop; a copy once it is complete.
             let Some(master) = tr.clock else { continue };
+            if tr.filling {
+                continue;
+            }
             let frames = (master.period.ceil().max(0.0) as usize).min(self.max_frames);
             if frames == 0 {
                 continue;
@@ -1002,7 +1126,9 @@ impl LooperCore {
         let Some(rec) = self.tracks.get(ti).and_then(|tr| tr.rec) else { return };
         self.touch();
         let raw_len = (raw_end - rec.start).max(0) as usize;
-        let len = if keep_tail { self.fit_first_take_frames(raw_len) } else { raw_len }.min(self.max_frames);
+        let lp = self.tracks[ti].lp;
+        let fit = if lp.mode == TrackLoopMode::Song { self.transport.loop_fit } else { lp.loop_fit };
+        let len = if keep_tail { self.fit_first_take_frames(raw_len, fit) } else { raw_len }.min(self.max_frames);
         if len < self.min_loop_frames {
             self.discard_recording(ti);
             let _ = self.notice_tx.push(LooperNotice::Rejected { reason: RejectReason::TooShort });
@@ -1024,7 +1150,16 @@ impl LooperCore {
                 }
             }
         }
-        self.set_master(Some(Master { origin: rec.start, period: len as f64 }));
+        let clock = Master { origin: rec.start, period: len as f64 };
+        match lp.mode {
+            TrackLoopMode::Song => self.set_master(Some(clock)),
+            TrackLoopMode::Multiple => {
+                // The take is `ratio` base loops long.
+                self.base = Some(Master { origin: rec.start, period: len as f64 / lp.ratio });
+                self.tracks[ti].clock = Some(clock);
+            }
+            TrackLoopMode::Free | TrackLoopMode::Bars => self.tracks[ti].clock = Some(clock),
+        }
         let capture_end = raw_end
             .max(rec.start + len as i64)
             .saturating_add(self.capture_tail_frames as i64)
@@ -1040,13 +1175,13 @@ impl LooperCore {
     /// Choose a repeat length without incrementally adding rounded beats.
     /// The selected length is relative to the take start, so a musician may
     /// begin anywhere on the transport and still receive an exact N-beat loop.
-    fn fit_first_take_frames(&self, raw_frames: usize) -> usize {
-        if self.transport.loop_fit == LoopFit::Exact {
+    fn fit_first_take_frames(&self, raw_frames: usize, fit: LoopFit) -> usize {
+        if fit == LoopFit::Exact {
             return raw_frames;
         }
         let beat = self.transport.frames_per_beat();
         let beats = raw_frames as f64 / beat;
-        let whole = match self.transport.loop_fit {
+        let whole = match fit {
             LoopFit::Exact => unreachable!(),
             LoopFit::NearestBeat => beats.round(),
             LoopFit::RoundDown => beats.floor(),
@@ -1109,11 +1244,10 @@ impl LooperCore {
                     self.pool.release(buf);
                 }
                 tr.summaries.pop();
+                tr.offsets.pop();
             }
         }
-        if self.transport.mode == LoopMode::Free && !self.has_content() {
-            self.set_master(None);
-        }
+        self.release_unused_clocks();
     }
 
     // ---- metronome --------------------------------------------------------
@@ -1216,6 +1350,8 @@ impl LooperCore {
             C::Redo { track } => self.redo(track as usize),
             C::NudgeLayer { track, layer, frames } => self.nudge_layer(track as usize, layer as usize, frames),
             C::Clear { track } => self.clear(track as usize),
+            C::SetTrackLoop { track, settings } => self.set_track_loop(track as usize, settings),
+            C::DuplicateTrack { track } => self.duplicate_track(track as usize),
             C::AddTrack => self.add_track(),
             C::RemoveTrack { track } => self.remove_track(track as usize),
             C::ClearAll => {
@@ -1239,14 +1375,15 @@ impl LooperCore {
         }
     }
 
+    /// Mixer commands. Refused on both tracks of a duplicate being copied.
     fn with_track(&mut self, ti: usize, f: impl FnOnce(&mut Track)) -> Result<(), RejectReason> {
+        let busy = self.track_busy(ti);
         let tr = self.tracks.get_mut(ti).ok_or(RejectReason::NoSuchTrack)?;
+        if busy {
+            return Err(RejectReason::TrackBusy);
+        }
         f(tr);
         Ok(())
-    }
-
-    fn has_content(&self) -> bool {
-        self.tracks.iter().any(|tr| !tr.layers.is_empty())
     }
 
     fn any_recording(&self) -> bool {
@@ -1263,7 +1400,11 @@ impl LooperCore {
         let clock_grid_changed = new.bpm != old.bpm || new.time_signature != old.time_signature;
         let length_changed = new.loop_length != old.loop_length;
         let affects_loop = mode_changed || (new.mode == LoopMode::Synced && (clock_grid_changed || length_changed));
-        let content = self.has_content() || self.any_recording();
+        // The song loop belongs to the Song tracks; Bars tracks sit on the grid.
+        let content = self.mode_has_content(TrackLoopMode::Song);
+        if clock_grid_changed && self.mode_has_content(TrackLoopMode::Bars) {
+            return Err(RejectReason::TransportLocked);
+        }
         // Existing buffers are sized to the configured maximum, so changing
         // only a synced loop's cycle length is a non-destructive window edit.
         // Require a stopped transport to avoid a mid-cycle phase jump.
@@ -1278,8 +1419,29 @@ impl LooperCore {
         if affects_loop {
             self.set_master(Self::synced_master(&new));
         }
+        self.refresh_bars_clocks();
         self.resync_click();
         Ok(())
+    }
+
+    /// Start the transport for a recording on a non-Song track, with that
+    /// track's count-in when it starts from stopped.
+    fn start_for_track(&mut self, count_in_bars: u32) {
+        match self.run {
+            RunState::Stopped => {
+                let count_in = (count_in_bars as f64 * self.transport.frames_per_bar()).round() as u64;
+                if count_in > 0 {
+                    self.run = RunState::CountIn;
+                    self.count_in_total = count_in;
+                    self.count_in_left = count_in;
+                } else {
+                    self.run = RunState::Running;
+                }
+            }
+            RunState::Paused => self.run = RunState::Running,
+            RunState::CountIn | RunState::Running => {}
+        }
+        self.resync_click();
     }
 
     fn play(&mut self) {
@@ -1373,6 +1535,13 @@ impl LooperCore {
         if let Some(m) = self.master {
             self.set_master(Some(Master { origin: 0, ..m }));
         }
+        // Every track's own loop does too (Bars clocks already start at 0).
+        self.base = self.base.map(|b| Master { origin: 0, ..b });
+        for tr in &mut self.tracks {
+            if tr.lp.mode != TrackLoopMode::Song {
+                tr.clock = tr.clock.map(|c| Master { origin: 0, ..c });
+            }
+        }
         self.resync_click();
     }
 
@@ -1390,7 +1559,7 @@ impl LooperCore {
 
     fn check_can_add_layer(&mut self, ti: usize) -> Result<(), RejectReason> {
         let tr = self.tracks.get(ti).ok_or(RejectReason::NoSuchTrack)?;
-        if tr.rec.is_some() {
+        if tr.rec.is_some() || self.track_busy(ti) {
             return Err(RejectReason::TrackBusy);
         }
         if tr.layers.len() >= self.max_layers {
@@ -1438,9 +1607,13 @@ impl LooperCore {
         if !self.tracks[ti].layers.is_empty() {
             return Err(RejectReason::TrackNotEmpty);
         }
+        let lp = self.tracks[ti].lp;
+        if lp.mode != TrackLoopMode::Song {
+            return self.record_own_loop(ti, lp);
+        }
         let rec = match self.transport.mode {
             LoopMode::Free => {
-                if self.master.is_none() && self.any_recording() {
+                if self.master.is_none() && self.mode_recording(TrackLoopMode::Song) {
                     return Err(RejectReason::TrackBusy); // another first take is defining the loop
                 }
                 self.ensure_running_free();
@@ -1471,20 +1644,91 @@ impl LooperCore {
         self.begin(ti, rec)
     }
 
+    fn mode_recording(&self, mode: TrackLoopMode) -> bool {
+        self.tracks.iter().any(|tr| tr.lp.mode == mode && tr.rec.is_some())
+    }
+
+    /// A new loop on an empty Bars, Multiple or Free track.
+    ///
+    /// - Bars: starts at the next bar line and lasts exactly one cycle of the
+    ///   track's clock (each loop phase is written once, even when the start
+    ///   is not the clock's phase 0).
+    /// - Multiple with a base: the track's clock starts at the next base cycle
+    ///   start and the take lasts one of its own cycles.
+    /// - Multiple without a base, and Free: a first take that sets its own
+    ///   length when it ends (and, for Multiple, the base).
+    fn record_own_loop(&mut self, ti: usize, lp: TrackLoop) -> Result<(), RejectReason> {
+        let lat = self.latency;
+        let (rec, clock) = match lp.mode {
+            TrackLoopMode::Bars => {
+                let m = self.bars_clock(&lp);
+                if !self.fits(m.period) {
+                    return Err(RejectReason::LoopTooLong);
+                }
+                self.start_for_track(lp.count_in_bars);
+                let start = self.next_bar_at_or_after(self.t);
+                let (cycle, phase) = m.locate(start);
+                let end = m.cycle_start(cycle + 1) + phase as i64;
+                (Recording { kind: RecKind::NewLoop, start, end: Some(end), lat }, Some(m))
+            }
+            TrackLoopMode::Multiple if self.base.is_some() => {
+                let base = self.base.ok_or(RejectReason::InvalidTransport)?;
+                let period = lp.ratio * base.period;
+                if !self.fits(period) {
+                    return Err(RejectReason::LoopTooLong);
+                }
+                self.start_for_track(lp.count_in_bars);
+                let (cycle, phase) = base.locate(self.t);
+                let start = base.cycle_start(if phase == 0 { cycle } else { cycle + 1 });
+                let m = Master { origin: start, period };
+                (Recording { kind: RecKind::NewLoop, start, end: Some(m.cycle_start(1)), lat }, Some(m))
+            }
+            TrackLoopMode::Multiple | TrackLoopMode::Free => {
+                if lp.mode == TrackLoopMode::Multiple && self.mode_recording(TrackLoopMode::Multiple) {
+                    return Err(RejectReason::TrackBusy); // another first take is defining the base
+                }
+                self.start_for_track(lp.count_in_bars);
+                (Recording { kind: RecKind::FirstTake, start: self.t, end: None, lat }, None)
+            }
+            TrackLoopMode::Song => return Err(RejectReason::InvalidTransport),
+        };
+        self.begin(ti, rec)?;
+        if clock.is_some() {
+            self.tracks[ti].clock = clock;
+        }
+        Ok(())
+    }
+
     fn overdub(&mut self, ti: usize) -> Result<(), RejectReason> {
         self.check_can_add_layer(ti)?;
         if self.tracks[ti].layers.is_empty() || self.tracks[ti].clock.is_none() {
             return Err(RejectReason::TrackEmpty);
         }
-        match self.transport.mode {
-            LoopMode::Free => self.ensure_running_free(),
-            LoopMode::Synced => {
-                if matches!(self.run, RunState::Stopped | RunState::Paused) {
-                    self.play();
+        let lp = self.tracks[ti].lp;
+        // Bars tracks are bar-quantized like Metronome mode; Multiple and Free
+        // tracks behave like Free mode (Immediate means now).
+        let (overdub_start, grid_mode) = match lp.mode {
+            TrackLoopMode::Song => {
+                match self.transport.mode {
+                    LoopMode::Free => self.ensure_running_free(),
+                    LoopMode::Synced => {
+                        if matches!(self.run, RunState::Stopped | RunState::Paused) {
+                            self.play();
+                        }
+                    }
                 }
+                (self.transport.overdub_start, self.transport.mode)
             }
-        }
-        let start = match (self.transport.overdub_start, self.transport.mode) {
+            TrackLoopMode::Bars => {
+                self.start_for_track(lp.count_in_bars);
+                (lp.overdub_start, LoopMode::Synced)
+            }
+            TrackLoopMode::Multiple | TrackLoopMode::Free => {
+                self.start_for_track(lp.count_in_bars);
+                (lp.overdub_start, LoopMode::Free)
+            }
+        };
+        let start = match (overdub_start, grid_mode) {
             (OverdubStart::Immediate, LoopMode::Free) => self.t,
             (OverdubStart::Immediate, LoopMode::Synced) | (OverdubStart::NextBar, _) => {
                 self.next_bar_at_or_after(self.t)
@@ -1512,10 +1756,12 @@ impl LooperCore {
         match rec.kind {
             RecKind::FirstTake => self.finish_first_take(ti, t, true),
             RecKind::NewLoop | RecKind::Overdub => {
-                let requested = match self.transport.mode {
-                    LoopMode::Free => t + self.fade_frames as i64,
-                    LoopMode::Synced => self.next_bar_at_or_after(t),
+                let bar_quantized = match tr.lp.mode {
+                    TrackLoopMode::Song => self.transport.mode == LoopMode::Synced,
+                    TrackLoopMode::Bars => true,
+                    TrackLoopMode::Multiple | TrackLoopMode::Free => false,
                 };
+                let requested = if bar_quantized { self.next_bar_at_or_after(t) } else { t + self.fade_frames as i64 };
                 let end = rec.end.map_or(requested, |e| e.min(requested));
                 if let Some(r) = self.tracks[ti].rec.as_mut() {
                     r.end = Some(end);
@@ -1526,8 +1772,9 @@ impl LooperCore {
     }
 
     fn undo(&mut self, ti: usize) -> Result<(), RejectReason> {
+        let busy = self.track_busy(ti);
         let tr = self.tracks.get_mut(ti).ok_or(RejectReason::NoSuchTrack)?;
-        if tr.rec.is_some() {
+        if tr.rec.is_some() || busy {
             return Err(RejectReason::TrackBusy);
         }
         if tr.layers.len() < 2 {
@@ -1549,8 +1796,9 @@ impl LooperCore {
     }
 
     fn redo(&mut self, ti: usize) -> Result<(), RejectReason> {
+        let busy = self.track_busy(ti);
         let tr = self.tracks.get_mut(ti).ok_or(RejectReason::NoSuchTrack)?;
-        if tr.rec.is_some() {
+        if tr.rec.is_some() || busy {
             return Err(RejectReason::TrackBusy);
         }
         if tr.layers.len() >= self.max_layers {
@@ -1574,7 +1822,11 @@ impl LooperCore {
     }
 
     fn nudge_layer(&mut self, ti: usize, li: usize, frames: i64) -> Result<(), RejectReason> {
+        let busy = self.track_busy(ti);
         let tr = self.tracks.get_mut(ti).ok_or(RejectReason::NoSuchTrack)?;
+        if busy {
+            return Err(RejectReason::TrackBusy);
+        }
         let half_loop = tr.clock.map(|m| (m.period / 2.0).floor() as i64).ok_or(RejectReason::TrackEmpty)?;
         let offset = tr.offsets.get_mut(li).ok_or(RejectReason::TrackEmpty)?;
         *offset = offset.saturating_add(frames).clamp(-half_loop, half_loop);
@@ -1596,6 +1848,8 @@ impl LooperCore {
         tr.offsets.clear();
         tr.redo_offsets.clear();
         tr.clock = self.master;
+        tr.lp = TrackLoop::DEFAULT;
+        tr.filling = false;
         self.tracks.push(tr); // within capacity: total tracks never exceed track_capacity
         self.touch();
         Ok(())
@@ -1603,7 +1857,8 @@ impl LooperCore {
 
     fn remove_track(&mut self, ti: usize) -> Result<(), RejectReason> {
         let tr = self.tracks.get(ti).ok_or(RejectReason::NoSuchTrack)?;
-        if tr.rec.is_some() {
+        // A copy in progress addresses tracks by index: none may move meanwhile.
+        if tr.rec.is_some() || self.dup.is_some() {
             return Err(RejectReason::TrackBusy);
         }
         if self.tracks.len() == 1 {
@@ -1623,9 +1878,7 @@ impl LooperCore {
             }
         }
         self.any_solo = self.tracks.iter().any(|t| t.solo);
-        if self.transport.mode == LoopMode::Free && !self.has_content() && !self.any_recording() {
-            self.set_master(None);
-        }
+        self.release_unused_clocks();
         Ok(())
     }
 
@@ -1644,7 +1897,11 @@ impl LooperCore {
     }
 
     fn clear(&mut self, ti: usize) -> Result<(), RejectReason> {
+        let busy = self.track_busy(ti);
         let tr = self.tracks.get_mut(ti).ok_or(RejectReason::NoSuchTrack)?;
+        if busy {
+            return Err(RejectReason::TrackBusy);
+        }
         self.epoch = self.epoch.wrapping_add(1);
         tr.rec = None;
         tr.timing_suspect = false;
@@ -1655,10 +1912,151 @@ impl LooperCore {
         tr.summaries.clear();
         tr.offsets.clear();
         Self::release_redo(&mut self.pool, tr);
-        if self.transport.mode == LoopMode::Free && !self.has_content() && !self.any_recording() {
-            self.set_master(None);
-        }
+        self.release_unused_clocks();
         Ok(())
+    }
+
+    fn set_track_loop(&mut self, ti: usize, settings: TrackLoop) -> Result<(), RejectReason> {
+        settings.validate().map_err(|_| RejectReason::InvalidTransport)?;
+        let tr = self.tracks.get(ti).ok_or(RejectReason::NoSuchTrack)?;
+        if self.track_busy(ti) {
+            return Err(RejectReason::TrackBusy);
+        }
+        let old = tr.lp;
+        let content = !tr.layers.is_empty() || tr.rec.is_some();
+        if content {
+            if settings.mode != old.mode {
+                return Err(RejectReason::TrackNotEmpty);
+            }
+            if settings.length_differs(&old) && (self.run != RunState::Stopped || tr.rec.is_some()) {
+                return Err(RejectReason::TransportLocked);
+            }
+        }
+        let relevant_length = match settings.mode {
+            TrackLoopMode::Bars => settings.bars != old.bars || settings.beats != old.beats || !content,
+            TrackLoopMode::Multiple => settings.ratio != old.ratio || !content,
+            TrackLoopMode::Song | TrackLoopMode::Free => false,
+        };
+        let period = if relevant_length { self.planned_period(&settings) } else { None };
+        if period.is_some_and(|p| !self.fits(p)) {
+            return Err(RejectReason::LoopTooLong);
+        }
+        let master = self.master;
+        let tr = &mut self.tracks[ti];
+        tr.lp = settings;
+        if !content {
+            tr.clock = match settings.mode {
+                TrackLoopMode::Song => master,
+                TrackLoopMode::Bars => period.map(|period| Master { origin: 0, period }),
+                TrackLoopMode::Multiple | TrackLoopMode::Free => None,
+            };
+        } else if let (Some(period), Some(c)) = (period, tr.clock) {
+            // Stopped: every clock is at origin 0. Only the repetition changes.
+            tr.clock = Some(Master { origin: c.origin, period });
+        }
+        self.release_unused_clocks();
+        self.touch();
+        Ok(())
+    }
+
+    fn duplicate_track(&mut self, ti: usize) -> Result<(), RejectReason> {
+        let src = self.tracks.get(ti).ok_or(RejectReason::NoSuchTrack)?;
+        if src.rec.is_some() || self.dup.is_some() || self.track_busy(ti) {
+            return Err(RejectReason::TrackBusy);
+        }
+        if self.spare.is_empty() {
+            return Err(RejectReason::TrackLimit);
+        }
+        let layers = src.layers.len();
+        if self.pool.available() < layers {
+            return Err(RejectReason::PoolExhausted);
+        }
+        let Some(mut tr) = self.spare.pop() else { return Err(RejectReason::TrackLimit) };
+        let src = &self.tracks[ti];
+        tr.rec = None;
+        tr.playing = src.playing;
+        tr.muted = src.muted;
+        tr.solo = false;
+        tr.gain = src.gain;
+        tr.level = 0.0; // fades in once the copy is complete
+        tr.timing_suspect = src.timing_suspect;
+        tr.clock = src.clock;
+        tr.lp = src.lp;
+        tr.summaries.clear();
+        tr.redo_summaries.clear();
+        tr.offsets.clear();
+        tr.redo_offsets.clear();
+        // Capacities match (`max_layers` entries per track); `take` keeps
+        // these pushes within capacity regardless.
+        for &offset in src.offsets.iter().take(tr.offsets.capacity()) {
+            tr.offsets.push(offset);
+        }
+        for state in src.summaries.iter().take(tr.summaries.capacity()) {
+            let copied = match *state {
+                SummaryState::Ready { bins, timing, .. } => {
+                    SummaryState::Ready { bins, timing, summary_emitted: false, timing_emitted: false }
+                }
+                _ => SummaryState::Scanning { cursor: 0, bins: [0.0; LAYER_SUMMARY_BINS], timing: TimingScan::EMPTY },
+            };
+            tr.summaries.push(copied);
+        }
+        for _ in 0..layers {
+            match self.pool.acquire() {
+                Some(buf) => tr.layers.push(buf),
+                None => break, // unreachable: availability checked above
+            }
+        }
+        tr.summaries.truncate(tr.layers.len());
+        tr.offsets.truncate(tr.layers.len());
+        tr.filling = !tr.layers.is_empty();
+        let dst = ti + 1;
+        self.tracks.insert(dst, tr); // within capacity; moves at most MAX_TRACKS small structs
+        for shifted in self.tracks.iter_mut().skip(dst + 1) {
+            for summary in &mut shifted.summaries {
+                if let SummaryState::Ready { summary_emitted, timing_emitted, .. } = summary {
+                    *summary_emitted = false;
+                    *timing_emitted = false;
+                }
+            }
+        }
+        if self.tracks[dst].filling {
+            self.dup = Some(DupJob { src: ti, dst, layer: 0, offset: 0 });
+        }
+        self.touch();
+        Ok(())
+    }
+
+    /// Copy at most `CHUNK_FRAMES` frames of a `DuplicateTrack` per call.
+    fn service_dup(&mut self) {
+        let Some(mut d) = self.dup else { return };
+        let mut budget = CHUNK_FRAMES;
+        let mut done = false;
+        while budget > 0 {
+            let (a, b) = self.tracks.split_at_mut(d.dst.max(d.src));
+            let (src, dst) = if d.src < d.dst { (&a[d.src], &mut b[0]) } else { (&b[0], &mut a[d.dst]) };
+            let (Some(from), Some(to)) = (src.layers.get(d.layer), dst.layers.get_mut(d.layer)) else {
+                done = true;
+                break;
+            };
+            let frames = from.len().min(to.len());
+            let len = budget.min(frames.saturating_sub(d.offset));
+            to[d.offset..d.offset + len].copy_from_slice(&from[d.offset..d.offset + len]);
+            budget -= len;
+            d.offset += len;
+            if d.offset >= frames {
+                d.layer += 1;
+                d.offset = 0;
+            }
+        }
+        if done {
+            self.dup = None;
+            if let Some(tr) = self.tracks.get_mut(d.dst) {
+                tr.filling = false;
+            }
+            self.touch();
+        } else {
+            self.dup = Some(d);
+        }
     }
 
     // ---- layer export / import (see `transfer.rs`) ------------------------------
@@ -1706,11 +2104,12 @@ impl LooperCore {
                 playing: tr.playing,
                 layer_offsets: LayerOffsets::from_slice(&tr.offsets).values,
                 redo_offsets: LayerOffsets::from_slice(&tr.redo_offsets).values,
+                clock: self.track_clock_plan(tr),
             };
         }
         Inventory {
             epoch: self.epoch,
-            busy: self.loading || self.drain.is_some() || self.any_recording(),
+            busy: self.loading || self.drain.is_some() || self.any_recording() || self.dup.is_some(),
             run: self.run,
             transport: self.transport,
             period: self.master.map(|m| m.period),
@@ -1720,6 +2119,15 @@ impl LooperCore {
             track_count: self.tracks.len().min(MAX_TRACKS) as u8,
             track_capacity: (self.tracks.len() + self.spare.len()).min(MAX_TRACKS) as u8,
             tracks,
+        }
+    }
+
+    fn track_clock_plan(&self, tr: &Track) -> TrackClock {
+        let own = tr.lp.mode != TrackLoopMode::Song;
+        TrackClock {
+            track_loop: tr.lp,
+            period: if own { tr.clock.map(|c| c.period) } else { None },
+            base: if tr.lp.mode == TrackLoopMode::Multiple { self.base.map(|b| b.period) } else { None },
         }
     }
 
@@ -1757,7 +2165,7 @@ impl LooperCore {
     /// Replace all content with zeroed layers laid out as `plan` and enter
     /// loading mode. Releases at most `pool_layers` buffers (bounded work).
     fn restore(&mut self, plan: &RestorePlan) -> Result<(), RejectReason> {
-        if self.run != RunState::Stopped || self.drain.is_some() || self.any_recording() {
+        if self.run != RunState::Stopped || self.drain.is_some() || self.any_recording() || self.dup.is_some() {
             return Err(RejectReason::TrackBusy);
         }
         let mut transport = plan.transport;
@@ -1775,6 +2183,10 @@ impl LooperCore {
                 None => None,
             },
         };
+        // Each track's own clock (origin 0: a restore leaves the transport stopped).
+        let fits = |p: f64| p.is_finite() && p >= 1.0 && p.ceil() as usize <= self.max_frames;
+        let mut clocks = [None; MAX_TRACKS];
+        let mut base = None;
         let mut needed = 0usize;
         for (t, tp) in plan.tracks.iter().enumerate() {
             let n = tp.layers as usize + tp.redo as usize;
@@ -1784,9 +2196,39 @@ impl LooperCore {
             if tp.layers as usize > self.max_layers || tp.redo as usize > self.max_layers {
                 return Err(RejectReason::LayerLimit);
             }
-            if n > 0 && master.is_none() {
-                return Err(RejectReason::InvalidTransport);
-            }
+            let lp = tp.clock.track_loop;
+            lp.validate().map_err(|_| RejectReason::InvalidTransport)?;
+            clocks[t] = match lp.mode {
+                TrackLoopMode::Song => {
+                    if n > 0 && master.is_none() {
+                        return Err(RejectReason::InvalidTransport);
+                    }
+                    master
+                }
+                TrackLoopMode::Bars => {
+                    let beats = lp.beats_per_loop(transport.time_signature.numerator).max(1);
+                    let period = beats as f64 * transport.frames_per_beat();
+                    if n > 0 && !fits(period) {
+                        return Err(RejectReason::LoopTooLong);
+                    }
+                    Some(Master { origin: 0, period })
+                }
+                TrackLoopMode::Multiple | TrackLoopMode::Free if n == 0 => None,
+                TrackLoopMode::Multiple | TrackLoopMode::Free => {
+                    let period = tp.clock.period.ok_or(RejectReason::InvalidTransport)?;
+                    if !fits(period) {
+                        return Err(RejectReason::LoopTooLong);
+                    }
+                    if lp.mode == TrackLoopMode::Multiple && base.is_none() {
+                        let b = tp.clock.base.ok_or(RejectReason::InvalidTransport)?;
+                        if !(b.is_finite() && b >= 1.0) {
+                            return Err(RejectReason::InvalidTransport);
+                        }
+                        base = Some(Master { origin: 0, period: b });
+                    }
+                    Some(Master { origin: 0, period })
+                }
+            };
             needed += n;
         }
         if plan.track_count as usize > self.tracks.len() + self.spare.len() {
@@ -1828,6 +2270,7 @@ impl LooperCore {
             tr.muted = tp.muted;
             tr.solo = tp.solo;
             tr.playing = tp.playing;
+            tr.lp = tp.clock.track_loop;
         }
         self.any_solo = self.tracks.iter().any(|tr| tr.solo);
         // Start at the target level: nothing ramps in when playback begins.
@@ -1837,6 +2280,10 @@ impl LooperCore {
         }
         self.transport = transport;
         self.set_master(master);
+        self.base = base;
+        for (tr, clock) in self.tracks.iter_mut().zip(clocks.iter()) {
+            tr.clock = *clock;
+        }
         self.latency = (plan.latency as i64).min(self.max_frames as i64 / 2);
         self.t = 0;
         self.loading = true;
@@ -1857,8 +2304,8 @@ impl LooperCore {
 
     pub fn snapshot(&self) -> LooperSnapshot {
         let mut tracks = [TrackSnapshot::EMPTY; MAX_TRACKS];
-        for (slot, tr) in tracks.iter_mut().zip(self.tracks.iter()) {
-            *slot = self.track_snapshot(tr);
+        for (ti, (slot, tr)) in tracks.iter_mut().zip(self.tracks.iter()).enumerate() {
+            *slot = self.track_snapshot(tr, self.track_busy(ti));
         }
         let (loop_cycle, loop_phase, loop_period) = match self.master {
             Some(m) => {
@@ -1886,7 +2333,7 @@ impl LooperCore {
         }
     }
 
-    fn track_snapshot(&self, tr: &Track) -> TrackSnapshot {
+    fn track_snapshot(&self, tr: &Track, busy: bool) -> TrackSnapshot {
         let state = match tr.rec {
             Some(_) if self.run == RunState::CountIn => TrackState::Armed,
             Some(r) if self.t < r.start => TrackState::Armed,
@@ -1908,6 +2355,10 @@ impl LooperCore {
             layer_offsets: LayerOffsets::from_slice(&tr.offsets),
             record_start: tr.rec.map(|r| r.start),
             record_end: tr.rec.and_then(|r| r.end),
+            track_loop: tr.lp,
+            loop_period: tr.clock.map(|m| m.period),
+            loop_phase: tr.clock.map_or(0, |m| m.locate(self.t).1 as u64),
+            busy,
         }
     }
 }
@@ -1925,6 +2376,10 @@ impl Drop for LooperCore {
         if self.loading {
             return;
         }
+        // Not on the audio thread: finish a duplicate's copy so it parks whole.
+        while self.dup.is_some() {
+            self.service_dup();
+        }
         if self.drain.is_some() || self.any_recording() {
             if self.drain.is_none() {
                 self.stop(RunState::Stopped);
@@ -1932,10 +2387,15 @@ impl Drop for LooperCore {
             self.drain = None;
             self.finish_stop(RunState::Stopped);
         }
+        let mut clocks = [TrackClock::SONG; MAX_TRACKS];
+        for (slot, tr) in clocks.iter_mut().zip(self.tracks.iter()) {
+            *slot = self.track_clock_plan(tr);
+        }
         let tracks = self
             .tracks
             .iter_mut()
-            .map(|tr| ParkedTrack {
+            .enumerate()
+            .map(|(i, tr)| ParkedTrack {
                 plan: TrackPlan {
                     layers: tr.layers.len().min(u8::MAX as usize) as u8,
                     redo: tr.redo.len().min(u8::MAX as usize) as u8,
@@ -1945,6 +2405,7 @@ impl Drop for LooperCore {
                     playing: tr.playing,
                     layer_offsets: LayerOffsets::from_slice(&tr.offsets).values,
                     redo_offsets: LayerOffsets::from_slice(&tr.redo_offsets).values,
+                    clock: clocks[i],
                 },
                 layers: std::mem::take(&mut tr.layers),
                 redo: std::mem::take(&mut tr.redo),

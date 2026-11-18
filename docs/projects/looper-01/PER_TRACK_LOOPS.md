@@ -1,6 +1,6 @@
 # Per-track loop settings
 
-Status: slice 1 built (b1b8db3). Slices 2–3 (engine) in progress; slice 5 (UI) built against the mock engine (see "UI deviations").
+Status: slice 1 built (b1b8db3). Slices 2–3 (engine) built and tested (see "Engine notes"); not yet launched against the UI. Slice 5 (UI) built against the mock engine (see "UI deviations"). Slice 4 (project files) pending; audio restart already keeps per-track loops.
 
 ## What the user asked for
 
@@ -184,3 +184,63 @@ the UI and mock do this. The engine work should confirm or change these.
 - **New tracks:** after `addTrack`, the UI sends `setTrackLoop` for index
   `tracks.length` only when the registry defaults differ from
   `DEFAULT_TRACK_LOOP`, relying on the engine applying looper commands in order.
+
+## Engine notes (slices 2–3, Rust side)
+
+Implemented in `crates/voiceloop-engine` (`transport.rs`, `looper/processor.rs`,
+`looper/transfer.rs`, `project.rs`), tested in `looper/tests.rs`. It agrees with
+every "UI deviation" above, including: Song tracks use the song's count-in,
+overdub start and fit; invalid settings fail `setTrackLoop` with kind `invalid`
+(the looper itself rejects them with `invalidTransport`); every command on a
+duplicate being copied, and on its source meanwhile, is refused with
+`trackBusy` (mixer commands too); the first Multiple take on a ×r track sets
+base = take ÷ r; a track's count-in applies to Record and Overdub on Bars,
+Multiple and Free tracks whenever the transport is stopped.
+
+How each mode runs:
+
+- **Bars:** the clock has phase 0 on bar 1 (frame 0) and an exact period of
+  whole beats, so its boundaries are absolute grid frames (`round(n × period)`)
+  that never drift from the click; a 1-bar and a 4-bar track always meet on
+  every 4th downbeat. A recording starts at the next bar line and covers
+  exactly one cycle of phases (it wraps when the bar line is not the loop's
+  phase 0). Overdubs are bar-quantized like Metronome mode.
+- **Multiple:** with a base, a recording starts at the next base cycle start;
+  the track's clock starts there with period ratio × base. Without a base the
+  take is free (fit by the track's `loopFit`) and sets the base. The base is
+  forgotten only once every Multiple track is empty. Overdub "Immediate" means
+  now, like Free mode.
+- **Free:** a free take with its own origin and period; it drifts against the
+  song. Restart / Stop → Play returns every clock (and the base) to origin 0.
+
+Engine deviations and choices:
+
+- **Empty Multiple and Free tracks report `loopPeriod: null`** (the mock reports
+  base × ratio for an empty Multiple track). Empty Bars tracks report their
+  period; Song tracks report the song loop.
+- **Tempo/meter changes are refused (`transportLocked`) while a Bars track has
+  content** (answers the UI PENDING above). Multiple and Free tracks keep their
+  frame periods when the tempo changes. Song-loop locks are unchanged.
+- **`busy` is reported on both the copy and its source** while a duplicate
+  copies (both refuse commands). RemoveTrack and another DuplicateTrack are
+  refused on any track meanwhile, because the copy addresses tracks by index.
+- **DuplicateTrack** copies whole layer buffers (`maxLoopSeconds` long, hidden
+  capture tail included), at most `CHUNK_FRAMES` frames per callback; the copy
+  is silent until complete and then fades in. Solo is not copied. Ready layer
+  summaries are re-sent under the copy's index; redo history is not copied.
+- **Length changes on a track with content** are refused while the transport is
+  not stopped for any mode (literal contract), even where the field is unused
+  (e.g. `ratio` on a Bars track).
+- **`LoopTooLong`** is returned by `setTrackLoop` when the period is already
+  known (Bars; Multiple once a base exists) and by `record`.
+- **Audio restart:** `TrackPlan` carries a `TrackClock` (settings, own period,
+  base period; origins are always 0 after a stop). The project glue keeps these
+  in memory through a stream restart (resampling periods if the rate changes).
+  Plans without loop info (every project file today) restore Song tracks.
+  PENDING (slice 4): save them in project files; until then a saved project
+  reopens every track as Song, and an audio file imported into a track
+  re-imports the looper without per-track loops (the in-place reload keeps
+  them, but the imported layer is fitted to the song loop).
+- Fixed in passing: cancelling an armed or too-short take now also drops its
+  layer-offset entry (it used to leave a stale trailing offset).
+
