@@ -1,6 +1,6 @@
 # Per-track loop settings
 
-Status: **plan confirmed** (2026-11-18). Building slice 1.
+Status: slice 1 built (b1b8db3). Slices 2–3 (engine) and 5 (UI) in progress against the contract below.
 
 ## What the user asked for
 
@@ -65,6 +65,43 @@ in Metronome mode).
   format version goes up, and older projects open as "every track Multiple ×1
   of the saved period", which is what they were.
 - Restarting audio and project restore carry the per-track clocks.
+
+## Contract (shared by the engine and UI work; change both sides together)
+
+Rust `crates/voiceloop-engine/src/transport.rs` (serde camelCase) ↔ TS
+`src/models/domain.ts`:
+
+```rust
+pub enum TrackLoopMode { Song, Bars, Multiple, Free }   // "song" | "bars" | "multiple" | "free"
+
+pub struct TrackLoop {
+    pub mode: TrackLoopMode,     // default Song = follow the song transport exactly (today's behaviour)
+    pub bars: u32,               // Bars mode: length = bars + beats on the song grid (bars+beats >= 1)
+    pub beats: u32,
+    pub ratio: f64,              // Multiple mode: one of 0.25, 0.5, 1, 1.5, 2, 3, 4, 8, 16 (LOOP_RATIOS)
+    pub count_in_bars: u32,      // used when recording on this track starts from stopped (0..=8)
+    pub overdub_start: OverdubStart,
+    pub loop_fit: LoopFit,       // Free / first Multiple take
+}
+// Default: mode Song, bars 1, beats 0, ratio 1, count_in_bars 1, overdub_start LoopStart, loop_fit NearestBeat.
+```
+
+- `LooperCommand::SetTrackLoop { track: u8, settings: TrackLoop }` (TS:
+  `{ type: "setTrackLoop", track, settings }`). An empty track accepts any
+  settings. On a track with content, mode changes are refused
+  (`TrackNotEmpty`), and length changes (bars, beats, ratio) only while the
+  transport is stopped (`TransportLocked`). Count-in, overdub start and fit can
+  change anytime.
+- `LooperCommand::DuplicateTrack { track: u8 }` (TS: `{ type:
+  "duplicateTrack", track }`): adds a track right after it with the same
+  `TrackLoop`, gain, mute and offsets, and copies its active layers. The copy
+  is spread over callbacks (at most `CHUNK_FRAMES` per block); the new track
+  reports `busy` until it's done.
+- `TrackSnapshot` (TS `TrackState` in `src/engine/protocol.ts`) gains:
+  `loop: TrackLoop`, `loopPeriod: number | null` (the track's own clock
+  period in frames), `loopPhase: number` (frames into its own cycle) and
+  `busy: boolean`.
+- Free-mode tracks restart from their own start on Restart/Stop → Play.
 
 ## Slices (each one tested, committed, and launched)
 
