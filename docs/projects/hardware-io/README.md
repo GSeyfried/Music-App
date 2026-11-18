@@ -407,26 +407,73 @@ and in `looper/io.rs` (mine, one line once the variant exists): when
 - PENDING: clippy `field_reassign_with_default` in `engine.rs` test
   `looper_commands_need_audio_but_transport_can_be_preset` (hub file, pre-existing, not changed).
 
-## Mic only when needed (requested 2026-11-17, not started)
+## Mic only when needed (built 2026-11-18; hardware not exercised)
 
-The user does not want the app always listening. Done so far: the Studio live
+The user does not want the app always listening. Earlier: the Studio live
 pitch panel is hidden by default (`view.livePitchPanel`), and pitch analysis
 runs only for Practice Lab, that panel, or pitch-reactive colors.
 
-Still open: the microphone stays open (macOS mic indicator lit) whenever audio
-runs, because `hardware::open_audio` opens capture and playback together and
-the looper's output depends on the duplex bridge.
+Built (contract in INTERFACE.md, `set_input_needs` and `EngineStatus.input`):
+- **Output runs alone.** `hardware::open_audio` opens only the output (looper,
+  metronome, preview) at a rate the input also supports; the input device is
+  queried, not opened. `hardware::open_capture` / `close_capture` open and
+  close the input on demand.
+- **Attach/detach without touching the output** (`looper/input_link.rs`). The
+  control thread hands the output callback an `InputLink` (sample ring + the
+  input stream's clock stats) through a 4-slot rtrb ring; the callback swaps it
+  in at a block start and hands the old link back through a second ring, so
+  nothing is freed on the audio thread. Detached, the looper hears silence:
+  no underrun, no discontinuity, no `InputDiscontinuity`/`timingSuspect`.
+  Closing detaches first and waits (≤ 250 ms) for the callback to let go
+  before stopping the input stream, so the bridge never sees the ring run dry.
+- **Clock mapping restarts cleanly.** Each swap calls `InputBridge::reattach`
+  (no allocation): cushion back to its initial size, prime again, re-measure
+  the target fill, input positions from 0, and a new anchor `epoch` (old
+  mappings re-anchor) without incrementing `discontinuities`. Input overruns
+  counted before an attach are not treated as a gap. Practice's
+  input→transport map is reset on every close (`practice.audio_stopped`).
+- **Reasons and hold** (`mic.rs`, unit-tested): UI reasons (`alwaysOn`,
+  `pitch`, `practice`, `game`, `meter`) plus engine reasons (`record` while a
+  track is armed/recording/overdubbing or a record waits, `monitor`,
+  `calibration`, `practice` during a take). Opens at once; closes `holdMs`
+  after the last reason (setting `audio.micIdleCloseSeconds`, default 10 s).
+- **Recording waits for input** ("arm and wait"): `record`/`overdub` while the
+  mic is off or priming are queued until the bridge has primed, then sent in
+  order; cancelled by `stopRecording`/`stop`/`restart`/`clear*`/`removeTrack`;
+  dropped with an error after 5 s. Calibration waits the same way. Practice
+  take starts are refused with `busy` while the mic starts (and open it).
+- **Frontend.** `src/engine/micNeeds.ts` (reasons from workspace, live pitch
+  panel, pitch-reactive colors, `audio.micMode`; deduplicated, non-overlapping
+  sync), `useMicWhenNeeded` in `App.tsx`, a top-bar `MicIndicator` (off /
+  starting / on, with why and the closing countdown), and the level meter
+  reads "microphone off". Settings `audio.micMode` (`whenNeeded` |
+  `alwaysOn`, default `whenNeeded`) and `audio.micIdleCloseSeconds`.
+  `status.capturing` keeps meaning "audio is running" so existing screens work.
 
-Proposed engine change (next session):
-- Split the lifecycles: playback (output stream + looper mix + metronome) can
-  run with no capture stream; capture opens on demand.
-- Open capture when something needs input: arming/recording a take or overdub
-  (open early enough for count-in/latency), monitoring on, the tuner or live
-  pitch panel shown, Practice recording, calibration. Close it after a short
-  idle delay (setting, e.g. `audio.micIdleCloseSeconds`, default ~10 s).
-- Keep loops, transport position and the clock anchor across capture
-  open/close (same restore path as device restarts), and re-establish input
-  latency/clock mapping on each open.
-- PENDING: whether reopening adds an audible gap or clock jump on the output;
-  how quickly CoreAudio reopens a USB interface (H4n); whether an armed
-  overdub with "Loop start" leaves enough time to open the mic.
+Verified: `npm run engine:test` (new: `looper::input_link` output-only,
+attach/detach/reattach without discontinuities, overruns before attach,
+loops keep playing (and overdub records) across mic close/reopen;
+`bridge::reattach`; `mic` demand/hold/waiting logic; engine status JSON),
+`npx vitest run` (`src/engine/micNeeds.test.ts`), `npm run typecheck`,
+`cargo build -p voiceloop`. **Not** exercised: a native launch with real
+devices (the macOS mic indicator, CoreAudio open/close timing).
+
+PENDING:
+- Hardware check: macOS mic indicator stays off with loops/previews playing;
+  turns on for record, Practice, live pitch; turns off `holdMs` after.
+- Whether opening/closing the input on the same aggregate/USB device (H4n)
+  glitches the running output (one CoreAudio device for both directions), and
+  how long CoreAudio takes to deliver input after open (sets how long a
+  quantized record waits; with "Loop start"/"Next bar" a slow open can push
+  the take to the following boundary, because the record command reaches the
+  looper only once input flows).
+- Calibration latency is measured with the bridge's delay of one mic session;
+  each reopen re-measures the target fill (same as a device restart). Check on
+  hardware that the round trip stays within a few frames across reopens.
+- iOS: the AVAudioSession category may need switching between playback and
+  play-and-record when the mic opens/closes; not handled (`platform/ios.rs`).
+- The Practice/Games workspaces hold the mic for as long as they are open;
+  finer reasons (e.g. Groove in pads/MIDI mode needs no mic) are not wired.
+- `meter` reason (input settings panel open) is defined but not sent yet.
+- After the input fails to open, retries run every 3 s while a reason exists;
+  the error is shown once per streak (and again after the UI's needs change).

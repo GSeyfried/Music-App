@@ -1,6 +1,8 @@
-//! Control-thread side of hardware I/O: opening the stream pair for an
-//! [`AudioConfig`], device and MIDI hot-plug polling, MIDI event delivery,
-//! clock-drift estimation, diagnostics, and settings persistence.
+//! Control-thread side of hardware I/O: opening the output stream for an
+//! [`AudioConfig`] and, separately and only while something needs it, the
+//! input stream ([`open_capture`] / [`close_capture`]; see `mic.rs`), device
+//! and MIDI hot-plug polling, MIDI event delivery, clock-drift estimation,
+//! diagnostics, and settings persistence.
 //!
 //! [`Hardware`] lives inside the engine's control loop (`engine.rs`) so that
 //! file stays a thin dispatcher. Nothing here runs on an audio thread.
@@ -19,6 +21,7 @@ use crate::clock::{self, DriftEstimator, StreamStats, STREAM_DEVICE_CHANGED, STR
 use crate::devices::{self, RateCaps, RateChoice};
 use crate::engine::{EngineEvent, EngineWarning};
 use crate::error::EngineError;
+use crate::looper::input_link::InputLink;
 use crate::looper::io::{CalibrationJob, LooperPlayback, OutputInfo, OutputOptions};
 use crate::looper::{IoCounters, LooperConfig};
 use crate::midi_in::{MidiBatch, MidiManager, MidiPortInfo};
@@ -102,13 +105,10 @@ pub fn stalled(last_anchor_ns: Option<u64>, now_ns: u64, started_ns: u64) -> boo
     }
 }
 
-/// Streams opened for a config.
+/// Output opened for a config (the input opens later, on demand: [`open_capture`]).
 pub struct Opened {
-    pub capture: InputCapture,
     pub playback: Option<LooperPlayback>,
-    pub analysis_rx: rtrb::Consumer<f32>,
-    pub analysis_dropped: Arc<AtomicU64>,
-    /// Why the looper is not running, when it is not.
+    /// Why the looper is not running, when it is not (input-only "metering" mode).
     pub looper_problem: Option<String>,
     pub warnings: Vec<EngineWarning>,
     /// `config` with explicitly chosen devices pinned to the stable ids and
@@ -117,7 +117,10 @@ pub struct Opened {
     pub resolved: AudioConfig,
 }
 
-/// Open input (and, when the devices agree on a rate, the looper's output) for `config`.
+/// Open the looper's output for `config` at a rate the input device also
+/// supports, so the microphone can be attached later without a restart.
+/// The input device is only queried here, never opened (the system mic
+/// indicator stays off).
 pub fn open_audio(
     config: &AudioConfig,
     looper_config: &LooperConfig,
@@ -166,12 +169,7 @@ pub fn open_audio(
 
     // On iOS the session sets the IO buffer; CPAL streams must use the default.
     let cpal_buffer = if platform::SESSION_MANAGES_BUFFER { None } else { config.buffer_size };
-    let counters = Arc::new(IoCounters::default());
-    // Shared so the output bridge can read the input clock anchor.
-    let input_stats = Arc::new(StreamStats::default());
     let mut playback: Option<LooperPlayback> = None;
-    let mut feed: Option<LooperFeed> = None;
-    let mut rate: Option<u32> = None;
     let mut looper_problem: Option<String> = None;
 
     match output {
@@ -181,31 +179,13 @@ pub fn open_audio(
             match devices::negotiate_rate(&in_caps, &out_caps, config.sample_rate)? {
                 RateChoice::Shared(r) => {
                     let started = devices::config_at_rate(&out.device, DeviceDirection::Output, r).and_then(|cfg| {
-                        let capacity = ((r / 2) as usize).max(4096);
-                        let (tx, rx) = rtrb::RingBuffer::<f32>::new(capacity);
-                        let options = OutputOptions {
-                            buffer_size: cpal_buffer,
-                            route: config.output_route,
-                            monitor: config.monitor,
-                            input_clock: Some(input_stats.clone()),
-                        };
-                        LooperPlayback::start(
-                            out.device.clone(),
-                            cfg,
-                            looper_config,
-                            transport,
-                            rx,
-                            counters.clone(),
-                            options,
-                        )
-                        .map(|p| (p, tx))
+                        let options =
+                            OutputOptions { buffer_size: cpal_buffer, route: config.output_route, monitor: config.monitor };
+                        let counters = Arc::new(IoCounters::default());
+                        LooperPlayback::start(out.device.clone(), cfg, looper_config, transport, None, counters, options)
                     });
                     match started {
-                        Ok((p, tx)) => {
-                            playback = Some(p);
-                            feed = Some(LooperFeed { tx, counters: counters.clone() });
-                            rate = Some(r);
-                        }
+                        Ok(p) => playback = Some(p),
                         Err(e) => looper_problem = Some(e.to_string()),
                     }
                 }
@@ -220,42 +200,6 @@ pub fn open_audio(
         Err(e) => looper_problem = Some(e.to_string()),
     }
 
-    let request = |rate: Option<u32>| -> Result<CaptureRequest, EngineError> {
-        let cfg = match rate {
-            Some(r) => devices::config_at_rate(&input.device, DeviceDirection::Input, r)?,
-            None => devices::default_config(&input.device, DeviceDirection::Input)?,
-        };
-        Ok(CaptureRequest {
-            device: input.device.clone(),
-            config: cfg,
-            buffer_size: cpal_buffer,
-            route: config.input_route,
-            stats: Some(input_stats.clone()),
-        })
-    };
-    let (analysis_feed, analysis_rx, analysis_dropped) = AnalysisWorker::ring();
-    let taps = InputTaps { looper: feed, analysis: Some(analysis_feed) };
-    let (capture, analysis_rx, analysis_dropped) = match request(rate).and_then(|r| InputCapture::open(r, taps)) {
-        Ok(c) => (c, analysis_rx, analysis_dropped),
-        Err(e) if playback.is_some() => {
-            // e.g. the input cannot run at the output rate after all: keep metering, drop the looper.
-            if let Some(p) = playback.take() {
-                p.stop();
-            }
-            looper_problem = Some(format!("input cannot run with the output device: {e}"));
-            let (feed, rx, dropped) = AnalysisWorker::ring();
-            let taps = InputTaps { looper: None, analysis: Some(feed) };
-            (InputCapture::open(request(None)?, taps)?, rx, dropped)
-        }
-        Err(e) => return Err(e),
-    };
-
-    if capture.info.route != config.input_route {
-        warnings.push(EngineWarning::ConfigAdjusted(format!(
-            "input route {:?} does not fit \"{}\" ({} channels); using {:?}",
-            config.input_route, capture.info.device_id, capture.info.channels, capture.info.route
-        )));
-    }
     if let Some(p) = &playback {
         if p.info.route != config.output_route && p.info.channels >= 2 {
             warnings.push(EngineWarning::ConfigAdjusted(format!(
@@ -263,15 +207,13 @@ pub fn open_audio(
                 config.output_route, p.info.device_id, p.info.channels, p.info.route
             )));
         }
-    }
-    let granted = [Some(capture.info.requested_buffer_size), playback.as_ref().map(|p| p.info.requested_buffer_size)];
-    if cpal_buffer.is_some() && granted.iter().flatten().any(|&g| g != config.buffer_size) {
-        warnings.push(EngineWarning::ConfigAdjusted(format!(
-            "buffer size {} frames is outside a device's range; using input {:?}, output {:?}",
-            config.buffer_size.unwrap_or_default(),
-            capture.info.requested_buffer_size,
-            playback.as_ref().and_then(|p| p.info.requested_buffer_size)
-        )));
+        if cpal_buffer.is_some() && p.info.requested_buffer_size != config.buffer_size {
+            warnings.push(EngineWarning::ConfigAdjusted(format!(
+                "buffer size {} frames is outside the output device's range; using {:?}",
+                config.buffer_size.unwrap_or_default(),
+                p.info.requested_buffer_size
+            )));
+        }
     }
     let mut resolved = config.clone();
     if config.input_device.is_some() && input.fell_back_from.is_none() {
@@ -282,7 +224,88 @@ pub fn open_audio(
         resolved.output_device = Some(id);
         resolved.output_device_name = Some(name);
     }
-    Ok(Opened { capture, playback, analysis_rx, analysis_dropped, looper_problem, warnings, resolved })
+    Ok(Opened { playback, looper_problem, warnings, resolved })
+}
+
+/// An input stream opened on demand.
+pub struct CaptureOpened {
+    pub capture: InputCapture,
+    pub analysis_rx: rtrb::Consumer<f32>,
+    pub analysis_dropped: Arc<AtomicU64>,
+    pub warnings: Vec<EngineWarning>,
+}
+
+/// Open the input for `config` and, when the looper's output runs, attach it
+/// there (at the output's rate) without interrupting playback. Without an
+/// output the input runs at its default rate (metering and analysis only).
+pub fn open_capture(config: &AudioConfig, playback: Option<&mut LooperPlayback>) -> Result<CaptureOpened, EngineError> {
+    let mut warnings = Vec::new();
+    let input = devices::find_device(
+        DeviceDirection::Input,
+        config.input_device.as_deref(),
+        config.input_device_name.as_deref(),
+        config.missing_device,
+    )?;
+    let cpal_buffer = if platform::SESSION_MANAGES_BUFFER { None } else { config.buffer_size };
+    let rate = playback.as_ref().map(|p| p.info.sample_rate);
+    let cfg = match rate {
+        Some(r) => devices::config_at_rate(&input.device, DeviceDirection::Input, r).map_err(|e| {
+            EngineError::Invalid(format!("the input cannot run at the output's {r} Hz, so it cannot record: {e}"))
+        })?,
+        None => devices::default_config(&input.device, DeviceDirection::Input)?,
+    };
+    let stats = Arc::new(StreamStats::default());
+    let (looper_feed, link) = match (&playback, rate) {
+        (Some(p), Some(r)) => {
+            let (tx, link) = InputLink::new(r, Some(stats.clone()));
+            (Some(LooperFeed { tx, counters: p.counters.clone() }), Some(link))
+        }
+        _ => (None, None),
+    };
+    let (analysis_feed, analysis_rx, analysis_dropped) = AnalysisWorker::ring();
+    let taps = InputTaps { looper: looper_feed, analysis: Some(analysis_feed) };
+    let request = CaptureRequest {
+        device: input.device,
+        config: cfg,
+        buffer_size: cpal_buffer,
+        route: config.input_route,
+        stats: Some(stats),
+    };
+    let capture = InputCapture::open(request, taps)?;
+    if let (Some(p), Some(link)) = (playback, link) {
+        if let Err(e) = p.input.attach(link) {
+            capture.stop();
+            return Err(e);
+        }
+    }
+    if capture.info.route != config.input_route {
+        warnings.push(EngineWarning::ConfigAdjusted(format!(
+            "input route {:?} does not fit \"{}\" ({} channels); using {:?}",
+            config.input_route, capture.info.device_id, capture.info.channels, capture.info.route
+        )));
+    }
+    if cpal_buffer.is_some() && capture.info.requested_buffer_size != config.buffer_size {
+        warnings.push(EngineWarning::ConfigAdjusted(format!(
+            "buffer size {} frames is outside the input device's range; using {:?}",
+            config.buffer_size.unwrap_or_default(),
+            capture.info.requested_buffer_size
+        )));
+    }
+    Ok(CaptureOpened { capture, analysis_rx, analysis_dropped, warnings })
+}
+
+/// Longest the control thread waits for the output callback to let go of the input.
+pub const DETACH_WAIT: Duration = Duration::from_millis(250);
+
+/// Detach the input from the output first (the looper hears silence from the
+/// next block, with no underrun), then stop the input stream.
+pub fn close_capture(capture: InputCapture, playback: Option<&mut LooperPlayback>) {
+    if let Some(p) = playback {
+        if p.input.detach().is_ok() {
+            p.input.wait_applied(DETACH_WAIT);
+        }
+    }
+    capture.stop();
 }
 
 /// Hardware state owned by the control thread.
@@ -304,6 +327,8 @@ pub struct Hardware {
     drift: DriftEstimator,
     /// Host time audio last started (for stall detection).
     audio_started_ns: u64,
+    /// Host time the input stream last opened (it opens on demand, see `mic.rs`).
+    capture_started_ns: u64,
     /// Warnings raised while loading settings at startup, kept for the frontend
     /// (the webview is not listening yet when the Tauri setup hook runs).
     startup_warnings: Vec<EngineWarning>,
@@ -343,6 +368,7 @@ impl Default for Hardware {
             last_diagnostics: Instant::now(),
             drift: DriftEstimator::default(),
             audio_started_ns: 0,
+            capture_started_ns: 0,
             startup_warnings: Vec::new(),
             calibration: None,
             session_tx: session_tx.clone(),
@@ -433,13 +459,8 @@ impl Hardware {
         self.startup_warnings.clone()
     }
 
-    /// Start a loopback calibration on the running output stream.
-    pub fn start_calibration(
-        &mut self,
-        playback: Option<&mut LooperPlayback>,
-        looper_idle: bool,
-        apply: bool,
-    ) -> Result<(), EngineError> {
+    /// Whether a calibration could start now (checked again when it starts).
+    pub fn check_calibration(&self, playback: Option<&LooperPlayback>, looper_idle: bool) -> Result<(), EngineError> {
         let Some(p) = playback else {
             return Err(EngineError::Invalid("start audio (with a working output) before calibrating".into()));
         };
@@ -454,6 +475,18 @@ impl Hardware {
         if !looper_idle {
             return Err(EngineError::Invalid("stop the transport before calibrating".into()));
         }
+        Ok(())
+    }
+
+    /// Start a loopback calibration on the running output stream.
+    pub fn start_calibration(
+        &mut self,
+        playback: Option<&mut LooperPlayback>,
+        looper_idle: bool,
+        apply: bool,
+    ) -> Result<(), EngineError> {
+        self.check_calibration(playback.as_deref(), looper_idle)?;
+        let Some(p) = playback else { unreachable!("checked above") };
         let signal = TestSignal::new(p.info.sample_rate);
         p.start_calibration(CalibrationJob::new(&signal.samples, signal.record_frames()))?;
         self.calibration = Some(PendingCalibration { signal, started: Instant::now(), apply });
@@ -526,6 +559,23 @@ impl Hardware {
         self.defaults_at_start = Some(devices::default_ids());
         self.drift.reset();
         self.last_diagnostics = Instant::now();
+    }
+
+    /// The input stream (re)opened while output runs: restart its stall
+    /// timer, the default-device baseline for input, and drift measurement.
+    pub fn capture_opened(&mut self) {
+        self.capture_started_ns = clock::host_now_ns();
+        let input_default = devices::default_ids().0;
+        match self.defaults_at_start.as_mut() {
+            Some(d) => d.0 = input_default,
+            None => self.defaults_at_start = Some((input_default, None)),
+        }
+        self.drift.reset();
+    }
+
+    /// A calibration is running.
+    pub fn calibrating(&self) -> bool {
+        self.calibration.is_some()
     }
 
     /// How long the control loop may sleep.
@@ -618,11 +668,11 @@ impl Hardware {
         // device that lost its input/output direction but kept its name).
         let now = clock::host_now_ns();
         let streams = capture
-            .map(|c| (c.stats.anchor.read(), "input", &c.info.device_name))
+            .map(|c| (c.stats.anchor.read(), "input", &c.info.device_name, self.capture_started_ns))
             .into_iter()
-            .chain(playback.map(|p| (p.stats.anchor.read(), "output", &p.info.device_name)));
-        for (anchor, what, device) in streams {
-            if lost.is_none() && stalled(anchor.map(|a| a.host_ns), now, self.audio_started_ns) {
+            .chain(playback.map(|p| (p.stats.anchor.read(), "output", &p.info.device_name, self.audio_started_ns)));
+        for (anchor, what, device, started) in streams {
+            if lost.is_none() && stalled(anchor.map(|a| a.host_ns), now, started) {
                 lost = Some(HardwareAction::Lost(EngineError::DeviceLost(format!(
                     "{what} device \"{device}\" stopped delivering audio"
                 ))));
@@ -663,17 +713,21 @@ impl Hardware {
 
     /// Feed the drift estimator and send diagnostics at 1 Hz.
     pub fn diagnostics(&mut self, capture: Option<&InputCapture>, playback: Option<&LooperPlayback>, sink: Sink<'_>) {
-        let (Some(c), p) = (capture, playback) else { return };
-        if let (Some(i), Some(o)) = (c.stats.anchor.read(), p.and_then(|p| p.stats.anchor.read())) {
+        // Output alone (mic closed) still reports; drift needs both streams.
+        let (c, p) = (capture, playback);
+        if c.is_none() && p.is_none() {
+            return;
+        }
+        if let (Some(i), Some(o)) = (c.and_then(|c| c.stats.anchor.read()), p.and_then(|p| p.stats.anchor.read())) {
             self.drift.observe(i, o);
         }
         if self.last_diagnostics.elapsed() < DIAGNOSTICS_INTERVAL {
             return;
         }
         self.last_diagnostics = Instant::now();
-        let drift = p.and(self.drift.estimate());
+        let drift = c.and(p).and(self.drift.estimate());
         sink(EngineEvent::AudioDiagnostics(AudioDiagnostics {
-            capture: Some(c.info()),
+            capture: c.map(|c| c.info()),
             output: p.map(|p| p.output_info()),
             drift_ppm: drift.map(|d| d.ppm),
             drift_window_seconds: drift.map(|d| d.window_seconds),

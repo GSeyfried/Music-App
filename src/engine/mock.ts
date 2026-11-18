@@ -37,7 +37,10 @@ import type {
   EngineEvent,
   EngineStatus,
   EngineTransport,
+  InputNeeds,
+  InputReason,
   InputRoute,
+  InputStatus,
   LevelReading,
   LooperCommand,
   LooperNotice,
@@ -304,6 +307,9 @@ export class MockEngine implements EngineTransport {
   private midiNextAt = 0;
   private midiStep = 0;
   private calibrationPending: { remaining: number; apply: boolean } | null = null;
+  // Mic only when needed: the simulated input always runs; only the reported state follows the needs.
+  private micReasons: InputReason[] = [];
+  private micHoldMs = 10_000;
   private diagnosticsAccum = 0;
   private tuning = 440;
   private nextProjectOp = 1;
@@ -416,6 +422,14 @@ export class MockEngine implements EngineTransport {
         throw { kind: "invalid", message: "the simulated engine has no audio output" } satisfies EngineError;
       case "preview_stop":
         return null;
+      case "set_input_needs": {
+        const needs = args.needs as InputNeeds;
+        this.micReasons = needs.reasons.filter((r) => r !== "record" && r !== "monitor" && r !== "calibration");
+        if (needs.holdMs !== undefined) this.micHoldMs = needs.holdMs;
+        const status = this.status();
+        this.emit({ type: "status", payload: status });
+        return status;
+      }
       case "find_recovery":
         return null;
       case "discard_recovery":
@@ -737,10 +751,16 @@ export class MockEngine implements EngineTransport {
     return status;
   }
 
+  private inputStatus(): InputStatus {
+    const reasons = this.capturing ? [...this.micReasons, ...(this.monitor.enabled ? (["monitor"] as const) : [])].sort() : [];
+    return { mic: reasons.length > 0 ? "on" : "off", reasons, holdMs: this.micHoldMs, closingInMs: null, waiting: 0 };
+  }
+
   private status(): EngineStatus {
     const audioConfig = this.audioSettings().audio;
     if (!this.capturing) {
       return {
+        input: this.inputStatus(),
         capturing: false,
         monitoring: false,
         capture: null,
@@ -779,6 +799,7 @@ export class MockEngine implements EngineTransport {
       analysis: this.analysisEnabled,
       audioConfig,
       unsavedChanges: this.project.unsavedChanges,
+      input: this.inputStatus(),
     };
   }
 

@@ -15,9 +15,11 @@
 //! - [`click`]: metronome click synthesis and accent selection
 //! - [`bridge`]: input→output clock bridge (cushion, underrun, drift; unit-tested)
 //! - [`io`]: CPAL output stream that hosts the processor (hardware; not unit-tested)
+//! - [`input_link`]: attaching/detaching the input stream while output runs (unit-tested)
 
 pub mod bridge;
 mod click;
+pub mod input_link;
 pub mod io;
 mod pool;
 mod processor;

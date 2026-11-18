@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { onAppMenu } from "./engine/bridge";
 import { useThemeEffects } from "./settings/useThemeEffects";
 import { useAnalysisWhenNeeded } from "./settings/useAnalysisWhenNeeded";
+import { useMicWhenNeeded } from "./settings/useMicWhenNeeded";
 import { Alerts, EngineModeBanner, MicPermissionBanner, Toasts } from "./components/Alerts";
 import { MidiIndicator } from "./components/HardwarePanels";
 import { InputCluster } from "./components/InputControls";
@@ -57,6 +58,7 @@ function Shell() {
   useLiveShortcuts();
   useThemeEffects();
   useAnalysisWhenNeeded(workspace === "practice" || workspace === "games");
+  useMicWhenNeeded(workspace);
   const { setOverlay } = ui;
   useEffect(() => onAppMenu((id) => id === "settings" && setOverlay("settings")), [setOverlay]);
   return (

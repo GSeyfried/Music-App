@@ -3,7 +3,9 @@
 //!
 //! Input arrives from the input callback as the routed mono signal through an
 //! SPSC ring. The two devices have independent clocks; [`InputBridge`]
-//! (unit-tested in `bridge.rs`) handles priming, underruns, and drift.
+//! (unit-tested in `bridge.rs`) handles priming, underruns, and drift. The
+//! output runs with no input at all (silence) until the control thread
+//! attaches one, and keeps running when it is detached (`input_link.rs`).
 //!
 //! Per callback this also: publishes a clock anchor (stamped at the block's
 //! end) carrying the transport frame and the bridge's input position, ratio,
@@ -24,6 +26,7 @@ use rtrb::Consumer;
 use serde::Serialize;
 
 use super::bridge::{BridgeInfo, BridgeStats, InputBridge};
+use super::input_link::{input_link_pair, InputLink, InputLinkControl, InputPort};
 use super::{soft_limit, IoCounters, LooperConfig, LooperCore, LooperHandles, RunState};
 use crate::clock::{self, add_saturating, Anchor, StreamStats, XrunDetector};
 use crate::devices;
@@ -145,6 +148,8 @@ pub struct LooperPlayback {
     calibration_rx: Consumer<CalibrationJob>,
     /// Reference/scale preview instrument, mixed into the output only.
     pub preview: PreviewControl,
+    /// Attach / detach the input stream while this output keeps running.
+    pub input: InputLinkControl,
 }
 
 /// Default output device and its default configuration.
@@ -162,8 +167,6 @@ pub struct OutputOptions {
     pub buffer_size: Option<u32>,
     pub route: OutputRoute,
     pub monitor: MonitorConfig,
-    /// The input stream's stats: its anchor gives the bridge a burst-free fill measure.
-    pub input_clock: Option<Arc<StreamStats>>,
 }
 
 impl LooperPlayback {
@@ -172,7 +175,7 @@ impl LooperPlayback {
         supported: cpal::SupportedStreamConfig,
         looper: &LooperConfig,
         transport: TransportState,
-        input_rx: Consumer<f32>,
+        input: Option<InputLink>,
         counters: Arc<IoCounters>,
         options: OutputOptions,
     ) -> Result<Self, EngineError> {
@@ -191,16 +194,16 @@ impl LooperPlayback {
         let (calibration_tx, cal_in) = rtrb::RingBuffer::<CalibrationJob>::new(1);
         let (cal_out, calibration_rx) = rtrb::RingBuffer::<CalibrationJob>::new(1);
         let (preview, preview_player) = preview_pair(None, sample_rate); // the engine sets the bank
+        let (input_control, input_port) = input_link_pair(sample_rate, input);
         clock::init_epoch();
 
         let parts = Parts {
             preview: preview_player,
-            input_clock: options.input_clock,
+            input: input_port,
             bridge: bridge.clone(),
             cal_in,
             cal_out,
             core,
-            input_rx,
             counters: counters.clone(),
             stats: stats.clone(),
             route: route_cell.clone(),
@@ -249,6 +252,7 @@ impl LooperPlayback {
             calibration_tx,
             calibration_rx,
             preview,
+            input: input_control,
         })
     }
 
@@ -304,13 +308,12 @@ impl LooperPlayback {
 
 struct Parts {
     preview: PreviewPlayer,
-    /// The input stream's stats (its anchor gives a burst-free fill measure).
-    input_clock: Option<Arc<StreamStats>>,
+    /// Input from the attached input stream (silence while none is attached).
+    input: InputPort,
     bridge: Arc<BridgeStats>,
     cal_in: Consumer<CalibrationJob>,
     cal_out: rtrb::Producer<CalibrationJob>,
     core: LooperCore,
-    input_rx: Consumer<f32>,
     counters: Arc<IoCounters>,
     stats: Arc<StreamStats>,
     route: Arc<RouteCell>,
@@ -349,12 +352,11 @@ where
 {
     let Parts {
         mut preview,
-        input_clock,
+        mut input,
         bridge: bridge_stats,
         mut cal_in,
         mut cal_out,
         mut core,
-        mut input_rx,
         counters,
         stats,
         route,
@@ -362,8 +364,7 @@ where
     } = parts;
     let channels = (config.channels as usize).max(1);
     let sample_rate = config.sample_rate;
-    let mut bridge = InputBridge::new(sample_rate, input_rx.buffer().capacity());
-    counters.input_cushion_frames.store(bridge.cushion() as u64, std::sync::atomic::Ordering::Relaxed);
+    counters.input_cushion_frames.store(input.bridge().cushion() as u64, std::sync::atomic::Ordering::Relaxed);
     // Scratch buffers are allocated here, before the callback exists.
     let mut in_buf = vec![0.0f32; MAX_BLOCK];
     let mut out_buf = vec![0.0f32; MAX_BLOCK];
@@ -372,7 +373,6 @@ where
     let mut frames_out: u64 = 0;
     let mut monitor_gain = 0.0f32;
     let mut calibration: Option<CalibrationJob> = None;
-    let mut overrun_seen: u64 = 0;
     let err_stats = stats.clone();
 
     let stream = device.build_output_stream(
@@ -391,37 +391,26 @@ where
             }
             let route = route.output_route();
             let monitor_target = monitor.target_gain();
-            // Input frames lost before the ring (input overrun) break the mapping.
-            let overrun = counters.input_overrun_frames.load(std::sync::atomic::Ordering::Relaxed);
-            if overrun > overrun_seen {
-                bridge.note_input_gap(overrun - overrun_seen);
-                overrun_seen = overrun;
-            }
             if calibration.is_none() {
                 calibration = cal_in.pop().ok();
             }
-            // Input frames captured by now, from the input callback's newest anchor
-            // (both streams run at `sample_rate` whenever the looper runs).
-            if let Some(input) = input_clock.as_ref() {
-                let captured = input
-                    .anchor
-                    .read()
-                    .map(|a| a.frame as f64 + (host_start as f64 - a.host_ns as f64) * sample_rate as f64 / 1e9);
-                bridge.set_input_clock(captured);
-            }
+            // Input link swaps, input overruns, and the input clock (see `input_link.rs`).
+            input.begin_block(host_start, sample_rate, &counters);
 
             let mut done = 0usize;
             while done < frames {
                 let n = (frames - done).min(MAX_BLOCK);
 
-                let report = bridge.fill(&mut input_rx, &mut in_buf[..n]);
+                let report = input.fill(&mut in_buf[..n]);
                 if report.discontinuity {
                     core.apply_now(super::LooperCommand::InputDiscontinuity); // flags takes in progress
                 }
                 add_saturating(&counters.drift_dropped_frames, report.dropped as u64);
                 if report.underrun > 0 {
                     add_saturating(&counters.input_underrun_frames, report.underrun as u64);
-                    counters.input_cushion_frames.store(bridge.cushion() as u64, std::sync::atomic::Ordering::Relaxed);
+                    counters
+                        .input_cushion_frames
+                        .store(input.bridge().cushion() as u64, std::sync::atomic::Ordering::Relaxed);
                 }
 
                 core.process(&in_buf[..n], &mut out_buf[..n]);
@@ -453,10 +442,12 @@ where
                     }
                 }
             }
-            bridge_stats.publish(&bridge);
+            input.end_block();
+            let bridge = input.bridge();
+            bridge_stats.publish(bridge);
             let running = core.snapshot().run == RunState::Running;
             let anchor =
-                block_end_anchor(host_start, frames, sample_rate, frames_out, core.transport_frame(), running, &bridge);
+                block_end_anchor(host_start, frames, sample_rate, frames_out, core.transport_frame(), running, bridge);
             stats.on_block(anchor, frames, latency_ns);
         },
         move |err| {

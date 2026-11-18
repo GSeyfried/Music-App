@@ -114,6 +114,9 @@ export interface AppSettings {
   "audio.previewVolume": number;
   "audio.previewTuningA4": number;
   "audio.previewThroughEngine": boolean;
+  /** Mic only when needed: "whenNeeded" opens the microphone only for recording, tuner, live pitch, Practice. */
+  "audio.micMode": "whenNeeded" | "alwaysOn";
+  "audio.micIdleCloseSeconds": number;
   /** Hidden dashboard widgets, as "<workspace>:<widget id>". */
   "widgets.hidden": string[];
   "theme.mode": ThemeMode;
@@ -223,6 +226,8 @@ export const APP_DEFAULTS: AppSettings = {
   "audio.previewVolume": 0.5,
   "audio.previewTuningA4": 440,
   "audio.previewThroughEngine": true,
+  "audio.micMode": "whenNeeded",
+  "audio.micIdleCloseSeconds": 10,
   "theme.mode": "system",
   "theme.pitchReactive": false,
   "theme.pitchReactiveStrength": 0.35,
@@ -1313,6 +1318,35 @@ export const SETTINGS: SettingDef[] = [
     description:
       "Play scales and references with the sampled piano on the output device you picked, like the loops. Off, or while audio is stopped, they use a simpler built-in piano on the system's default output.",
     category: "Practice scales",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "audio.micMode",
+    source: "app",
+    kind: "choice",
+    options: [
+      { value: "whenNeeded", label: "Only when needed" },
+      { value: "alwaysOn", label: "Always on" },
+    ],
+    label: "Microphone",
+    description:
+      "Only when needed: the microphone opens for recording, the tuner, live pitch, Practice Lab and games, and closes again afterwards, so the system's mic indicator stays off while you just listen to loops or previews. Always on: it stays open while audio runs.",
+    category: "Audio input",
+    tier: "preferences",
+    scope: "app",
+  },
+  {
+    id: "audio.micIdleCloseSeconds",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 120,
+    step: 1,
+    label: "Close the mic after",
+    description:
+      "Seconds the microphone stays open after the last thing that needed it ends, so it is ready again right away. 0 closes it at once.",
+    category: "Audio input",
     tier: "advanced",
     scope: "app",
   },

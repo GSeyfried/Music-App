@@ -14,7 +14,8 @@ export const dbToFraction = (db: number) => Math.min(1, Math.max(0, (db - FLOOR_
 
 export function LevelMeter({ compact = false, label = "Input level" }: { compact?: boolean; label?: string }) {
   const live = useLive();
-  const capturing = useEngineState((s) => s.status.capturing);
+  // Audio running and the mic open (it opens only when needed; older engines report no `input`).
+  const capturing = useEngineState((s) => s.status.capturing && s.status.input?.mic !== "off");
   const fill = useRef<HTMLDivElement>(null);
   const peak = useRef<HTMLDivElement>(null);
   const text = useRef<HTMLSpanElement>(null);
@@ -39,7 +40,7 @@ export function LevelMeter({ compact = false, label = "Input level" }: { compact
   return (
     <div className={compact ? "meter meter-compact" : "meter"} data-active={capturing}>
       {!compact && <span className="meter-label">{label}</span>}
-      <div className="meter-track" role="img" aria-label={capturing ? label : `${label}: input off`}>
+      <div className="meter-track" role="img" aria-label={capturing ? label : `${label}: microphone off`}>
         <div className="meter-fill" ref={fill} />
         <div className="meter-peak" ref={peak} />
       </div>

@@ -3,3 +3,21 @@
   font-size: var(--fs-xs);
   line-height: 1.35;
 }
+
+/* Mic only when needed: microphone state in the top bar. */
+.mic-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.mic-indicator[data-state="opening"] {
+  color: var(--caution);
+}
+
+.mic-indicator[data-state="on"] {
+  color: var(--record);
+}
