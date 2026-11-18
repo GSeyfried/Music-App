@@ -1017,14 +1017,18 @@ export class MockEngine implements EngineTransport {
     if (next.mode === "synced" && this.syncedPeriod(next) > MAX_LOOP_SECONDS * this.sampleRate) return "loopTooLong";
     const old = this.transport;
     const modeChanged = next.mode !== old.mode;
-    const gridChanged =
+    const clockGridChanged =
       next.bpm !== old.bpm ||
       next.timeSignature.numerator !== old.timeSignature.numerator ||
-      next.timeSignature.denominator !== old.timeSignature.denominator ||
-      next.loopLength.bars !== old.loopLength.bars ||
-      next.loopLength.beats !== old.loopLength.beats;
-    const affectsLoop = modeChanged || (next.mode === "synced" && gridChanged);
-    if (affectsLoop && (this.hasContent() || this.anyRecording())) return "transportLocked";
+      next.timeSignature.denominator !== old.timeSignature.denominator;
+    const lengthChanged =
+      next.loopLength.bars !== old.loopLength.bars || next.loopLength.beats !== old.loopLength.beats;
+    const affectsLoop = modeChanged || (next.mode === "synced" && (clockGridChanged || lengthChanged));
+    const content = this.hasContent() || this.anyRecording();
+    if (
+      content &&
+      (modeChanged || (next.mode === "synced" && clockGridChanged) || (lengthChanged && this.run !== "stopped"))
+    ) return "transportLocked";
     this.transport = next;
     if (affectsLoop) this.period = next.mode === "synced" ? this.syncedPeriod(next) : null;
     return null;
@@ -1075,7 +1079,21 @@ export class MockEngine implements EngineTransport {
       return;
     }
     tr.rec = null;
-    this.period = length;
+    const beat = this.framesPerBeat();
+    const beats = length / beat;
+    this.period =
+      this.transport.loopFit === "exact"
+        ? length
+        : Math.max(
+            1,
+            Math.round(
+              (this.transport.loopFit === "roundDown"
+                ? Math.floor(beats)
+                : this.transport.loopFit === "roundUp"
+                  ? Math.ceil(beats)
+                  : Math.round(beats)) * beat,
+            ),
+          );
     this.origin = rec.start;
   }
 

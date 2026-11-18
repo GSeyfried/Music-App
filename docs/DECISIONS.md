@@ -158,6 +158,18 @@ compensation now applies to free first takes too (the take stays open for
 `latency` frames after Stop to collect its tail), so the base loop and its
 overdubs share one alignment.
 
+## D-020 Beat-fitted capture and non-destructive loop windows (Accepted, 2026-11-17)
+
+Free first takes may use exact, nearest-beat, round-down, or round-up length;
+nearest beat is the default. Boundary selection uses absolute frame maths, and
+the engine retains a short source cushion beyond the audible boundary.
+
+A stopped synced loop may change its shared period without rewriting layer
+buffers. Per-layer trim will likewise be a metadata window over immutable
+source audio, never a destructive sample edit. Full source-span persistence
+and the layer trim command/UI remain PENDING before trim is presented as a
+working control.
+
 ## Open tradeoffs
 
 - **Duplex alignment:** separate CPAL input and output streams have independent

@@ -101,7 +101,8 @@ silently changing musical timing.
   `f64` step (`transport::grid_frame`). Rounding never accumulates.
 - **Master loop** `{origin, period}`, shared by all tracks. Cycle *c* starts at
   `origin + round(c × period)`. Free mode: `period` = first take length
-  (integer). Metronome mode: `period` = `beats_per_loop × frames_per_beat`
+  (integer), optionally fitted to the nearest, preceding, or following whole
+  beat. Metronome mode: `period` = `beats_per_loop × frames_per_beat`
   (may be fractional; individual cycles are ⌊p⌋ or ⌈p⌉ frames but never drift).
 - **Count-in** runs on a separate counter before `t` starts; it always clicks.
 - **Commands** take effect at the first frame of the next processed block
@@ -112,7 +113,7 @@ silently changing musical timing.
 
 | | Free loop | Metronome |
 | --- | --- | --- |
-| Loop length | First take, from press to press | BPM × meter × (bars + beats) |
+| Loop length | First take: exact press-to-press or nearest/down/up whole beat | BPM × meter × (bars + beats); editable while stopped |
 | Record (empty track) | First track: starts now, Stop sets length. Later tracks: start now, record exactly one loop | Starts at the next loop boundary (after count-in if stopped), records exactly one loop |
 | Overdub | Starts now; Stop ends after a 64-frame fade-out | Starts at the next bar; Stop ends at the following bar |
 | Click | Off | Generated in the output callback (never recorded) |
@@ -131,6 +132,10 @@ Both modes use the same layer writer and the same playback path.
 - **Edge fades** (default 64 frames ≈ 1.3 ms): ramp-in at each recording start;
   ramp-out at scheduled ends; the free first take's tail is faded after Stop.
   Loop boundaries never move.
+- **Capture tail:** a free first take retains 100 ms beyond its selected
+  boundary in the preallocated source buffer. Playback hides that cushion.
+  Full-source persistence and editing remain PENDING; see
+  `docs/projects/looper-01/LOOP_EDITING.md`.
 
 ### Memory
 

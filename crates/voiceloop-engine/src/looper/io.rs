@@ -506,6 +506,44 @@ mod tests {
     }
 
     #[test]
+    fn variable_callback_sizes_keep_output_and_transport_anchors_aligned() {
+        const SR: u32 = 48_000;
+        let sizes = [1usize, 127, 3, 191, 17, 257, 5, 511, 64];
+        let (mut core, mut handles) = LooperCore::new(&LooperConfig::default(), TransportState::default(), SR).unwrap();
+        let bridge = InputBridge::new(SR, 24_000);
+        handles.commands.push(LooperCommand::Play).unwrap();
+        let ns = |frame: u64| frame * 1_000_000_000 / SR as u64;
+        let mut total = 0u64;
+        let mut previous_host = 0u64;
+
+        for index in 0..500 {
+            let frames = sizes[index % sizes.len()];
+            let input = vec![0.0f32; frames];
+            let mut output = vec![0.0f32; frames];
+            core.process(&input, &mut output);
+            let start = total;
+            total += frames as u64;
+            let anchor = block_end_anchor(
+                ns(start),
+                frames,
+                SR,
+                total,
+                core.transport_frame(),
+                core.snapshot().run == RunState::Running,
+                &bridge,
+            );
+            assert!(anchor.host_ns >= previous_host);
+            assert_eq!((anchor.frame, anchor.transport_frame), (total, total as i64));
+            for offset in [0u64, frames as u64 / 2, frames as u64] {
+                let mapped = anchor.transport_frame_at(ns(start + offset), SR);
+                let expected = (start + offset) as i64;
+                assert!((mapped - expected).abs() <= 1, "block {index}, {frames} frames: {mapped} vs {expected}");
+            }
+            previous_host = anchor.host_ns;
+        }
+    }
+
+    #[test]
     fn calibration_job_plays_and_records_on_the_same_frames() {
         let signal = [0.25f32, -0.25, 0.5];
         let mut job = CalibrationJob::new(&signal, 5);

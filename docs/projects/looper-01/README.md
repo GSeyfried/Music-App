@@ -25,6 +25,8 @@ follows the Milestone 1A brief (see `docs/ROADMAP.md`).
 | Transport UI, track strips | `src/components/TransportControls.tsx`, `src/components/LooperTracks.tsx` |
 
 Design and rationale: `docs/ARCHITECTURE.md` (*Looper*) and `docs/DECISIONS.md` D-010 to D-015.
+Current capture fitting, retained-tail behavior, loop resizing, and the
+non-destructive layer-editor contract are in [LOOP_EDITING.md](LOOP_EDITING.md).
 
 ## Verify on the Mac
 

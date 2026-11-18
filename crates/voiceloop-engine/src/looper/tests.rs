@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::model::LoopMode;
-use crate::transport::{grid_frame, LoopLength, TransportState};
+use crate::transport::{grid_frame, LoopFit, LoopLength, TransportState};
 
 use super::LooperCommand as C;
 
@@ -21,11 +21,13 @@ fn config(fade: u32) -> LooperConfig {
         memory_limit_bytes: 64 << 20,
         fade_frames: fade,
         gain_smoothing_frames: 0,
+        capture_tail_ms: 0,
     }
 }
 
 fn transport(sample_rate: u32, mode: LoopMode) -> TransportState {
     let mut t = TransportState { sample_rate, mode, ..Default::default() };
+    t.loop_fit = LoopFit::Exact;
     t.metronome.enabled = false;
     t.metronome.count_in_bars = 0;
     t
@@ -77,6 +79,28 @@ impl Rig {
         self.h.recycler.service();
     }
 
+    /// Process the same timeline through an irregular callback-size pattern.
+    fn run_pattern(&mut self, frames: usize, pattern: &[usize], mut input: impl FnMut(u64) -> f32) {
+        assert!(!pattern.is_empty() && pattern.iter().all(|&n| n > 0));
+        let max = *pattern.iter().max().unwrap();
+        let mut inb = vec![0.0f32; max];
+        let mut outb = vec![0.0f32; max];
+        let (mut left, mut block) = (frames, 0usize);
+        while left > 0 {
+            let n = left.min(pattern[block % pattern.len()]);
+            for (i, s) in inb[..n].iter_mut().enumerate() {
+                *s = input(self.frame + i as u64);
+            }
+            self.core.process(&inb[..n], &mut outb[..n]);
+            self.out.extend_from_slice(&outb[..n]);
+            self.frame += n as u64;
+            left -= n;
+            block += 1;
+            while self.h.snapshots.pop().is_ok() {}
+        }
+        self.h.recycler.service();
+    }
+
     fn silence(&mut self, frames: usize) {
         self.run(frames, |_| 0.0);
     }
@@ -100,6 +124,33 @@ fn impulse(at: u64) -> impl FnMut(u64) -> f32 {
 
 fn nonzero_from(out: &[f32], from: usize) -> Vec<usize> {
     out.iter().enumerate().skip(from).filter(|(_, v)| v.abs() > 1e-6).map(|(i, _)| i).collect()
+}
+
+/// Executable reference model for the upcoming non-destructive loop editor.
+///
+/// The realtime API does not yet expose capture post-roll, per-layer trim, or
+/// loop-duration commands. Keep these contracts independent of `LooperCore`
+/// until those commands exist, then drive the engine through the same cases.
+#[derive(Clone, Debug)]
+struct EditableLayerContract {
+    source: Vec<f32>,
+    trim_start: usize,
+    trim_end: usize,
+}
+
+impl EditableLayerContract {
+    fn captured(source: Vec<f32>, default_loop_frames: usize) -> Self {
+        assert!(default_loop_frames <= source.len());
+        Self { source, trim_start: 0, trim_end: default_loop_frames }
+    }
+
+    fn sample_at(&self, absolute_frame: usize, loop_frames: usize) -> f32 {
+        let phase = absolute_frame % loop_frames;
+        if phase < self.trim_start || phase >= self.trim_end {
+            return 0.0;
+        }
+        self.source.get(phase).copied().unwrap_or(0.0)
+    }
 }
 
 fn rejected(reason: RejectReason) -> LooperNotice {
@@ -157,6 +208,152 @@ fn free_loop_repeats_at_exact_period() {
     r.silence(10_000);
     let expected: Vec<usize> = (1..=10).map(|k| 100 + k * 1_000).collect();
     assert_eq!(nonzero_from(&r.out, 0), expected);
+}
+
+#[test]
+fn repeated_separate_overdubs_never_change_or_accelerate_the_master_loop() {
+    let cfg = LooperConfig { pool_layers: 6, max_layers_per_track: 6, ..config(0) };
+    let mut r = Rig::new(cfg, transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(997, impulse(100));
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1);
+    assert_eq!(r.snap().loop_period, Some(997.0));
+
+    for expected_layers in 2..=6 {
+        r.send(C::Overdub { track: 0 });
+        r.silence(997);
+        r.send(C::StopRecording { track: 0 });
+        r.silence(1);
+        let s = r.snap();
+        assert_eq!(s.loop_period, Some(997.0), "layer {expected_layers} changed the period");
+        assert_eq!(s.tracks[0].layers, expected_layers);
+    }
+
+    let playback_start = r.out.len();
+    r.silence(997 * 32);
+    let hits = nonzero_from(&r.out, playback_start);
+    assert!(hits.len() >= 31, "expected a base-loop impulse on every cycle");
+    assert!(hits.windows(2).all(|w| w[1] - w[0] == 997), "impulse spacing accelerated: {hits:?}");
+}
+
+#[test]
+fn callback_partitioning_does_not_change_recording_or_playback_timing() {
+    fn session(pattern: &[usize]) -> (LooperSnapshot, Vec<f32>) {
+        let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+        r.send(C::Record { track: 0 });
+        r.run_pattern(1_237, pattern, |frame| if frame % 113 == 7 { 0.25 } else { 0.0 });
+        r.send(C::StopRecording { track: 0 });
+        r.run_pattern(1, pattern, |_| 0.0);
+        r.run_pattern(1_237 * 8, pattern, |_| 0.0);
+        (r.snap(), r.out)
+    }
+
+    let fixed = session(&[64]);
+    let irregular = session(&[1, 127, 3, 191, 17, 257, 5, 61]);
+    assert_eq!(fixed.0.loop_period, irregular.0.loop_period);
+    assert_eq!(fixed.0.tracks, irregular.0.tracks);
+    assert_eq!(fixed.1, irregular.1, "callback partitioning changed rendered samples");
+}
+
+// ---- non-destructive loop editing contracts ------------------------------------
+
+#[test]
+fn contract_post_roll_is_retained_but_default_hidden() {
+    let mut captured = vec![0.0; 1_100];
+    captured[950] = 0.5;
+    captured[1_050] = 1.0; // audio retained after the default stop boundary
+    let layer = EditableLayerContract::captured(captured, 1_000);
+
+    assert_eq!(layer.source.len(), 1_100, "post-roll must remain available for later trimming");
+    assert_eq!((layer.trim_start, layer.trim_end), (0, 1_000));
+    assert_eq!(layer.sample_at(950, 1_000), 0.5);
+    assert_eq!(layer.sample_at(1_050, 2_000), 0.0, "post-roll is outside the default active segment");
+    assert_eq!(layer.source[1_050], 1.0, "hiding post-roll must not erase captured audio");
+}
+
+#[test]
+fn contract_each_layer_has_independent_non_destructive_trim_boundaries() {
+    let mut source = vec![0.0; 1_000];
+    source[100] = 0.25;
+    source[900] = 0.75;
+    let original = source.clone();
+    let mut layer = EditableLayerContract::captured(source, 1_000);
+
+    layer.trim_start = 80;
+    layer.trim_end = 800;
+    assert_eq!(layer.sample_at(100, 1_000), 0.25);
+    assert_eq!(layer.sample_at(900, 1_000), 0.0);
+
+    layer.trim_end = 950;
+    assert_eq!(layer.sample_at(900, 1_000), 0.75, "expanding the trim reveals the original tail");
+    assert_eq!(layer.source, original, "trim edits must never rewrite layer audio");
+}
+
+#[test]
+fn contract_loop_duration_can_shrink_and_grow_without_accumulating_drift() {
+    let mut source = vec![0.0; 1_100];
+    source[100] = 1.0;
+    let layer = EditableLayerContract::captured(source, 1_000);
+
+    for period in [750, 1_250] {
+        let hits: Vec<_> = (0..period * 32).filter(|&frame| layer.sample_at(frame, period) != 0.0).collect();
+        assert_eq!(hits.len(), 32);
+        assert!(
+            hits.windows(2).all(|pair| pair[1] - pair[0] == period),
+            "resized {period}-frame loop drifted: {hits:?}"
+        );
+    }
+    assert_eq!(layer.source.len(), 1_100, "loop-duration edits must preserve the captured source");
+}
+
+#[test]
+fn free_first_take_fits_to_beats_and_retains_hidden_capture_tail() {
+    for (fit, expected) in [
+        (LoopFit::Exact, 760usize),
+        (LoopFit::NearestBeat, 1_000),
+        (LoopFit::RoundDown, 500),
+        (LoopFit::RoundUp, 1_000),
+    ] {
+        let mut t = transport(1_000, LoopMode::Free); // 500 frames per beat
+        t.loop_fit = fit;
+        let mut cfg = config(0);
+        cfg.capture_tail_ms = 100;
+        let mut r = Rig::new(cfg, t);
+        r.send(C::Record { track: 0 });
+        r.silence(760);
+        r.send(C::StopRecording { track: 0 });
+        // The chosen cycle is published immediately; capture continues only
+        // into the hidden source cushion.
+        r.run(1, |_| 0.0);
+        assert_eq!(r.snap().loop_period, Some(expected as f64), "{fit:?}");
+
+        let tail_frame = if expected == 1_000 { 1_020usize } else { 820usize };
+        r.run(400, |frame| if frame == tail_frame as u64 { 0.75 } else { 0.0 });
+        assert_eq!(r.core.layer_sample(0, 0, tail_frame), Some(0.75), "{fit:?}: tail not retained");
+        assert!(nonzero_from(&r.out, 0).is_empty(), "{fit:?}: hidden tail leaked into playback");
+    }
+}
+
+#[test]
+fn stopped_synced_loop_can_shrink_and_grow_without_rewriting_layers() {
+    let mut r = Rig::new(config(0), one_bar_synced());
+    r.send(C::Record { track: 0 });
+    r.run(2_100, impulse(100));
+    r.send(C::Stop);
+    r.silence(1);
+    assert_eq!(r.snap().loop_period, Some(2_000.0));
+    let original = r.core.layer_sample(0, 0, 100);
+
+    for beats in [3, 5] {
+        let mut t = r.snap().transport;
+        t.loop_length = LoopLength { bars: 0, beats };
+        r.send(C::SetTransport { transport: t });
+        r.silence(1);
+        assert_eq!(r.snap().loop_period, Some(beats as f64 * 500.0));
+        assert_eq!(r.core.layer_sample(0, 0, 100), original, "resize rewrote source audio");
+        assert!(r.notices().is_empty());
+    }
 }
 
 #[test]
@@ -320,6 +517,28 @@ fn click_is_on_the_grid_and_not_recorded() {
     r.silence(2_100); // let the last click decay, then a full loop
     assert!(r.out[4_100..].iter().all(|&v| v == 0.0));
     assert!(r.notices().is_empty());
+}
+
+#[test]
+fn click_is_not_written_into_a_multi_pass_overdub() {
+    let mut t = one_bar_synced();
+    t.metronome.enabled = true;
+    let mut r = Rig::new(config(0), t);
+    r.send(C::Play);
+    r.send(C::Record { track: 0 });
+    r.silence(2_100); // silent base loop; click is audible only in output
+    r.send(C::Overdub { track: 0 });
+    r.silence(2_000 * 4); // four passes into one silent overdub layer
+    r.send(C::StopRecording { track: 0 });
+    r.silence(2_100);
+    assert_eq!(r.snap().tracks[0].layers, 2);
+
+    let mut quiet = r.snap().transport;
+    quiet.metronome.enabled = false;
+    r.send(C::SetTransport { transport: quiet });
+    let start = r.out.len();
+    r.silence(2_000 * 3);
+    assert!(r.out[start..].iter().all(|&v| v == 0.0), "software click leaked into an overdub layer");
 }
 
 // ---- overdub, latency, undo ---------------------------------------------------

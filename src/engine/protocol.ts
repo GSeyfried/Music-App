@@ -413,6 +413,7 @@ export interface LooperConfig {
   memoryLimitBytes: number;
   fadeFrames: number;
   gainSmoothingFrames: number;
+  captureTailMs: number;
 }
 
 export type RejectReason =

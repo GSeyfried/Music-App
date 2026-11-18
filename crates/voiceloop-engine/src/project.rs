@@ -355,6 +355,12 @@ fn transport_doc(t: &TransportState, base: &TransportDoc) -> TransportDoc {
     d.mode = t.mode;
     d.loop_length.bars = t.loop_length.bars;
     d.loop_length.beats = t.loop_length.beats;
+    d.loop_fit = match t.loop_fit {
+        crate::transport::LoopFit::Exact => voiceloop_project::doc::LoopFitDoc::Exact,
+        crate::transport::LoopFit::NearestBeat => voiceloop_project::doc::LoopFitDoc::NearestBeat,
+        crate::transport::LoopFit::RoundDown => voiceloop_project::doc::LoopFitDoc::RoundDown,
+        crate::transport::LoopFit::RoundUp => voiceloop_project::doc::LoopFitDoc::RoundUp,
+    };
     d.metronome.enabled = m.enabled;
     d.metronome.subdivision = m.subdivision;
     d.metronome.accent_downbeat = m.accent_downbeat;
@@ -380,6 +386,12 @@ fn transport_state(d: &TransportDoc, sample_rate: u32) -> TransportState {
         },
         mode: d.mode,
         loop_length: LoopLength { bars: d.loop_length.bars, beats: d.loop_length.beats },
+        loop_fit: match d.loop_fit {
+            voiceloop_project::doc::LoopFitDoc::Exact => crate::transport::LoopFit::Exact,
+            voiceloop_project::doc::LoopFitDoc::NearestBeat => crate::transport::LoopFit::NearestBeat,
+            voiceloop_project::doc::LoopFitDoc::RoundDown => crate::transport::LoopFit::RoundDown,
+            voiceloop_project::doc::LoopFitDoc::RoundUp => crate::transport::LoopFit::RoundUp,
+        },
         sample_rate,
         ..TransportState::default()
     }

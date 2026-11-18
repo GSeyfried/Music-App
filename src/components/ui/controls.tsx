@@ -2,7 +2,15 @@
 // uses pointer/click events (never mouse-only), and shows its state without
 // relying on hover.
 
-import { useEffect, useRef, useState, type ButtonHTMLAttributes, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ButtonHTMLAttributes,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 import { Icon, type IconName } from "./Icon";
 
 /** Key hint. Hidden from screen readers by default (the control has its own label). */
@@ -13,6 +21,57 @@ export function Kbd({ keys, announce = false }: { keys: string[]; announce?: boo
       {keys.map((k) => (
         <kbd key={k}>{k}</kbd>
       ))}
+    </span>
+  );
+}
+
+/**
+ * Short, optional help for a control. It works with pointer hover, keyboard
+ * focus, and tap, and connects the explanation to its trigger for assistive
+ * technology. Keep `text` concise; longer guidance belongs in the UI.
+ */
+export function HelpTip({ label, text }: { label: string; text: string }) {
+  const id = useId();
+  const [open, setOpen] = useState(false);
+  return (
+    <span
+      className="help-tip"
+      onPointerEnter={() => setOpen(true)}
+      onPointerLeave={() => setOpen(false)}
+      onFocus={() => setOpen(true)}
+      onBlur={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        className="help-tip-trigger"
+        aria-label={`Help for ${label}`}
+        aria-describedby={id}
+        aria-expanded={open}
+        // A real pointer click focuses the button before `click` fires. Always
+        // opening here avoids that focus event and this handler cancelling one
+        // another on touch devices; blur/tapping elsewhere dismisses it.
+        onClick={() => setOpen(true)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            setOpen(false);
+          }
+        }}
+      >
+        ?
+      </button>
+      <span id={id} role="tooltip" className="help-tip-content" hidden={!open}>
+        {text}
+      </span>
+    </span>
+  );
+}
+
+function ControlLabel({ label, help }: { label: string; help?: string }) {
+  return (
+    <span className="control-label">
+      <span className="stepper-label">{label}</span>
+      {help ? <HelpTip label={label} text={help} /> : null}
     </span>
   );
 }
@@ -95,6 +154,8 @@ export function Button({
 
 interface StepperProps {
   label: string;
+  /** Concise explanation shown beside the label on hover, focus, or tap. */
+  help?: string;
   value: number;
   min: number;
   max: number;
@@ -110,6 +171,7 @@ interface StepperProps {
 
 export function Stepper({
   label,
+  help,
   value,
   min,
   max,
@@ -131,7 +193,7 @@ export function Stepper({
   };
   return (
     <div className={disabled ? "stepper is-disabled" : "stepper"} role="group" aria-label={label}>
-      <span className="stepper-label">{label}</span>
+      <ControlLabel label={label} help={help} />
       <div className="stepper-row">
         <button
           type="button"
@@ -184,16 +246,18 @@ export function Stepper({
 
 interface SegmentedProps<T extends string | number> {
   label: string;
+  /** Concise explanation shown beside the label on hover, focus, or tap. */
+  help?: string;
   value: T;
   options: { value: T; label: string }[];
   disabled?: boolean;
   onChange: (v: T) => void;
 }
 
-export function Segmented<T extends string | number>({ label, value, options, disabled, onChange }: SegmentedProps<T>) {
+export function Segmented<T extends string | number>({ label, help, value, options, disabled, onChange }: SegmentedProps<T>) {
   return (
     <div className={disabled ? "segmented is-disabled" : "segmented"}>
-      <span className="stepper-label">{label}</span>
+      <ControlLabel label={label} help={help} />
       <div className="segmented-row" role="radiogroup" aria-label={label}>
         {options.map((o) => (
           <button

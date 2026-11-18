@@ -50,6 +50,8 @@ export interface LoopLength {
   beats: number;
 }
 
+export type LoopFit = "exact" | "nearestBeat" | "roundDown" | "roundUp";
+
 export interface TransportState {
   playState: PlayState;
   /** Beats per minute; a beat is the time-signature denominator note (7/8 counts eighths). */
@@ -58,6 +60,8 @@ export interface TransportState {
   metronome: MetronomeSettings;
   mode: LoopMode;
   loopLength: LoopLength;
+  /** How a free first take is fitted to a whole-beat repeating length. */
+  loopFit: LoopFit;
   position: FramePos;
   sampleRate: number;
 }
@@ -69,6 +73,7 @@ export const defaultTransport: TransportState = {
   metronome: { enabled: true, subdivision: 1, accentDownbeat: true, gainDb: -6, countInBars: 1 },
   mode: "free",
   loopLength: { bars: 2, beats: 0 },
+  loopFit: "nearestBeat",
   position: 0,
   sampleRate: 48_000,
 };

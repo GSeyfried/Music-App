@@ -35,7 +35,7 @@ use super::transfer::{
 use super::{LooperConfig, MAX_TRACKS};
 use crate::error::EngineError;
 use crate::model::LoopMode;
-use crate::transport::{first_grid_index_at_or_after, grid_frame, MusicalPosition, TransportState};
+use crate::transport::{first_grid_index_at_or_after, grid_frame, LoopFit, MusicalPosition, TransportState};
 
 const COMMAND_CAPACITY: usize = 64;
 const SNAPSHOT_CAPACITY: usize = 8;
@@ -363,6 +363,7 @@ pub struct LooperCore {
     max_frames: usize,
     max_layers: usize,
     fade_frames: u32,
+    capture_tail_frames: u32,
     min_loop_frames: usize,
     transport: TransportState,
     run: RunState,
@@ -462,6 +463,8 @@ impl LooperCore {
             max_frames,
             max_layers: config.max_layers_per_track,
             fade_frames: fade,
+            capture_tail_frames: ((config.capture_tail_ms as u64 * sample_rate as u64) / 1_000).min(max_frames as u64)
+                as u32,
             min_loop_frames: ((fade as usize) * 2).max(sample_rate as usize / 50).max(1),
             master: Self::synced_master(&transport),
             transport,
@@ -524,6 +527,13 @@ impl LooperCore {
     #[cfg(test)]
     pub(crate) fn set_transport_frame(&mut self, t: i64) {
         self.t = t;
+    }
+
+    /// Test-only inspection of immutable captured source data. Production UI
+    /// receives metadata only; raw audio never crosses the bridge.
+    #[cfg(test)]
+    pub(crate) fn layer_sample(&self, track: usize, layer: usize, frame: usize) -> Option<f32> {
+        self.tracks.get(track)?.layers.get(layer)?.get(frame).copied()
     }
 
     /// Process one block of mono input into mono output. Realtime-safe.
@@ -624,8 +634,12 @@ impl LooperCore {
             RecKind::FirstTake => {
                 let i = (tp - rec.start) as usize;
                 if i >= self.max_frames {
-                    self.finish_first_take(ti, tp, false);
-                    let _ = self.notice_tx.push(LooperNotice::MaxLengthReached { track: ti as u8 });
+                    if self.master.is_some() {
+                        self.complete_recording(ti);
+                    } else {
+                        self.finish_first_take(ti, tp, false);
+                        let _ = self.notice_tx.push(LooperNotice::MaxLengthReached { track: ti as u8 });
+                    }
                     return;
                 }
                 i
@@ -653,6 +667,17 @@ impl LooperCore {
         if let Some(end) = rec.end {
             g = g.min(((end - tp) as f32 / f).min(1.0));
         }
+        // A fitted first take may still be capturing a hidden safety tail.
+        // Fade the audible loop boundary without fading or deleting the raw
+        // post-roll stored beyond that boundary.
+        if rec.kind == RecKind::FirstTake {
+            if let Some(master) = self.master {
+                let loop_end = rec.start + master.period.round() as i64;
+                if tp < loop_end {
+                    g = g.min(((loop_end - tp) as f32 / f).min(1.0));
+                }
+            }
+        }
         g.max(0.0)
     }
 
@@ -676,10 +701,11 @@ impl LooperCore {
     /// arrived yet. When `keep_tail` is set the recording stays open as a
     /// bounded take until they have; playback of the new loop starts at once
     /// and reaches those frames only a full period later.
-    fn finish_first_take(&mut self, ti: usize, end: i64, keep_tail: bool) {
+    fn finish_first_take(&mut self, ti: usize, raw_end: i64, keep_tail: bool) {
         let Some(rec) = self.tracks.get(ti).and_then(|tr| tr.rec) else { return };
         self.touch();
-        let len = (end - rec.start).max(0) as usize;
+        let raw_len = (raw_end - rec.start).max(0) as usize;
+        let len = if keep_tail { self.fit_first_take_frames(raw_len) } else { raw_len }.min(self.max_frames);
         if len < self.min_loop_frames {
             self.discard_recording(ti);
             let _ = self.notice_tx.push(LooperNotice::Rejected { reason: RejectReason::TooShort });
@@ -702,12 +728,35 @@ impl LooperCore {
             }
         }
         self.master = Some(Master { origin: rec.start, period: len as f64 });
-        if keep_tail && written < len {
-            let end = Some(rec.start + len as i64);
-            self.tracks[ti].rec = Some(Recording { kind: RecKind::NewLoop, start: rec.start, end, lat: rec.lat });
+        let capture_end = raw_end
+            .max(rec.start + len as i64)
+            .saturating_add(self.capture_tail_frames as i64)
+            .min(rec.start + self.max_frames as i64);
+        if keep_tail && self.t - rec.lat < capture_end {
+            self.tracks[ti].rec =
+                Some(Recording { kind: RecKind::FirstTake, start: rec.start, end: Some(capture_end), lat: rec.lat });
         } else {
             self.complete_recording(ti);
         }
+    }
+
+    /// Choose a repeat length without incrementally adding rounded beats.
+    /// The selected length is relative to the take start, so a musician may
+    /// begin anywhere on the transport and still receive an exact N-beat loop.
+    fn fit_first_take_frames(&self, raw_frames: usize) -> usize {
+        if self.transport.loop_fit == LoopFit::Exact {
+            return raw_frames;
+        }
+        let beat = self.transport.frames_per_beat();
+        let beats = raw_frames as f64 / beat;
+        let whole = match self.transport.loop_fit {
+            LoopFit::Exact => unreachable!(),
+            LoopFit::NearestBeat => beats.round(),
+            LoopFit::RoundDown => beats.floor(),
+            LoopFit::RoundUp => beats.ceil(),
+        }
+        .max(1.0) as i64;
+        grid_frame(whole, beat).max(1) as usize
     }
 
     /// The transport stops while a recording is open: end it at performance
@@ -912,10 +961,18 @@ impl LooperCore {
         validate_transport(&new, self.max_frames)?;
         let old = self.transport;
         let mode_changed = new.mode != old.mode;
-        let grid_changed =
-            new.bpm != old.bpm || new.time_signature != old.time_signature || new.loop_length != old.loop_length;
-        let affects_loop = mode_changed || (new.mode == LoopMode::Synced && grid_changed);
-        if affects_loop && (self.has_content() || self.any_recording()) {
+        let clock_grid_changed = new.bpm != old.bpm || new.time_signature != old.time_signature;
+        let length_changed = new.loop_length != old.loop_length;
+        let affects_loop = mode_changed || (new.mode == LoopMode::Synced && (clock_grid_changed || length_changed));
+        let content = self.has_content() || self.any_recording();
+        // Existing buffers are sized to the configured maximum, so changing
+        // only a synced loop's cycle length is a non-destructive window edit.
+        // Require a stopped transport to avoid a mid-cycle phase jump.
+        if content
+            && (mode_changed
+                || (new.mode == LoopMode::Synced && clock_grid_changed)
+                || (length_changed && self.run != RunState::Stopped))
+        {
             return Err(RejectReason::TransportLocked);
         }
         self.transport = new;

@@ -70,8 +70,10 @@ export interface TransportControls {
   canRestart: boolean;
   /** Mode cannot change while any loop exists. */
   modeLocked: boolean;
-  /** BPM / meter / loop length are locked while loops exist in synced mode. */
+  /** BPM and meter are locked while loops exist in synced mode. */
   gridLocked: boolean;
+  /** Cycle length can be edited non-destructively only while stopped. */
+  lengthLocked: boolean;
   canClearAll: boolean;
 }
 
@@ -86,6 +88,7 @@ export function transportControls(view: LooperView): TransportControls {
     canRestart: hasContent,
     modeLocked: hasContent,
     gridLocked: hasContent && view.transport.mode === "synced",
+    lengthLocked: hasContent && view.run !== "stopped",
     canClearAll: hasContent,
   };
 }

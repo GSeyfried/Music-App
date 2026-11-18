@@ -34,6 +34,18 @@ pub enum LoopMode {
     Synced,
 }
 
+/// Free-loop boundary fitting. Kept in the project document so reopening a
+/// session preserves the musician's preferred capture behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum LoopFitDoc {
+    Exact,
+    #[default]
+    NearestBeat,
+    RoundDown,
+    RoundUp,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum TrackKind {
@@ -117,6 +129,7 @@ pub struct TransportDoc {
     pub metronome: MetronomeDoc,
     pub mode: LoopMode,
     pub loop_length: LoopLengthDoc,
+    pub loop_fit: LoopFitDoc,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -129,6 +142,7 @@ impl Default for TransportDoc {
             metronome: MetronomeDoc::default(),
             mode: LoopMode::Free,
             loop_length: LoopLengthDoc::default(),
+            loop_fit: LoopFitDoc::default(),
             extra: Extra::new(),
         }
     }

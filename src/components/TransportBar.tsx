@@ -9,7 +9,7 @@ import { pauseCommand, playStopCommand, transportControls } from "../lib/looperC
 import { shortcutKeys } from "../lib/shortcuts";
 import { setAttr, setText, useFrame } from "../lib/useFrame";
 import { Icon } from "./ui/Icon";
-import { Button, ConfirmButton, Segmented, Stepper } from "./ui/controls";
+import { Button, ConfirmButton, HelpTip, Segmented, Stepper } from "./ui/controls";
 
 export function positionText(s: LooperState | null): { main: string; sub: string } {
   if (!s) return { main: "—", sub: "" };
@@ -44,6 +44,7 @@ function Position() {
 }
 
 const DENOMINATORS = [2, 4, 8, 16].map((d) => ({ value: d, label: String(d) }));
+const COMMON_METERS = [3, 4, 5, 7].map((beats) => ({ value: beats, label: String(beats) }));
 
 export function TransportBar() {
   const view = useEngineState((s) => s.looper);
@@ -109,6 +110,7 @@ export function TransportBar() {
       <div className="transport-settings">
         <Segmented
           label="Loop mode"
+          help="Free follows your performance. Synced records a loop whose duration is set by tempo, meter, bars, and beats."
           value={tr.mode}
           disabled={c.modeLocked}
           options={[
@@ -119,6 +121,7 @@ export function TransportBar() {
         />
         <Stepper
           label="Tempo (BPM)"
+          help="The pulse speed. In 7/8, for example, each eighth note receives one beat at this tempo."
           value={tr.bpm}
           min={20}
           max={400}
@@ -128,8 +131,17 @@ export function TransportBar() {
           format={(v) => v.toFixed(0)}
           onChange={(bpm) => patchTransport({ bpm })}
         />
+        <Segmented
+          label="Common meter"
+          help="Quick choices for measures with 3, 4, 5, or 7 beats. Odd meters such as 5/4 and 7/8 are fully supported."
+          value={tr.timeSignature.numerator}
+          disabled={c.gridLocked}
+          options={COMMON_METERS}
+          onChange={(numerator) => patchTransport({ timeSignature: { ...tr.timeSignature, numerator } })}
+        />
         <Stepper
-          label="Beats per bar"
+          label="Beats per measure"
+          help="How many pulses make one measure. Use any value from 1–32; 3, 5, and 7 are first-class choices."
           value={tr.timeSignature.numerator}
           min={1}
           max={32}
@@ -138,6 +150,7 @@ export function TransportBar() {
         />
         <Segmented
           label="Beat unit"
+          help="The note value counted as one beat: 4 means quarter notes, 8 means eighth notes."
           value={tr.timeSignature.denominator}
           disabled={c.gridLocked}
           options={DENOMINATORS}
@@ -147,22 +160,25 @@ export function TransportBar() {
           <>
             <Stepper
               label="Loop bars"
+              help="Whole measures in one repeating cycle. This combines with the extra-beats setting below."
               value={tr.loopLength.bars}
               min={0}
               max={256}
-              disabled={c.gridLocked}
+              disabled={c.lengthLocked}
               onChange={(bars) => patchTransport({ loopLength: { ...tr.loopLength, bars } })}
             />
             <Stepper
               label="+ beats"
+              help="Adds individual beats after the whole measures—for example, 1 bar + 2 beats."
               value={tr.loopLength.beats}
               min={0}
               max={64}
-              disabled={c.gridLocked}
+              disabled={c.lengthLocked}
               onChange={(beats) => patchTransport({ loopLength: { ...tr.loopLength, beats } })}
             />
             <Stepper
               label="Count-in bars"
+              help="Measures of click before recording begins. Zero starts at the next available loop boundary."
               value={tr.metronome.countInBars}
               min={0}
               max={8}
@@ -170,20 +186,37 @@ export function TransportBar() {
             />
           </>
         )}
+        {!synced && (
+          <Segmented
+            label="Fit first take"
+            help="Chooses the repeating boundary when you stop. Nearest, Down, and Up use whole beats while retaining a short hidden safety tail."
+            value={tr.loopFit}
+            disabled={c.modeLocked}
+            options={[
+              { value: "exact", label: "Exact" },
+              { value: "nearestBeat", label: "Nearest" },
+              { value: "roundDown", label: "Down" },
+              { value: "roundUp", label: "Up" },
+            ]}
+            onChange={(loopFit) => patchTransport({ loopFit })}
+          />
+        )}
         <Stepper
           label="Click subdivision"
+          help="Clicks inside each beat: 1 is the beat, 2 divides it in half, and 3 gives triplets."
           value={tr.metronome.subdivision}
           min={1}
           max={8}
           onChange={(subdivision) => patchTransport({ metronome: { ...tr.metronome, subdivision } })}
         />
         <div className="segmented">
-          <span className="stepper-label">Click</span>
+          <span className="control-label"><span className="stepper-label">Click</span><HelpTip label="Click" text="Plays the metronome without writing it into loop layers. Use headphones to prevent acoustic speaker bleed." /></span>
           <Button
             variant="toggle"
             icon="metronome"
             pressed={tr.metronome.enabled}
             aria-label="Metronome click"
+            title="Turn the metronome click on or off"
             onPress={() => patchTransport({ metronome: { ...tr.metronome, enabled: !tr.metronome.enabled } })}
           >
             {tr.metronome.enabled ? "On" : "Off"}
@@ -194,7 +227,7 @@ export function TransportBar() {
         <p className="lock-note">
           <Icon name="lock" size={16} />
           {c.gridLocked
-            ? "Tempo, meter, mode and loop length are locked while loops exist. Clear all tracks to change them."
+            ? "Tempo, meter and mode are locked while loops exist. Stop playback to resize the loop without deleting its layers."
             : "Loop mode is locked while loops exist. Tempo changes only move the click in Free mode."}
         </p>
       )}

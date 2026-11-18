@@ -84,6 +84,9 @@ pub struct LooperConfig {
     /// Frames a track's gain takes to move by 1.0 when mute, solo, level, or
     /// play/stop changes (0 = instant). Prevents zipper noise and clicks.
     pub gain_smoothing_frames: u32,
+    /// Extra input retained after the first-take boundary. It is hidden by
+    /// the default loop length but remains available to the future clip editor.
+    pub capture_tail_ms: u32,
 }
 
 impl Default for LooperConfig {
@@ -97,6 +100,7 @@ impl Default for LooperConfig {
             memory_limit_bytes: 256 * 1024 * 1024,
             fade_frames: 64,
             gain_smoothing_frames: 256,
+            capture_tail_ms: 100,
         }
     }
 }
@@ -141,6 +145,9 @@ impl LooperConfig {
             return Err(EngineError::Invalid(format!(
                 "fade_frames must be at most {MAX_FADE_FRAMES} and a quarter of the longest loop"
             )));
+        }
+        if self.capture_tail_ms > 2_000 {
+            return Err(EngineError::Invalid("capture_tail_ms must be at most 2000".into()));
         }
         Ok(frames)
     }

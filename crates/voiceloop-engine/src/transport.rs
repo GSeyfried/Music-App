@@ -80,6 +80,23 @@ pub struct LoopLength {
     pub beats: u32,
 }
 
+/// How a free-recorded first take chooses its repeating length when Stop is
+/// pressed. Audio around the chosen boundary is retained by the looper's
+/// capture-tail cushion; this only chooses the default audible cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum LoopFit {
+    /// Stop-to-stop timing, with no beat adjustment.
+    Exact,
+    /// Choose the closest whole-beat length.
+    #[default]
+    NearestBeat,
+    /// Choose the preceding whole-beat length.
+    RoundDown,
+    /// Choose the following whole-beat length.
+    RoundUp,
+}
+
 impl Default for LoopLength {
     fn default() -> Self {
         Self { bars: 2, beats: 0 }
@@ -98,6 +115,8 @@ pub struct TransportState {
     /// the loop length comes from `bpm`, `time_signature` and `loop_length`.
     pub mode: LoopMode,
     pub loop_length: LoopLength,
+    /// Beat fitting for the first take in Free mode.
+    pub loop_fit: LoopFit,
     /// Current position on the authoritative clock (informational in persisted files).
     pub position: FramePos,
     pub sample_rate: u32,
@@ -112,6 +131,7 @@ impl Default for TransportState {
             metronome: MetronomeSettings::default(),
             mode: LoopMode::Free,
             loop_length: LoopLength::default(),
+            loop_fit: LoopFit::default(),
             position: 0,
             sample_rate: 48_000,
         }
@@ -301,6 +321,50 @@ mod tests {
         for i in 0..5_000 {
             let d = grid_frame(i + 1, step) - grid_frame(i, step);
             assert!(d == step.floor() as i64 || d == step.ceil() as i64);
+        }
+    }
+
+    #[test]
+    fn odd_meter_loop_boundaries_stay_on_the_absolute_beat_grid() {
+        const CYCLES: i64 = 1_000_000;
+
+        // 113 BPM at 44.1 kHz deliberately gives a fractional frame count per
+        // beat. Each case is one bar long, so every loop boundary must also be
+        // the corresponding absolute beat-grid boundary, however long it runs.
+        for (beats, denominator) in [(3u8, 4u8), (5, 4), (7, 8)] {
+            let mut t = at(113.0, beats, denominator, 44_100);
+            t.loop_length = LoopLength { bars: 1, beats: 0 };
+
+            let beat_period = t.frames_per_beat();
+            let loop_period = t.loop_period();
+            assert!(beat_period.fract() > 0.0, "{beats}/{denominator}");
+            assert!(loop_period.fract() > 0.0, "{beats}/{denominator}");
+            assert_eq!(t.beats_per_loop(), u64::from(beats));
+
+            let mut previous = grid_frame(0, loop_period);
+            for cycle in 1..=CYCLES {
+                let boundary = grid_frame(cycle, loop_period);
+                let beat_boundary = grid_frame(cycle * i64::from(beats), beat_period);
+
+                assert_eq!(boundary, beat_boundary, "{beats}/{denominator}, cycle {cycle}");
+                assert!(
+                    (boundary as f64 - cycle as f64 * loop_period).abs() <= 0.5,
+                    "{beats}/{denominator}, cycle {cycle}"
+                );
+
+                let cycle_frames = boundary - previous;
+                assert!(
+                    cycle_frames == loop_period.floor() as i64 || cycle_frames == loop_period.ceil() as i64,
+                    "{beats}/{denominator}, cycle {cycle}: {cycle_frames}"
+                );
+                previous = boundary;
+            }
+
+            // Repeatedly adding a once-rounded loop size would have drifted by
+            // many frames here. This guards against replacing the absolute-grid
+            // calculation with that tempting but incorrect implementation.
+            let repeatedly_rounded = CYCLES * loop_period.round() as i64;
+            assert_ne!(previous, repeatedly_rounded, "{beats}/{denominator}");
         }
     }
 

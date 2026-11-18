@@ -822,4 +822,22 @@ mod tests {
         assert!(s.latency_p2p < 0.01, "{}", s.latency_p2p);
         assert!(s.max_prediction_error < 0.01, "{}", s.max_prediction_error);
     }
+
+    /// Sweep offsets beyond ordinary crystal error with relatively-prime
+    /// callback sizes. `simulate` adds deterministic timestamp jitter and
+    /// verifies impulse timing, latency slope, fill bounds and discontinuities.
+    #[test]
+    fn clock_offset_sweep_does_not_accelerate_the_timeline() {
+        for ppm in [-500.0, -100.0, -10.0, 0.0, 10.0, 100.0, 500.0] {
+            let s = simulate(ppm, 6.0 * 60.0, 193, 257, 120.0, true);
+            let label = format!("{ppm:+} ppm");
+            assert_eq!((s.discontinuities, s.underrun, s.dropped), (0, 0, 0), "{label}: no breaks");
+            assert!((s.final_ppm - ppm).abs() < 3.0, "{label}: estimated {} ppm", s.final_ppm);
+            assert!(s.impulses_checked > 2_000, "{label}: {} impulses", s.impulses_checked);
+            assert!(s.max_prediction_error < 1.0, "{label}: prediction error {}", s.max_prediction_error);
+            let latency_limit = if ppm.abs() > 200.0 { 10.0 } else { 4.0 };
+            assert!(s.latency_p2p < latency_limit, "{label}: latency varied by {} frames", s.latency_p2p);
+            assert!(s.fill_range.1 - s.fill_range.0 < 490.0, "{label}: fill {:?}", s.fill_range);
+        }
+    }
 }

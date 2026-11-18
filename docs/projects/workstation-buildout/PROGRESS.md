@@ -144,6 +144,48 @@ was performed.
   `driftDroppedFrames`, bridge ratio/fill/discontinuities). That would point to
   the hardware clock/bridge path rather than the loop-period math.
 
+### Timing regression suite
+
+- Added `docs/projects/quality/TIMING_TEST_PLAN.md`, based on Apple Core Audio
+  clock/timestamp documentation and CPAL 0.18.2 timestamp, callback-size,
+  latency and xrun behavior. It separates loop-clock defects, two-device clock
+  drift and acoustic speaker bleed.
+- Added `scripts/test-timing.sh`: a 97-test deterministic timing gate covering
+  transport grids, clock anchors/xruns, looper timing, adaptive bridge drift
+  and output-anchor mapping.
+- Added regressions proving that five separate overdubs cannot change or
+  accelerate a 997-frame master loop; irregular callback partitioning is
+  sample-identical; four-pass overdubbing cannot internally capture the
+  software metronome; variable output callback sizes preserve transport
+  anchors; and six-minute synthetic runs at offsets from -500 to +500 ppm keep
+  ordered impulses, bounded latency/fill and zero discontinuities.
+- Defined a four-run hardware matrix: Mac microphone with wired headphones,
+  Mac microphone with speakers as the positive bleed control, split H4n/Mac
+  clocks, and H4n shared input/output. The 30-minute procedure records bridge,
+  xrun, latency and layer timing-suspect diagnostics.
+- Verification: timing gate passed; `cargo test --workspace` passed **305 Rust
+  tests** (84 analysis + 179 engine + 42 project); workspace Clippy passed with
+  warnings denied.
+
+### Beat-aware capture and loop editing slice
+
+- Free first takes now offer Exact, Nearest beat (default), Round down, and
+  Round up fitting. The engine retains a 100 ms hidden capture tail around the
+  chosen boundary instead of immediately discarding it.
+- Stopped synced loops can change their shared bars/+beats duration without
+  rewriting layer buffers. Resizing during playback remains locked to prevent
+  a mid-cycle phase jump.
+- Studio exposes common 3-, 4-, 5-, and 7-beat measures plus the existing
+  1–32 custom control. A million-cycle fractional-frame regression covers
+  3/4, 5/4, and 7/8 without accumulated drift.
+- Added accessible hover/focus/tap help and descriptions throughout the
+  transport settings.
+- Added `looper-01/LOOP_EDITING.md`. Per-layer non-destructive trim has an
+  executable contract, but its persisted source-span/segment command is still
+  PENDING; no fake trim control is exposed in Track Details.
+- Verification: 147 frontend tests and 311 Rust tests pass; production build,
+  reference verification, Clippy, and native launch are checked below.
+
 ### iOS blocker and next action
 
 - Xcode 27.2, Tauri CLI, and the ARM64 Rust iOS targets are installed.
