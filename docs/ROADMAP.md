@@ -180,6 +180,10 @@ timing matrix in `projects/quality/TIMING_TEST_PLAN.md`.
 7. **Chord recognition:** chord labels first, then which notes are sounding
    ([polyphonic-analysis](projects/polyphonic-analysis/README.md)).
 
+8. **Voice progress:** local profiles (pick a name; no login or server), range
+   history in head and chest voice, edge-of-range exercises and milestones
+   ([voice-progress](projects/voice-progress/README.md)).
+
 ## Prioritized milestones
 
 Each milestone is intentionally a small vertical slice and includes its UI and

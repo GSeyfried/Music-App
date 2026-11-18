@@ -26,6 +26,7 @@ Use lowercase-kebab-case folder names (for example `audio-player/`).
 | [workstation-buildout](workstation-buildout/PROGRESS.md): cross-project integration and handoff | Active working tree; not integrated into `main` |
 | [settings](settings/README.md): settings registry and [settings index](settings/SETTINGS_INDEX.md) | Proposed 2026-11-17; index lists existing and proposed settings |
 | [visualization](visualization/README.md): loop-circle histogram/ticks, note colors, pitch-reactive theme | Proposed 2026-11-17; not started |
+| [voice-progress](voice-progress/README.md): range training (head/chest), local profiles, milestones | Proposed 2026-11-17 |
 | [polyphonic-analysis](polyphonic-analysis/README.md): chords, multi-note detection, instrument separation | Proposed 2026-11-17; research notes only |
 
 Individual project files preserve detailed historical checkpoints. Use
