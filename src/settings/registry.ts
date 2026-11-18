@@ -48,6 +48,19 @@ export interface AppSettings {
   "notation.view": "pianoRoll" | "staff" | "both";
   /** Grid steps per beat when turning sung timing into note values. */
   "notation.gridSubdivision": number;
+  /** "auto" infers 3/4, 4/4 or 6/8 when the take has no beat grid (the grid's meter wins otherwise). */
+  "notation.meter": "auto" | "4/4" | "3/4" | "6/8" | "2/4";
+  /** "auto" (estimated from the notes) or a number of fifths, "-7".."7". */
+  "notation.keySignature": string;
+  "notation.clef": "auto" | "treble" | "treble8" | "bass";
+  /** Color noteheads with the note color map (off: plain engraving ink). */
+  "notation.colorNotes": boolean;
+  /** Shortest sung note kept on the staff (value code or "off"); shorter ones merge into a neighbour. */
+  "notation.minNote": string;
+  /** Shortest gap shown as a rest (value code or "off"); shorter gaps are held over. */
+  "notation.minRest": string;
+  /** Size of the engraved staff (1 = VexFlow's default size). */
+  "notation.scale": number;
 }
 
 export type AppSettingId = keyof AppSettings;
@@ -73,6 +86,13 @@ export const APP_DEFAULTS: AppSettings = {
   "notes.accuracyEncoding": "saturation",
   "notation.view": "pianoRoll",
   "notation.gridSubdivision": 4,
+  "notation.meter": "auto",
+  "notation.keySignature": "auto",
+  "notation.clef": "auto",
+  "notation.colorNotes": false,
+  "notation.minNote": "32",
+  "notation.minRest": "8",
+  "notation.scale": 1.25,
 };
 
 interface Base {
@@ -284,6 +304,123 @@ export const SETTINGS: SettingDef[] = [
     label: "Notation grid",
     description:
       "How finely sung timing is rounded for the staff: steps per beat. 4 rounds to sixteenth notes in 4/4; 2 to eighths (cleaner but less exact).",
+    category: "Practice",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "notation.meter",
+    source: "app",
+    kind: "choice",
+    label: "Time signature",
+    description:
+      "Time signature for the staff. Automatic uses the take's beat grid when it has one; otherwise it guesses 4/4, 3/4 or 6/8 from where the long notes fall.",
+    category: "Practice",
+    tier: "advanced",
+    scope: "app",
+    options: [
+      { value: "auto", label: "Automatic" },
+      { value: "4/4", label: "4/4" },
+      { value: "3/4", label: "3/4" },
+      { value: "6/8", label: "6/8" },
+      { value: "2/4", label: "2/4" },
+    ],
+  },
+  {
+    id: "notation.keySignature",
+    source: "app",
+    kind: "choice",
+    label: "Key signature",
+    description: "Key signature for the staff. Automatic estimates the key from the notes and spells sharps or flats to match.",
+    category: "Practice",
+    tier: "advanced",
+    scope: "app",
+    options: [
+      { value: "auto", label: "Automatic" },
+      { value: "-6", label: "6♭ (G♭ / E♭m)" },
+      { value: "-5", label: "5♭ (D♭ / B♭m)" },
+      { value: "-4", label: "4♭ (A♭ / Fm)" },
+      { value: "-3", label: "3♭ (E♭ / Cm)" },
+      { value: "-2", label: "2♭ (B♭ / Gm)" },
+      { value: "-1", label: "1♭ (F / Dm)" },
+      { value: "0", label: "None (C / Am)" },
+      { value: "1", label: "1♯ (G / Em)" },
+      { value: "2", label: "2♯ (D / Bm)" },
+      { value: "3", label: "3♯ (A / F♯m)" },
+      { value: "4", label: "4♯ (E / C♯m)" },
+      { value: "5", label: "5♯ (B / G♯m)" },
+      { value: "6", label: "6♯ (F♯ / D♯m)" },
+    ],
+  },
+  {
+    id: "notation.clef",
+    source: "app",
+    kind: "choice",
+    label: "Clef",
+    description:
+      "Clef for the staff. Automatic picks the one that needs the fewest ledger lines; tenor-range voices get the treble clef with an 8 below (sounds an octave lower).",
+    category: "Practice",
+    tier: "advanced",
+    scope: "app",
+    options: [
+      { value: "auto", label: "Automatic" },
+      { value: "treble", label: "Treble" },
+      { value: "treble8", label: "Treble, octave lower" },
+      { value: "bass", label: "Bass" },
+    ],
+  },
+  {
+    id: "notation.colorNotes",
+    source: "app",
+    kind: "bool",
+    label: "Colored staff notes",
+    description: "Color notes on the staff with the note colors, shaded by accuracy. Off shows plain black-and-white notation.",
+    category: "Practice",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "notation.minNote",
+    source: "app",
+    kind: "choice",
+    label: "Shortest staff note",
+    description:
+      "Sung notes shorter than this are treated as pitch wobble and merged into the note next to them, so the staff isn't cluttered with tiny notes.",
+    category: "Practice",
+    tier: "advanced",
+    scope: "app",
+    options: [
+      { value: "off", label: "Keep all" },
+      { value: "32", label: "32nd" },
+      { value: "16", label: "16th" },
+      { value: "8", label: "Eighth" },
+    ],
+  },
+  {
+    id: "notation.minRest",
+    source: "app",
+    kind: "choice",
+    label: "Shortest staff rest",
+    description: "Gaps between sung notes shorter than this (breaths, gaps between syllables) are held over by the earlier note instead of showing as rests.",
+    category: "Practice",
+    tier: "advanced",
+    scope: "app",
+    options: [
+      { value: "off", label: "Show all" },
+      { value: "16", label: "16th" },
+      { value: "8", label: "Eighth" },
+      { value: "q", label: "Quarter" },
+    ],
+  },
+  {
+    id: "notation.scale",
+    source: "app",
+    kind: "number",
+    min: 0.8,
+    max: 2,
+    step: 0.05,
+    label: "Staff size",
+    description: "How large staff notation is drawn.",
     category: "Practice",
     tier: "advanced",
     scope: "app",

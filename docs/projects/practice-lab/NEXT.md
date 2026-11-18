@@ -4,7 +4,7 @@ Status: the three "practice quick wins" (ROADMAP step 2) are **built**:
 stop Studio on entering Practice, difficulty modes, preset scale exercises.
 Frontend only, covered by vitest (`src/practice/quickwins.test.tsx`) against the
 simulated engine; not yet tried in a native launch or on real voice takes.
-Notation display is still **proposed**. Settings are listed in
+Notation display: the staff is built (see below). Settings are listed in
 [settings/SETTINGS_INDEX.md](../settings/SETTINGS_INDEX.md).
 
 ## Stop Studio when entering Practice
@@ -76,17 +76,52 @@ stops after the scale's length) are recorded and scored by the existing engine.
 
 ## Notation display
 
-1. **Now:** the existing piano roll, with note names and note colors (see
+1. **Done:** the piano roll, with note names and note colors (see
    [visualization](../visualization/README.md)).
-2. **Next:** a single-voice staff, rendered with VexFlow (MIT).
-   - Hard part: quantizing sung timing into note values. This builds on the
-     existing grid settings (`gridSubdivision`, `gridSnapTolerance`) and the
-     tempo estimate.
+2. **Built (engraving pass, 2026-11-17):** a single-voice staff rendered with
+   VexFlow 5.0.0 (MIT), `src/notation/`. Checked visually in a browser harness
+   (dark and light themes, narrow width, colored notes) with synthetic sung
+   input; not yet on real voice takes in a native launch.
+   - `quantize.ts`: one voice; jitter notes shorter than `notation.minNote`
+     merge into a neighbour (a blip inside a held note rejoins it); gaps
+     shorter than `notation.minRest` are held over; early releases are held to
+     the beat; notes snap to the `notation.gridSubdivision` grid and are spelled
+     by metric position (`spellInBar`): simplest value, dots where exact,
+     off-beat notes stay inside their beat, the middle of a 4/4 bar stays
+     visible, compound beats (6/8) stay whole, rests are per beat and undotted
+     in simple meters, an empty bar is a centered whole-bar rest, ties across
+     bar lines.
+   - `meter.ts`: with no beat grid, `estimateTempo` (inter-onset ratios, prior
+     near 100 BPM, least-squares refinement) and `inferMeter(notes, bpm)`
+     (accent on downbeats minus notes held across bar lines; 4/4 vs 3/4, 6/8
+     when off-beats fall on thirds of the pulse) also find the downbeat, so a
+     pickup starts after rests. A take's grid is used as-is.
+   - `key.ts`: key from a duration-weighted pitch-class histogram against the
+     Krumhansl–Kessler profiles; spelling by key (minor leading tone raised,
+     other chromatic notes closest to the key on the line of fifths);
+     accidentals once per bar and position.
+   - `engrave.ts`: picks the clef with the fewest ledger lines (treble, bass,
+     or treble-8 for tenor range) and puts it all together (`planNotation`).
+   - `Staff.tsx`: beams by beat (`Beam.generateBeams` with meter groups), stems
+     by VexFlow; measure widths follow content, lines wrap and are justified;
+     theme ink from `--text` (notes) and `--text-dim` (staff lines); redraws on
+     theme or width change; waits for the Bravura font before drawing (drawing
+     earlier misplaced stems and spacing).
+   - Settings: `notation.meter`, `notation.keySignature`, `notation.clef`,
+     `notation.colorNotes` (off: black-ink engraving), `notation.minNote`,
+     `notation.minRest`, `notation.scale` (none shown in the Practice UI yet).
+   - PENDING: expose the notation settings next to the Note display picker.
+   - PENDING: tempo drift over long gridless takes (a single tempo is fitted);
+     takes whose tempo estimate is off by a 3:2 or 2:1 ratio still notate
+     oddly. The engine's `TakeSummary.tempo` could replace the frontend
+     estimate if it is passed to `takeToStaff`.
+   - PENDING: triplets (subdivision 3/6 is rounded to a power of two), 2/4 and
+     12/8 are never inferred (2/4 can be chosen), no courtesy accidentals.
+   - PENDING: internal layout/inference constants (`MIN_MEASURE_CONTENT`,
+     `PER_NOTE_PAD`, `CROSS_PENALTY`, `KEY_MIN_CORRELATION`, ...) are module
+     constants, not registry entries; move them if they need tuning by users.
 3. **Later:** score import/export as MusicXML, rendered with
    OpenSheetMusicDisplay (BSD-3). MIDI import already exists (`smf.rs`).
 
 Not feasible: reading scores from PDFs or images (OMR). The main open-source
 engine, Audiveris, is AGPL.
-
-PENDING: clef choice (treble/bass/auto from range), key signature (from key
-estimation or user-chosen).

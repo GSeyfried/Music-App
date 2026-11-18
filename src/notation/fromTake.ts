@@ -4,7 +4,7 @@ import type { Take, TakeGrid } from "../practice/types";
 import { noteQuality } from "../settings/noteColors";
 import type { QuantizeOptions, TimedNote } from "./quantize";
 
-/** Tempo used when neither the take nor its reference has a beat grid. PENDING: use the tempo estimate. */
+/** Tempo used when neither the take nor its reference has a beat grid and the notes are too few to estimate one. */
 export const NOTATION_FALLBACK_BPM = 90;
 
 export function takeToStaff(take: Take, subdivision: number, fallbackGrid?: TakeGrid | null): { notes: TimedNote[]; options: QuantizeOptions } {
@@ -24,6 +24,8 @@ export function takeToStaff(take: Take, subdivision: number, fallbackGrid?: Take
       beatsPerBar: grid?.beatsPerBar ?? 4,
       beatUnit: grid?.beatUnit ?? 4,
       subdivision,
+      // Without a grid, Staff estimates tempo, meter and downbeat from the notes.
+      gridKnown: grid !== null,
     },
   };
 }
