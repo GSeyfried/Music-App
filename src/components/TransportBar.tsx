@@ -2,7 +2,7 @@
 // mode and length, count-in, click. Settings that would change an existing
 // loop are locked (with an explanation) while loops exist.
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { useEngineActions, useEngineState, useLive } from "../engine/EngineContext";
 import type { LooperState } from "../engine/protocol";
 import { pauseCommand, playStopCommand, transportControls } from "../lib/looperControls";
@@ -45,14 +45,18 @@ function Position() {
 }
 
 const DENOMINATORS = [2, 4, 8, 16].map((d) => ({ value: d, label: String(d) }));
-const COMMON_METERS = [3, 4, 5, 7].map((beats) => ({ value: beats, label: String(beats) }));
+/** Meters offered in the Meter menu; anything else is set with "Custom…". */
+const METERS = ["4/4", "3/4", "2/4", "2/2", "5/4", "7/4", "3/8", "5/8", "6/8", "7/8", "9/8", "12/8"];
+const CUSTOM_METER = "custom";
 
 export function TransportBar() {
   const view = useEngineState((s) => s.looper);
   const { sendLooper, patchTransport } = useEngineActions();
+  const [customMeter, setCustomMeter] = useState(false);
   if (!view) return null;
   const c = transportControls(view);
   const tr = view.transport;
+  const meter = `${tr.timeSignature.numerator}/${tr.timeSignature.denominator}`;
   const synced = tr.mode === "synced";
   const running = view.run === "running" || view.run === "countIn";
   const pause = pauseCommand(view.run);
@@ -132,31 +136,55 @@ export function TransportBar() {
           format={(v) => v.toFixed(0)}
           onChange={(bpm) => patchTransport({ bpm })}
         />
-        <Segmented
-          label="Common meter"
-          help="Quick choices for measures with 3, 4, 5, or 7 beats. Odd meters such as 5/4 and 7/8 are fully supported."
-          value={tr.timeSignature.numerator}
-          disabled={c.gridLocked}
-          options={COMMON_METERS}
-          onChange={(numerator) => patchTransport({ timeSignature: { ...tr.timeSignature, numerator } })}
-        />
-        <Stepper
-          label="Beats per measure"
-          help="How many pulses make one measure. Use any value from 1–32; 3, 5, and 7 are first-class choices."
-          value={tr.timeSignature.numerator}
-          min={1}
-          max={32}
-          disabled={c.gridLocked}
-          onChange={(numerator) => patchTransport({ timeSignature: { ...tr.timeSignature, numerator } })}
-        />
-        <Segmented
-          label="Beat unit"
-          help="The note value counted as one beat: 4 means quarter notes, 8 means eighth notes."
-          value={tr.timeSignature.denominator}
-          disabled={c.gridLocked}
-          options={DENOMINATORS}
-          onChange={(denominator) => patchTransport({ timeSignature: { ...tr.timeSignature, denominator } })}
-        />
+        <label className="field">
+          <span className="control-label">
+            <span className="stepper-label">Meter</span>
+            <HelpTip
+              label="Meter"
+              text="Beats per measure / the note that counts as one beat. 6/8 is six eighth notes per measure. Choose Custom for any other meter (1–32 beats)."
+            />
+          </span>
+          <select
+            aria-label="Meter"
+            value={customMeter || !METERS.includes(meter) ? CUSTOM_METER : meter}
+            disabled={c.gridLocked}
+            onChange={(e) => {
+              const v = e.currentTarget.value;
+              if (v === CUSTOM_METER) return setCustomMeter(true);
+              setCustomMeter(false);
+              const [numerator, denominator] = v.split("/").map(Number);
+              patchTransport({ timeSignature: { numerator, denominator } });
+            }}
+          >
+            {METERS.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+            <option value={CUSTOM_METER}>{METERS.includes(meter) ? "Custom…" : `Custom (${meter})`}</option>
+          </select>
+        </label>
+        {(customMeter || !METERS.includes(meter)) && (
+          <>
+            <Stepper
+              label="Beats per measure"
+              help="How many pulses make one measure, 1–32."
+              value={tr.timeSignature.numerator}
+              min={1}
+              max={32}
+              disabled={c.gridLocked}
+              onChange={(numerator) => patchTransport({ timeSignature: { ...tr.timeSignature, numerator } })}
+            />
+            <Segmented
+              label="Beat unit"
+              help="The note value counted as one beat: 4 means quarter notes, 8 means eighth notes."
+              value={tr.timeSignature.denominator}
+              disabled={c.gridLocked}
+              options={DENOMINATORS}
+              onChange={(denominator) => patchTransport({ timeSignature: { ...tr.timeSignature, denominator } })}
+            />
+          </>
+        )}
         {synced && (
           <>
             <Stepper

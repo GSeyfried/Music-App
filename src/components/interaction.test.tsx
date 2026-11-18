@@ -166,3 +166,16 @@ describe("quick actions and details", () => {
     expect(within(dialog).getByText("Overdub")).toBeTruthy();
   });
 });
+
+describe("Meter", () => {
+  it("one menu sets the whole time signature; Custom reveals beats and unit", async () => {
+    await started();
+    const meter = screen.getByRole("combobox", { name: "Meter" }) as HTMLSelectElement;
+    expect(meter.value).toBe("4/4");
+    expect(screen.queryByText("Beats per measure")).toBeNull();
+    fireEvent.change(meter, { target: { value: "6/8" } });
+    await waitFor(() => expect((screen.getByRole("combobox", { name: "Meter" }) as HTMLSelectElement).value).toBe("6/8"));
+    fireEvent.change(meter, { target: { value: "custom" } });
+    expect(await screen.findByText("Beats per measure")).toBeTruthy();
+  });
+});
