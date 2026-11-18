@@ -24,6 +24,9 @@ Use lowercase-kebab-case folder names (for example `audio-player/`).
 | [hardware-io](hardware-io/README.md): devices, routing, monitoring, MIDI, calibration | UI wired; built-in-device testing partial; H4n and physical keyboard pending |
 | [ios](ios/README.md): iPhone/iPad feasibility and touch guidance | Compile-level investigation complete; Xcode/device proof blocked |
 | [workstation-buildout](workstation-buildout/PROGRESS.md): cross-project integration and handoff | Active working tree; not integrated into `main` |
+| [settings](settings/README.md): settings registry and [settings index](settings/SETTINGS_INDEX.md) | Proposed 2026-11-17; index lists existing and proposed settings |
+| [visualization](visualization/README.md): loop-circle histogram/ticks, note colors, pitch-reactive theme | Proposed 2026-11-17; not started |
+| [polyphonic-analysis](polyphonic-analysis/README.md): chords, multi-note detection, instrument separation | Proposed 2026-11-17; research notes only |
 
 Individual project files preserve detailed historical checkpoints. Use
 [ROADMAP.md](../ROADMAP.md) and the
