@@ -147,6 +147,10 @@ export interface AppSettings {
   "games.minClarity": number;
   /** Best Pitch Glider score per difficulty. */
   "games.bestScores": Record<GameDifficulty, number>;
+  "pitchCatcher.choiceCount": number;
+  "pitchCatcher.autoAdvance": boolean;
+  /** Consecutive correct answers needed before another choice is added. */
+  "pitchCatcher.advanceStreak": number;
   "groove.difficulty": GrooveDifficulty;
   "groove.mode": GrooveMode;
   "groove.inputMode": GrooveInputMode;
@@ -218,6 +222,9 @@ export const APP_DEFAULTS: AppSettings = {
   "games.gravity": 0.25,
   "games.minClarity": 0.8,
   "games.bestScores": { superEasy: 0, easy: 0, medium: 0, hard: 0 },
+  "pitchCatcher.choiceCount": 2,
+  "pitchCatcher.autoAdvance": true,
+  "pitchCatcher.advanceStreak": 3,
   "groove.difficulty": "easy",
   "groove.mode": "echo",
   "groove.inputMode": "pads",
@@ -817,6 +824,42 @@ export const SETTINGS: SettingDef[] = [
     label: "Glider clarity",
     description: "How clear your voice must be for the glider to follow it.",
     category: "Games",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "pitchCatcher.choiceCount",
+    source: "app",
+    kind: "number",
+    min: 2,
+    max: 4,
+    step: 1,
+    label: "Note choices",
+    description: "Choose between two, three, or four notes in each Pitch Catcher round.",
+    category: "Pitch Catcher",
+    tier: "daily",
+    scope: "app",
+  },
+  {
+    id: "pitchCatcher.autoAdvance",
+    source: "app",
+    kind: "bool",
+    label: "Automatically get harder",
+    description: "Add another note choice after a streak of correct catches, up to four choices.",
+    category: "Pitch Catcher",
+    tier: "daily",
+    scope: "app",
+  },
+  {
+    id: "pitchCatcher.advanceStreak",
+    source: "app",
+    kind: "number",
+    min: 1,
+    max: 10,
+    step: 1,
+    label: "Catches to advance",
+    description: "Consecutive correct catches required before Pitch Catcher adds another choice.",
+    category: "Pitch Catcher",
     tier: "internal",
     scope: "app",
   },

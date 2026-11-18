@@ -8,13 +8,15 @@ import { noteLabel } from "../lib/tuner";
 import { PitchGlider } from "./PitchGlider";
 import { RangeFinder, useVoiceRange } from "./RangeFinder";
 import { GrooveEcho } from "./GrooveEcho";
+import { PitchCatcher } from "./PitchCatcher";
 import { useAppSetting } from "../settings/appSettings";
 import "./games.css";
 
-type ToolId = "glider" | "groove" | "range";
+type ToolId = "glider" | "catcher" | "groove" | "range";
 
 const TOOLS: { id: ToolId; title: string; blurb: string }[] = [
   { id: "glider", title: "Pitch Glider", blurb: "Steer a glider with your voice through openings in drifting walls." },
+  { id: "catcher", title: "Pitch Catcher", blurb: "Hear one pitch and catch the matching note from two, three, or four choices." },
   { id: "groove", title: "GROOVE · Echo", blurb: "Hear a drum phrase, remember it, and answer on pads or acoustic drums." },
   { id: "range", title: "Range Finder", blurb: "Find your lowest and highest comfortable notes." },
 ];
@@ -26,7 +28,7 @@ export function GamesWorkspace() {
   const grooveInput = useAppSetting("groove.inputMode");
   return (
     <div className="games">
-      {!capturing && tool !== "groove" && <StartCard purpose="Choose a microphone. The games and Range Finder follow your singing." />}
+      {!capturing && (tool === "glider" || tool === "range") && <StartCard purpose="Choose a microphone. The games and Range Finder follow your singing." />}
       {!capturing && tool === "groove" && grooveInput === "microphone" && <StartCard purpose="Choose a microphone so GROOVE can hear acoustic drum attacks." />}
       <nav className="games-launcher" aria-label="Games and tools">
         {TOOLS.map((t) => (
@@ -44,7 +46,7 @@ export function GamesWorkspace() {
           </button>
         ))}
       </nav>
-      {tool === "groove" ? <GrooveEcho /> : capturing && (tool === "glider" ? <PitchGlider /> : <RangeFinder />)}
+      {tool === "catcher" ? <PitchCatcher /> : tool === "groove" ? <GrooveEcho /> : capturing && (tool === "glider" ? <PitchGlider /> : <RangeFinder />)}
     </div>
   );
 }

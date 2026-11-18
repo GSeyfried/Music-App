@@ -43,4 +43,14 @@ describe("Games workspace", () => {
     expect(getAppSetting("games.courseId")).toBe("melody:ode");
     expect(screen.getByRole("button", { name: "Hear course" })).toBeTruthy();
   });
+
+  it("opens Pitch Catcher without a microphone and starts with two choices", async () => {
+    renderApp();
+    fireEvent.click(screen.getByRole("tab", { name: "Games" }));
+    fireEvent.click(screen.getByRole("button", { name: /Pitch Catcher/ }));
+    expect(await screen.findByRole("heading", { name: "Pitch Catcher" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Start catching" }));
+    expect(screen.getByRole("group", { name: "Pitch choices" }).querySelectorAll("button")).toHaveLength(2);
+    expect(screen.queryByText(/Choose a microphone/)).toBeNull();
+  });
 });

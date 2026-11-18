@@ -122,6 +122,9 @@ tuning; only the first few are likely user-facing.
 | `games.gravity` | Glider sink rate | How fast the glider visibly sinks without a confident pitch (play-field heights per second). PENDING real-voice tuning. | 0.25 | app | Pitch Glider; Advanced Games | exists |
 | `games.minClarity` | Glider clarity | Clarity a pitch frame needs for the glider to follow it. Internal. | 0.8 | app | Pitch Glider | exists |
 | `games.bestScores` | Best scores | Best Pitch Glider score per difficulty. Stored value, not a control. | 0 / 0 / 0 | app | Pitch Glider game-over screen | exists |
+| `pitchCatcher.choiceCount` | Note choices | Number of possible notes shown in Pitch Catcher. | 2 | app | Pitch Catcher controls | exists |
+| `pitchCatcher.autoAdvance` | Automatically get harder | Adds another note choice after a correct streak, up to four. | on | app | Pitch Catcher controls | exists |
+| `pitchCatcher.advanceStreak` | Catches to advance | Consecutive correct answers needed to add a choice. | 3 | app | internal Pitch Catcher progression | exists |
 | `groove.difficulty` | Echo difficulty | Controls remembered phrase length, density, and syncopation without displaying future hits. | Easy | app | Games › GROOVE Echo | exists |
 | `groove.mode` | GROOVE mode | Echo plays a phrase for a tempo-flexible answer; Free drums gives unscored visual input feedback. | Echo | app | GROOVE mode dropdown | exists |
 | `groove.inputMode` | Echo input | Play the two pads with touch/F/J, use gated microphone onset detection, or map two notes from an external MIDI drum/controller. | Pads + F/J | app | GROOVE input dropdown, pads and visual trails | exists |

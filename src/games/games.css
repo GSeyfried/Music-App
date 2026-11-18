@@ -76,6 +76,59 @@
   margin-top: var(--s-4);
 }
 
+/* ---- Pitch Catcher -------------------------------------------------------- */
+
+.pitch-catcher-ready,
+.pitch-catcher-prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-3);
+  text-align: center;
+}
+
+.pitch-catcher-orb {
+  display: grid;
+  place-items: center;
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  color: var(--accent-ink);
+  background: var(--accent);
+  font-size: 2.5rem;
+  box-shadow: 0 0 0 12px var(--surface-3);
+}
+
+.pitch-catcher-score { margin-left: auto; color: var(--text-dim); }
+.pitch-catcher-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: var(--s-3);
+  width: 100%;
+  margin: var(--s-5) 0;
+}
+
+.pitch-catcher-choice {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-3);
+  min-height: 110px;
+  border: 2px solid var(--border);
+  border-radius: var(--r-lg);
+  color: var(--text);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.pitch-catcher-choice strong { font-size: 1.8rem; }
+.pitch-catcher-choice:hover:not(:disabled) { border-color: var(--accent); }
+.pitch-catcher-choice:focus-visible { outline: none; box-shadow: var(--focus); }
+.pitch-catcher-choice.is-answer { border-color: var(--good); background: color-mix(in srgb, var(--good) 12%, var(--surface-2)); }
+.pitch-catcher-choice.is-missed { border-color: var(--danger); }
+.pitch-catcher-prompt .is-correct { color: var(--good); font-weight: 700; }
+.pitch-catcher-prompt .is-wrong { color: var(--danger); font-weight: 700; }
+
 /* ---- Range Finder ---------------------------------------------------------- */
 
 .range-finder .hint {
