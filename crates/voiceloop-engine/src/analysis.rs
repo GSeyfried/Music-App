@@ -25,8 +25,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use voiceloop_analysis::theory::{Chord, ChordQuality};
 use voiceloop_analysis::{
-    ChordAnalyzer, ChordConfig, ChordSmoother, NoteConfig, NoteEvent, NoteSegmenter, Onset, OnsetConfig,
-    OnsetDetector, PitchFrame, PitchTracker, TrackerConfig,
+    ChordAnalyzer, ChordConfig, ChordSmoother, NoteConfig, NoteEvent, NoteSegmenter, Onset, OnsetConfig, OnsetDetector,
+    PitchFrame, PitchTracker, TrackerConfig,
 };
 
 use crate::error::EngineError;
@@ -234,7 +234,8 @@ struct ChordSent {
     notes: [i32; CHORD_EVENT_NOTES],
 }
 
-const NOTHING_SENT: ChordSent = ChordSent { chord: None, confidence: 0.0, frame: 0, notes: [i32::MIN; CHORD_EVENT_NOTES] };
+const NOTHING_SENT: ChordSent =
+    ChordSent { chord: None, confidence: 0.0, frame: 0, notes: [i32::MIN; CHORD_EVENT_NOTES] };
 
 /// Live chords: a sliding block over the input, a [`ChordAnalyzer`] every
 /// `hop` samples, a [`ChordSmoother`], and change-driven events.
@@ -317,7 +318,8 @@ impl ChordStream {
         // more often than `refresh_seconds`, and only if something moved.
         let refresh = key(observed) == key(held)
             && self.position.saturating_sub(self.sent.frame) >= self.refresh_frames
-            && ((confidence - self.sent.confidence).abs() >= self.config.refresh_min_change || notes != self.sent.notes);
+            && ((confidence - self.sent.confidence).abs() >= self.config.refresh_min_change
+                || notes != self.sent.notes);
         if !(changed || refresh) {
             return;
         }
@@ -677,10 +679,7 @@ mod tests {
                 withdrawn.push(c);
             }
         });
-        assert!(
-            matches!(withdrawn.as_slice(), [ChordEvent { frame: 500_000, chord: None, .. }]),
-            "{withdrawn:?}"
-        );
+        assert!(matches!(withdrawn.as_slice(), [ChordEvent { frame: 500_000, chord: None, .. }]), "{withdrawn:?}");
         // After a reset the block refills from the new clock before anything is reported.
         let events = chord_events(&mut analyzer, &chord_tone(&[60.0, 64.0, 67.0], SR as usize));
         assert!(events[0].frame >= 500_000 + 8_192, "{}", events[0].frame);

@@ -34,12 +34,29 @@ pub const PRACTICE_DIR: &str = "practice";
 pub type Samples = Arc<[f32]>;
 
 /// Audio for one track, index-aligned with `ProjectDoc::tracks`.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct TrackAudio {
     pub layers: Vec<Samples>,
     pub redo: Vec<Samples>,
     pub layer_offsets: Vec<i64>,
     pub redo_offsets: Vec<i64>,
+}
+
+impl PartialEq for TrackAudio {
+    fn eq(&self, other: &Self) -> bool {
+        self.layers == other.layers
+            && self.redo == other.redo
+            && offsets_equal(&self.layer_offsets, &other.layer_offsets, self.layers.len())
+            && offsets_equal(&self.redo_offsets, &other.redo_offsets, self.redo.len())
+    }
+}
+
+/// Older callers omit zero-valued nudge arrays, while loaded packages contain
+/// one explicit offset per layer. Those are the same audio state.
+fn offsets_equal(left: &[i64], right: &[i64], layer_count: usize) -> bool {
+    (0..layer_count).all(|index| left.get(index).copied().unwrap_or(0) == right.get(index).copied().unwrap_or(0))
+        && left.get(layer_count..).unwrap_or_default().iter().all(|offset| *offset == 0)
+        && right.get(layer_count..).unwrap_or_default().iter().all(|offset| *offset == 0)
 }
 
 /// Progress callback: fraction 0..=1.
@@ -373,11 +390,23 @@ mod tests {
             TrackAudio {
                 layers: vec![layer(4_800, 0.0), layer(4_800, 1.0)],
                 redo: vec![layer(4_800, 2.0)],
-                ..TrackAudio::default()
+                layer_offsets: vec![120, -30],
+                redo_offsets: vec![45],
             },
             TrackAudio { layers: vec![layer(4_800, 3.0)], ..TrackAudio::default() },
         ];
         (d, audio)
+    }
+
+    #[test]
+    fn missing_offsets_equal_explicit_zero_offsets() {
+        let samples = vec![layer(16, 0.0)];
+        let missing = TrackAudio { layers: samples.clone(), ..TrackAudio::default() };
+        let explicit = TrackAudio { layers: samples.clone(), layer_offsets: vec![0], ..TrackAudio::default() };
+        let nudged = TrackAudio { layers: samples, layer_offsets: vec![1], ..TrackAudio::default() };
+
+        assert_eq!(missing, explicit);
+        assert_ne!(missing, nudged);
     }
 
     fn files(dir: &Path) -> Vec<String> {

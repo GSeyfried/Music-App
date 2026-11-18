@@ -30,7 +30,9 @@ use crate::hardware::{
     self, AudioDiagnostics, CalibrationOutcome, DevicesChanged, Hardware, HardwareAction, SessionAction,
 };
 use crate::looper::io::{LooperPlayback, OutputInfo};
-use crate::looper::{LayerSummary, LayerTiming, LooperCommand, LooperConfig, LooperNotice, LooperSnapshot, LooperState};
+use crate::looper::{
+    LayerSummary, LayerTiming, LooperCommand, LooperConfig, LooperNotice, LooperSnapshot, LooperState,
+};
 use crate::meter::{amplitude_to_db, MeterFrame};
 use crate::midi_in::{MidiBatch, MidiPortInfo};
 use crate::model::AudioDevice;

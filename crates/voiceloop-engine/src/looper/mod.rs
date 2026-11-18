@@ -35,8 +35,8 @@ use crate::transport::{MusicalPosition, TransportState};
 pub use click::Accent;
 pub use pool::{LayerRecycler, StorageSink};
 pub use processor::{
-    soft_limit, LayerSummary, LayerTiming, TimingHit, LooperCommand, LooperCore, LooperHandles, LooperNotice,
-    LooperSnapshot, RejectReason, RunState, TrackSnapshot, TrackState, LIMIT_KNEE, MAX_TRANSPORT_FRAME,
+    soft_limit, LayerSummary, LayerTiming, LooperCommand, LooperCore, LooperHandles, LooperNotice, LooperSnapshot,
+    RejectReason, RunState, TimingHit, TrackSnapshot, TrackState, LIMIT_KNEE, MAX_TRANSPORT_FRAME,
 };
 
 /// Hard upper bound on tracks (snapshot and plan arrays are sized by this).
@@ -197,8 +197,7 @@ impl LooperConfig {
             || self.timing.minimum_spacing_ms > 10_000
             || self.timing.max_hits == 0
             || self.timing.max_hits > MAX_TIMING_HITS
-            || !(self.timing.whole_beat_tolerance_frames.is_finite()
-                && self.timing.whole_beat_tolerance_frames >= 0.0)
+            || !(self.timing.whole_beat_tolerance_frames.is_finite() && self.timing.whole_beat_tolerance_frames >= 0.0)
         {
             return Err(EngineError::Invalid("invalid layer timing analysis configuration".into()));
         }

@@ -1804,10 +1804,7 @@ mod tests {
     fn rate_conversion_scales_the_loop_period() {
         let mut doc = ProjectDoc::new("x", 48_000, 1);
         doc.loop_ = Some(LoopDoc { period_frames: 48_000.0, extra: Default::default() });
-        let mut audio = vec![TrackAudio {
-            layers: vec![Arc::from(vec![0.1f32; 48_000])],
-            ..TrackAudio::default()
-        }];
+        let mut audio = vec![TrackAudio { layers: vec![Arc::from(vec![0.1f32; 48_000])], ..TrackAudio::default() }];
         let p = convert_rate(&doc, &mut audio, 44_100).unwrap();
         assert_eq!(p, 44_100.0);
         assert_eq!(audio[0].layers[0].len(), 44_100);

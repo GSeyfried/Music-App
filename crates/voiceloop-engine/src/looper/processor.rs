@@ -32,7 +32,10 @@ use super::transfer::{
     Chunk, Inventory, JobKind, LayerJob, LayerSlot, ParkedLooper, ParkedTrack, RestorePlan, TrackPlan, CHUNK_FRAMES,
     JOBS_PER_BLOCK, JOB_CAPACITY,
 };
-use super::{LayerTimingConfig, LooperConfig, LAYER_SUMMARY_BINS, MAX_LAYERS_PER_TRACK, MAX_POOL_LAYERS, MAX_TIMING_HITS, MAX_TRACKS};
+use super::{
+    LayerTimingConfig, LooperConfig, LAYER_SUMMARY_BINS, MAX_LAYERS_PER_TRACK, MAX_POOL_LAYERS, MAX_TIMING_HITS,
+    MAX_TRACKS,
+};
 use crate::error::EngineError;
 use crate::model::LoopMode;
 use crate::transport::{
@@ -836,11 +839,8 @@ impl LooperCore {
             tr.rec = None;
             tr.playing = true;
             if let Some(summary) = tr.summaries.last_mut() {
-                *summary = SummaryState::Scanning {
-                    cursor: 0,
-                    bins: [0.0; LAYER_SUMMARY_BINS],
-                    timing: TimingScan::EMPTY,
-                };
+                *summary =
+                    SummaryState::Scanning { cursor: 0, bins: [0.0; LAYER_SUMMARY_BINS], timing: TimingScan::EMPTY };
             }
         }
     }
@@ -865,8 +865,7 @@ impl LooperCore {
         let timing_enabled = beats > 0
             && (master.period - beats as f64 * beat_frames).abs() <= self.timing_config.whole_beat_tolerance_frames;
         let window_frames = self.timing_config.window_frames;
-        let spacing_frames =
-            (self.timing_config.minimum_spacing_ms as u64 * self.sample_rate as u64 / 1_000) as i64;
+        let spacing_frames = (self.timing_config.minimum_spacing_ms as u64 * self.sample_rate as u64 / 1_000) as i64;
         let max_hits = self.timing_config.max_hits.min(MAX_TIMING_HITS);
 
         let mut budget = CHUNK_FRAMES;
