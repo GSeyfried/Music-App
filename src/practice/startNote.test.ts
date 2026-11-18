@@ -33,3 +33,15 @@ describe("preview instrument helpers", () => {
     expect(midiToHz(57)).toBe(220);
   });
 });
+
+import { describeWrongNote } from "./text";
+
+describe("wrong-note wording", () => {
+  it("shows the raw notes when octave matters", () => {
+    expect(describeWrongNote(61, 48)).toBe("expected C♯4, sang C3");
+  });
+  it("explains a near miss in another octave when octave is ignored", () => {
+    expect(describeWrongNote(61, 48, true)).toBe("expected C♯4, sang C (a semitone flat, in another octave)");
+    expect(describeWrongNote(64, 67, true)).toBe("expected E4, sang G (3 semitones sharp)");
+  });
+});

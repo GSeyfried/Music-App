@@ -74,7 +74,24 @@ export interface Phrase {
 }
 
 /** One feedback item as a short title and one explanatory sentence. */
-export function phraseFeedback(f: Feedback, name: NoteNamer): Phrase {
+/**
+ * "expected C♯4, sang C3". With octave ignored, the sung note is described
+ * relative to the target's octave so a near-miss isn't mistaken for an octave
+ * error: "expected C♯4, sang C (a semitone flat, in another octave)".
+ */
+export function describeWrongNote(targetMidi: number, sungMidi: number, octaveInvariant = false): string {
+  if (!octaveInvariant) return `expected ${noteLabel(targetMidi)}, sang ${noteLabel(sungMidi)}`;
+  const diff = sungMidi - targetMidi;
+  const folded = Math.round(((((diff + 6) % 12) + 12) % 12) - 6);
+  const sungName = noteLabel(sungMidi).replace(/-?\d+$/, "");
+  const steps = Math.abs(folded);
+  const size = steps === 1 ? "a semitone" : `${steps} semitones`;
+  const way = folded < 0 ? "flat" : "sharp";
+  const otherOctave = Math.abs(Math.round(diff - folded)) >= 12 ? ", in another octave" : "";
+  return `expected ${noteLabel(targetMidi)}, sang ${sungName} (${size} ${way}${otherOctave})`;
+}
+
+export function phraseFeedback(f: Feedback, name: NoteNamer, opts: { octaveInvariant?: boolean } = {}): Phrase {
   const p = (tone: Tone, title: string, detail: string): Phrase => ({ code: f.code, tone, title, detail });
   switch (f.code) {
     case "noNotesDetected":
@@ -101,7 +118,7 @@ export function phraseFeedback(f: Feedback, name: NoteNamer): Phrase {
       return p(
         "work",
         f.notes.length === 1 ? "A wrong note" : "Wrong notes",
-        `${listing(f.notes.map((n) => `expected ${noteLabel(n.targetMidi)}, sang ${noteLabel(n.sungMidi)}`))}.`.replace(/^e/, "E"),
+        `${listing(f.notes.map((n) => describeWrongNote(n.targetMidi, n.sungMidi, opts.octaveInvariant)))}.`.replace(/^e/, "E"),
       );
     case "missedNotes":
       return p(

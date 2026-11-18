@@ -706,7 +706,7 @@ function ResultView({ ready }: { ready: boolean }) {
   if (!result || !detail) return null;
   const rep = result.report;
   const name = namerFor(detail.take.notes);
-  const phrases = rep.feedback.map((f) => phraseFeedback(f, name));
+  const phrases = rep.feedback.map((f) => phraseFeedback(f, name, { octaveInvariant: rep.config.octaveInvariant }));
   const work = phrases.filter((p) => p.tone === "work");
   const other = phrases.filter((p) => p.tone !== "work");
   const c = rep.counts;
