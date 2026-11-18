@@ -18,6 +18,8 @@ function newQuestion(): PitchQuestion {
     getAppSetting("voice.rangeHighMidi"),
     getAppSetting("pitchCatcher.choiceCount"),
     Array.from({ length: 64 }, () => Math.random()),
+    getAppSetting("pitchCatcher.notePitchClasses"),
+    getAppSetting("pitchCatcher.octaves") === "range",
   );
 }
 
@@ -136,6 +138,8 @@ export function PitchCatcher() {
           <Setting id="pitchCatcher.choiceCount" />
           <Setting id="pitchCatcher.autoAdvance" />
           <Setting id="pitchCatcher.fallSeconds" />
+          <Setting id="pitchCatcher.octaves" />
+          <Setting id="pitchCatcher.notePitchClasses" />
         </div>
       )}
     </section>

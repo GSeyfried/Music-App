@@ -19,4 +19,17 @@ describe("Pitch Catcher", () => {
     expect(nextChoiceCount(4, 20, true, 3)).toBe(4);
     expect(nextChoiceCount(2, 20, false, 3)).toBe(2);
   });
+
+  it("uses only selected note names", () => {
+    const question = makePitchQuestion(48, 72, 4, [0.2, 0.4, 0.8], [0, 4, 7], true);
+    expect(question.choices).toHaveLength(4);
+    expect(question.choices.every((midi) => [0, 4, 7].includes(midi % 12))).toBe(true);
+  });
+
+  it("can keep a round in one octave or mix different octaves", () => {
+    const oneOctave = makePitchQuestion(48, 72, 4, [0.2, 0.4, 0.8], [0, 2, 4, 5, 7], false);
+    expect(new Set(oneOctave.choices.map((midi) => Math.floor(midi / 12))).size).toBe(1);
+    const mixed = makePitchQuestion(48, 72, 3, [0.2, 0.4, 0.8], [0], true);
+    expect(new Set(mixed.choices.map((midi) => Math.floor(midi / 12))).size).toBeGreaterThan(1);
+  });
 });

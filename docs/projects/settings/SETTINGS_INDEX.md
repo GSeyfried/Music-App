@@ -126,6 +126,8 @@ tuning; only the first few are likely user-facing.
 | `pitchCatcher.autoAdvance` | Automatically get harder | Adds another note choice after a correct streak, up to four. | on | app | Pitch Catcher controls | exists |
 | `pitchCatcher.advanceStreak` | Catches to advance | Consecutive correct answers needed to add a choice. | 3 | app | internal Pitch Catcher progression | exists |
 | `pitchCatcher.fallSeconds` | Fall time | Seconds colored choices take to reach the catch line; they wait there rather than failing. | 6 s | app | Pitch Catcher controls | exists |
+| `pitchCatcher.notePitchClasses` | Notes to include | Colored pitch classes allowed as heard targets and falling choices; at least two remain selected. | all 12 | app | Pitch Catcher note picker | exists |
+| `pitchCatcher.octaves` | Octaves | Keep each round in one octave or allow different octaves across the saved voice range. | One octave per round | app | Pitch Catcher controls | exists |
 | `groove.difficulty` | Echo difficulty | Controls remembered phrase length, density, and syncopation without displaying future hits. | Easy | app | Games › GROOVE Echo | exists |
 | `groove.mode` | GROOVE mode | Echo plays a phrase for a tempo-flexible answer; Free drums gives unscored visual input feedback. | Echo | app | GROOVE mode dropdown | exists |
 | `groove.inputMode` | Echo input | Play the two pads with touch/F/J, use gated microphone onset detection, or map two notes from an external MIDI drum/controller. | Pads + F/J | app | GROOVE input dropdown, pads and visual trails | exists |

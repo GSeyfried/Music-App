@@ -49,6 +49,10 @@ describe("Games workspace", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Games" }));
     fireEvent.click(screen.getByRole("button", { name: /Pitch Catcher/ }));
     expect(await screen.findByRole("heading", { name: "Pitch Catcher" })).toBeTruthy();
+    const notePicker = screen.getByRole("group", { name: "Notes to include" });
+    expect(notePicker.querySelectorAll("button[aria-pressed=true]")).toHaveLength(12);
+    fireEvent.click(screen.getByRole("button", { name: "C♯" }));
+    expect(getAppSetting("pitchCatcher.notePitchClasses")).not.toContain(1);
     fireEvent.click(screen.getByRole("button", { name: "Start catching" }));
     const choices = screen.getByRole("group", { name: "Pitch choices" });
     expect(choices.querySelectorAll("button")).toHaveLength(2);

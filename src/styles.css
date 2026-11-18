@@ -2300,6 +2300,32 @@ input[type="range"] {
   border: 0;
   background: none;
 }
+.pitch-class-picker {
+  min-width: min(100%, 430px);
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+.pitch-class-picker legend { margin-bottom: 0.4rem; }
+.pitch-class-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(2.75rem, 1fr));
+  gap: 0.35rem;
+}
+.pitch-class-picker button {
+  min-height: var(--hit);
+  border: 2px solid var(--pitch-class-color);
+  border-radius: var(--r-sm);
+  color: var(--text-dim);
+  background: var(--surface-2);
+}
+.pitch-class-picker button[aria-pressed="true"] {
+  color: var(--text);
+  background: color-mix(in srgb, var(--pitch-class-color) 35%, var(--surface-2));
+  box-shadow: inset 0 0 0 1px var(--pitch-class-color);
+}
+.pitch-class-picker button:focus-visible { outline: none; box-shadow: var(--focus); }
+.pitch-class-picker button:disabled { cursor: not-allowed; opacity: 0.7; }
 
 /* Per-layer loudness rings (view.loopRingLayers) and the playing slice */
 .ring-layer {

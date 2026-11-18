@@ -27,6 +27,7 @@ export type GameSpeed = "slow" | "normal" | "fast";
 export type GrooveDifficulty = "easy" | "medium" | "hard";
 export type GrooveInputMode = "pads" | "microphone" | "midi";
 export type GrooveMode = "echo" | "freePlay";
+export type PitchCatcherOctaves = "single" | "range";
 
 export const GROOVE_MODE_OPTIONS: { value: GrooveMode; label: string }[] = [
   { value: "echo", label: "Echo" },
@@ -152,6 +153,9 @@ export interface AppSettings {
   /** Consecutive correct answers needed before another choice is added. */
   "pitchCatcher.advanceStreak": number;
   "pitchCatcher.fallSeconds": number;
+  /** Allowed pitch classes, C = 0. */
+  "pitchCatcher.notePitchClasses": number[];
+  "pitchCatcher.octaves": PitchCatcherOctaves;
   "groove.difficulty": GrooveDifficulty;
   "groove.mode": GrooveMode;
   "groove.inputMode": GrooveInputMode;
@@ -231,6 +235,8 @@ export const APP_DEFAULTS: AppSettings = {
   "pitchCatcher.autoAdvance": true,
   "pitchCatcher.advanceStreak": 3,
   "pitchCatcher.fallSeconds": 6,
+  "pitchCatcher.notePitchClasses": Array.from({ length: 12 }, (_, index) => index),
+  "pitchCatcher.octaves": "single",
   "groove.difficulty": "easy",
   "groove.mode": "echo",
   "groove.inputMode": "pads",
@@ -263,6 +269,7 @@ export type SettingDef =
   | (Base & { id: AppSettingId; source: "app"; kind: "bool" })
   | (Base & { id: AppSettingId; source: "app"; kind: "choice"; options: Choice[] })
   | (Base & { id: AppSettingId; source: "app"; kind: "number"; min: number; max: number; step: number; editable?: boolean })
+  | (Base & { id: AppSettingId; source: "app"; kind: "pitchClasses"; minSelected: number })
   | (Base & { id: AppSettingId; source: "app"; kind: "colors" })
   | (Base & { id: `transport.${string}`; source: "transport"; key: keyof TransportState; kind: "choice"; options: Choice[] });
 
@@ -885,6 +892,31 @@ export const SETTINGS: SettingDef[] = [
     category: "Pitch Catcher",
     tier: "daily",
     scope: "app",
+  },
+  {
+    id: "pitchCatcher.notePitchClasses",
+    source: "app",
+    kind: "pitchClasses",
+    minSelected: 2,
+    label: "Notes to include",
+    description: "Choose which colored note names may be heard or fall. Keep at least two selected.",
+    category: "Pitch Catcher",
+    tier: "daily",
+    scope: "app",
+  },
+  {
+    id: "pitchCatcher.octaves",
+    source: "app",
+    kind: "choice",
+    label: "Octaves",
+    description: "Keep each round inside one octave or allow choices from different octaves across your saved voice range.",
+    category: "Pitch Catcher",
+    tier: "daily",
+    scope: "app",
+    options: [
+      { value: "single", label: "One octave per round" },
+      { value: "range", label: "Different octaves" },
+    ],
   },
   {
     id: "groove.difficulty",

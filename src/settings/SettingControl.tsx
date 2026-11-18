@@ -1,15 +1,17 @@
 // Renders any registry setting with the shared controls, reading and writing
 // its value from whichever source owns it.
 
+import type { CSSProperties } from "react";
 import { useEngineActions, useEngineState } from "../engine/EngineContext";
 import type { TransportState } from "../models/domain";
 import { Segmented, Stepper } from "../components/ui/controls";
 import { setAppSetting, useAppSetting } from "./appSettings";
-import { NOTE_NAMES } from "./noteColors";
+import { NOTE_NAMES, noteColor } from "./noteColors";
 import type { AppSettingId, AppSettings, SettingDef } from "./registry";
 
 function AppControl({ def }: { def: Extract<SettingDef, { source: "app" }> }) {
   const value = useAppSetting(def.id as AppSettingId) as AppSettings[AppSettingId];
+  const noteColors = useAppSetting("notes.colorMap");
   const set = (v: unknown) => setAppSetting(def.id, v as never);
   switch (def.kind) {
     case "bool":
@@ -43,6 +45,31 @@ function AppControl({ def }: { def: Extract<SettingDef, { source: "app" }> }) {
           onChange={set}
         />
       );
+    case "pitchClasses": {
+      const selected = value as number[];
+      return (
+        <fieldset className="pitch-class-picker">
+          <legend className="stepper-label" title={def.description}>{def.label}</legend>
+          <div className="pitch-class-picker-grid">
+            {NOTE_NAMES.map((name, pitchClass) => {
+              const on = selected.includes(pitchClass);
+              return (
+                <button
+                  key={name}
+                  type="button"
+                  aria-pressed={on}
+                  disabled={on && selected.length <= def.minSelected}
+                  style={{ "--pitch-class-color": noteColor(noteColors, pitchClass) } as CSSProperties}
+                  onClick={() => set(on ? selected.filter((value) => value !== pitchClass) : [...selected, pitchClass].sort((a, b) => a - b))}
+                >
+                  {name}
+                </button>
+              );
+            })}
+          </div>
+        </fieldset>
+      );
+    }
     case "colors": {
       const colors = value as string[];
       return (

@@ -7,6 +7,9 @@ pitch, then catch its matching colored note while two, three, or four choices
 fall from the sky. The notes wait at the catch line instead of failing a slow
 answer. It supports 1–4 keyboard choices and replay, reveals both the caught
 and correct pitch colors, and can add a choice after three correct catches.
+The colored note picker controls which pitch classes can appear. Octave mode
+either keeps every choice in one octave for that round or allows different
+octaves across the saved voice range.
 
 Status: Games tab built (merged 1d34530). Pitch Glider and the Range Finder
 were tested with the simulated engine only; the user is now playing them on
