@@ -125,6 +125,13 @@ tuning; only the first few are likely user-facing.
 | `view.playheadEmphasis` | Playhead highlight | Brighten and enlarge the part of the loop being played. | on | app | Track card ring | exists |
 | `view.timingReadout` | Timing readout | After each take, show how far your hits landed from the beat. | on | app | Track card | proposed |
 | `notation.gridSubdivision` | Notation grid | How finely sung timing is rounded for the staff: steps per beat. 4 rounds to sixteenth notes in 4/4; 2 to eighths (cleaner but less exact). | 4 | app | Staff view | exists |
+| `notation.meter` | Time signature | Time signature for the staff. Automatic uses the take's beat grid when it has one; otherwise it guesses 4/4, 3/4 or 6/8 from where the long notes fall. | Automatic | app | Staff view | exists |
+| `notation.keySignature` | Key signature | Key signature for the staff. Automatic estimates the key from the notes and spells sharps or flats to match. | Automatic | app | Staff view | exists |
+| `notation.clef` | Clef | Clef for the staff. Automatic picks the one that needs the fewest ledger lines; tenor-range voices get the treble clef with an 8 below. | Automatic | app | Staff view | exists |
+| `notation.colorNotes` | Colored staff notes | Color notes on the staff with the note colors, shaded by accuracy. Off shows plain black-and-white notation. | off | app | Staff view | exists |
+| `notation.minNote` | Shortest staff note | Sung notes shorter than this are treated as pitch wobble and merged into the note next to them. | 32nd | app | Staff view | exists |
+| `notation.minRest` | Shortest staff rest | Gaps between sung notes shorter than this are held over by the earlier note instead of showing as rests. | Eighth | app | Staff view | exists |
+| `notation.scale` | Staff size | How large staff notation is drawn. | 1.25 | app | Staff view | exists |
 
 ## Looper limits (exists: `LooperConfig`, engine; set via `set_looper_config`, applied at next audio start)
 
