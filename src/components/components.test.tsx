@@ -32,9 +32,12 @@ describe("App with the simulated engine", () => {
   it("explains which input drives the first-run workspace", async () => {
     mockApp();
     expect(await screen.findByRole("heading", { name: "Choose an input to get started" })).toBeTruthy();
-    const input = screen.getByRole("combobox");
+    const input = screen.getByRole("combobox", { name: /Input device/ });
     expect(input.getAttribute("aria-describedby")).toBe("input-device-hint");
     expect(screen.getByText("This is the input used by the looper and tuner.")).toBeTruthy();
+    // The output is chosen beside the input, before starting.
+    const output = screen.getByRole("combobox", { name: /Output device/ });
+    expect(output.getAttribute("aria-describedby")).toBe("output-device-hint");
   });
 
   it("warns that speaker click can be recorded into overdubs", async () => {

@@ -6,6 +6,7 @@ import type { TransportState } from "../models/domain";
 import { engine as defaultEngine } from "./bridge";
 import type { EngineClient } from "./client";
 import {
+  DEFAULT_AUDIO_CONFIG,
   toEngineError,
   type AnalysisConfig,
   type AudioConfig,
@@ -20,6 +21,8 @@ import { EngineStore, mergeConfig, type EngineSnapshot, type LiveData } from "./
 export interface EngineActions {
   refreshDevices(): Promise<void>;
   selectDevice(id: string | null): void;
+  /** Output to use at the next start (null = system default). */
+  selectOutput(id: string | null): void;
   startInput(): Promise<void>;
   stopInput(): Promise<void>;
   /** Fire-and-forget looper command; results arrive as looper state / notices. */
@@ -96,10 +99,21 @@ export function createActions(client: EngineClient, store: EngineStore): EngineA
         store.set({ devices, selectedDeviceId });
       }),
     selectDevice: (id) => store.set({ selectedDeviceId: id }),
+    selectOutput: (id) => store.set({ selectedOutputId: id }),
     startInput: () =>
       run(async () => {
         store.clearErrors();
-        store.applyStatus(await client.startInput(store.getSnapshot().selectedDeviceId));
+        const s = store.getSnapshot();
+        const saved = s.audioSettings?.audio ?? s.status.audioConfig ?? DEFAULT_AUDIO_CONFIG;
+        if (s.selectedOutputId !== undefined && s.selectedOutputId !== (saved.outputDevice ?? null)) {
+          // A different output was picked next to the input: start both explicitly.
+          store.applyStatus(
+            await client.startAudio({ ...saved, inputDevice: s.selectedDeviceId, outputDevice: s.selectedOutputId }),
+          );
+          await refreshSettings();
+        } else {
+          store.applyStatus(await client.startInput(s.selectedDeviceId));
+        }
       }),
     stopInput: () => run(async () => store.applyStatus(await client.stopInput())),
     sendLooper,

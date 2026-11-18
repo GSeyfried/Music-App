@@ -55,6 +55,44 @@ export function DeviceSelect() {
   );
 }
 
+/** Output picker shown beside the input picker; applies at the next start. */
+export function OutputDeviceSelect() {
+  const list = useEngineState((s) => s.deviceList);
+  const picked = useEngineState((s) => s.selectedOutputId);
+  const saved = useEngineState((s) => s.audioSettings?.audio.outputDevice ?? s.status.audioConfig?.outputDevice ?? null);
+  const capturing = useEngineState((s) => s.status.capturing);
+  const busy = useEngineState((s) => s.busy);
+  const actions = useEngineActions();
+  useEffect(() => {
+    if (!list) void actions.loadHardware();
+  }, [list, actions]);
+  const outputs = list?.outputs ?? [];
+  const value = picked === undefined ? saved : picked;
+  return (
+    <div className="device-row">
+      <label className="field grow">
+        <span className="stepper-label">Output device</span>
+        <select
+          aria-describedby="output-device-hint"
+          value={value ?? ""}
+          disabled={capturing || busy || !list}
+          onChange={(e) => actions.selectOutput(e.currentTarget.value || null)}
+        >
+          <option value="">System default</option>
+          {outputs.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name}
+            </option>
+          ))}
+        </select>
+        <span id="output-device-hint" className="device-hint">
+          Loops, the metronome and monitoring play here. A headset can be both input and output.
+        </span>
+      </label>
+    </div>
+  );
+}
+
 export function StartStopInput({ size = "md" }: { size?: "md" | "lg" }) {
   const capturing = useEngineState((s) => s.status.capturing);
   const busy = useEngineState((s) => s.busy);
@@ -93,6 +131,7 @@ export function StartCard({ purpose }: { purpose: string }) {
       {kind === "mock" && <p className="sim-note">Simulated engine: a scripted singer stands in for your microphone.</p>}
       <div className="start-controls">
         <DeviceSelect />
+        <OutputDeviceSelect />
         <StartStopInput size="lg" />
       </div>
     </section>
@@ -137,6 +176,7 @@ export function InputOffBar() {
       </div>
       <div className="input-off-controls">
         <DeviceSelect />
+        <OutputDeviceSelect />
         <StartStopInput />
       </div>
     </section>

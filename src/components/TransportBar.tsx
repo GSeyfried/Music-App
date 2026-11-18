@@ -8,6 +8,7 @@ import type { LooperState } from "../engine/protocol";
 import { pauseCommand, playStopCommand, transportControls } from "../lib/looperControls";
 import { shortcutKeys } from "../lib/shortcuts";
 import { setAttr, setText, useFrame } from "../lib/useFrame";
+import { AdvancedOptions } from "../settings/AdvancedOptions";
 import { Icon } from "./ui/Icon";
 import { Button, ConfirmButton, HelpTip, Segmented, Stepper } from "./ui/controls";
 
@@ -201,17 +202,7 @@ export function TransportBar() {
             onChange={(loopFit) => patchTransport({ loopFit })}
           />
         )}
-        <Segmented
-          label="Overdub start"
-          help="When an overdub begins after you press Overdub. Loop start waits for the loop's 0 and counts down on the track; Next bar waits for the next bar line; Now starts at once (in Metronome mode, at the next bar)."
-          value={tr.overdubStart}
-          options={[
-            { value: "loopStart", label: "Loop start" },
-            { value: "nextBar", label: "Next bar" },
-            { value: "immediate", label: "Now" },
-          ]}
-          onChange={(overdubStart) => patchTransport({ overdubStart })}
-        />
+        <AdvancedOptions categories={["Looper", "Loop display"]} />
         <Stepper
           label="Click subdivision"
           help="Clicks inside each beat: 1 is the beat, 2 divides it in half, and 3 gives triplets."

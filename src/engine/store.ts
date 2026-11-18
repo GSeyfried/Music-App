@@ -140,6 +140,11 @@ export interface EngineSnapshot {
   transportKind: TransportKind;
   devices: AudioDevice[];
   selectedDeviceId: string | null;
+  /**
+   * Output chosen next to the input picker before starting. `undefined` keeps
+   * the saved output; `null` is the system default.
+   */
+  selectedOutputId?: string | null;
   status: EngineStatus;
   busy: boolean;
   looper: LooperView | null;

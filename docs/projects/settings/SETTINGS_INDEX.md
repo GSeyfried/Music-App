@@ -62,7 +62,7 @@ Scopes: app / project / track / session.
 | `practice.preRollMs` | Pre-roll | Audio kept from just before you press record. | 250 ms | app | (none) | exists |
 | `practice.latencyOverrideMs` | Latency override | Overrides the measured latency for practice scoring only. | None | app | (none) | exists |
 | `practice.stopStudioOnEnter` | Stop Studio in Practice | Stop loop playback when you open Practice Lab. | on | app | Workspace tabs | proposed |
-| `practice.notationView` | Note display | Show takes as a piano roll, a staff, or both. | Piano roll | app | Practice result view | proposed |
+| `notation.view` | Note display | Show takes as a piano roll, a staff, or both. | Piano roll | app | Practice result view | proposed |
 
 ## Visuals and theme (proposed; see [visualization](../visualization/README.md))
 
@@ -73,6 +73,7 @@ Scopes: app / project / track / session.
 | `theme.pitchReactiveStrength` | Reactive color strength | How strongly pitch-reactive colors tint the app. | PENDING | app | App accents | proposed |
 | `notes.colorMap` | Note colors | The color for each of the 12 note names. | PENDING: default palette | app | Pitch curve, piano roll, staff, loop rings, tuner | proposed |
 | `notes.accuracyEncoding` | Accuracy shading | How accuracy and stability show on note colors: brightness, saturation or opacity. | PENDING | app | Same as note colors | proposed |
-| `view.loopRingHistogram` | Loop waveform ring | Show each loop layer's loudness around the loop circle. | on | app | Track card ring | proposed |
+| `view.loopRingLayers` | Layer rings | Show each loop layer's loudness as its own ring around the track circle. | on | app | Track card ring | proposed |
 | `view.loopRingTicks` | Beat and bar ticks | Show beat and bar marks around the loop circle. | on | app | Track card ring | proposed |
 | `view.playheadEmphasis` | Playhead highlight | Brighten and enlarge the part of the loop being played. | on | app | Track card ring | proposed |
+| `view.timingReadout` | Timing readout | After each take, show how far your hits landed from the beat. | on | app | Track card | proposed |

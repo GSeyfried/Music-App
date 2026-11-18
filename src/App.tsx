@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { onAppMenu } from "./engine/bridge";
 import { Alerts, EngineModeBanner, MicPermissionBanner, Toasts } from "./components/Alerts";
 import { MidiIndicator } from "./components/HardwarePanels";
 import { InputCluster } from "./components/InputControls";
@@ -39,6 +40,8 @@ function Shell() {
   const projectName = project?.name || "Untitled";
   const projectLabel = project?.unsavedChanges ? `${projectName} · Unsaved` : projectName;
   useLiveShortcuts();
+  const { setOverlay } = ui;
+  useEffect(() => onAppMenu((id) => id === "settings" && setOverlay("settings")), [setOverlay]);
   return (
     <div className="app">
       <header className="topbar">

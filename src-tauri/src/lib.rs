@@ -272,9 +272,32 @@ fn practice_import_library(
     engine.practice_import_library(library, replace)
 }
 
+/// Menu actions forwarded to the frontend as `app://menu` with the item id.
+pub const MENU_EVENT: &str = "app://menu";
+const MENU_SETTINGS: &str = "settings";
+
+/// The platform default menu plus "Settings…" (⌘,) in the app menu.
+#[cfg(desktop)]
+fn app_menu<R: tauri::Runtime>(handle: &tauri::AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    let menu = Menu::default(handle)?;
+    let settings = MenuItem::with_id(handle, MENU_SETTINGS, "Settings…", true, Some("CmdOrCtrl+,"))?;
+    if let Some(app_sub) = menu.items()?.first().and_then(|i| i.as_submenu().cloned()) {
+        app_sub.insert_items(&[&PredefinedMenuItem::separator(handle)?, &settings], 1)?;
+    }
+    Ok(menu)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let builder = builder.menu(app_menu).on_menu_event(|app, event| {
+        if event.id().as_ref() == MENU_SETTINGS {
+            let _ = app.emit(MENU_EVENT, MENU_SETTINGS);
+        }
+    });
+    let app = builder
         // Open/save pickers for projects and exports; paths are passed to `project_command`.
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {

@@ -2089,3 +2089,59 @@ input[type="range"] {
 .toast-info {
   border-left-color: var(--info);
 }
+
+/* ---- Settings: advanced pop-up and note colors (src/settings) ---- */
+.advanced {
+  position: relative;
+}
+.advanced-popover {
+  position: absolute;
+  z-index: 40;
+  right: 0;
+  top: calc(100% + 6px);
+  width: min(22rem, 90vw);
+  max-height: 70vh;
+  overflow: auto;
+  padding: 0.75rem 0.9rem;
+  display: grid;
+  gap: 0.75rem;
+  background: var(--surface-2, #1c2128);
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.advanced-popover section {
+  display: grid;
+  gap: 0.6rem;
+}
+.advanced-popover h4 {
+  margin: 0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.7;
+}
+.note-colors {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(3.25rem, 1fr));
+  gap: 0.4rem;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.note-colors legend {
+  margin-bottom: 0.4rem;
+}
+.note-color {
+  display: grid;
+  justify-items: center;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+}
+.note-color input {
+  width: 2.25rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 0;
+  background: none;
+}

@@ -158,6 +158,8 @@ function TunerSettings() {
   );
 }
 
+import { PreferencesSections } from "../settings/AdvancedOptions";
+
 export function SettingsSheet() {
   const { overlay, setOverlay } = useUi();
   const { loadHardware } = useEngineActions();
@@ -196,6 +198,7 @@ export function SettingsSheet() {
         <h3>Tuner</h3>
         <TunerSettings />
       </section>
+      <PreferencesSections />
       <section className="sheet-section">
         <h3>Diagnostics</h3>
         <Diagnostics />

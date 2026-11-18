@@ -81,6 +81,13 @@ export async function continueNativeClose(): Promise<void> {
   await getCurrentWindow().close();
 }
 
+/** Native menu bar actions (e.g. "settings" from VoiceLoop › Settings…). No-op outside Tauri. */
+export function onAppMenu(handler: (id: string) => void): () => void {
+  if (!isTauri()) return () => {};
+  const off = listen<string>("app://menu", (msg) => handler(msg.payload));
+  return () => void off.then((f) => f());
+}
+
 const tauriTransport: EngineTransport = {
   kind: "native",
   invoke: (command, args) => invoke(command, args),
