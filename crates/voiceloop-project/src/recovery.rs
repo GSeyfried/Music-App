@@ -103,7 +103,7 @@ mod tests {
         assert_eq!(find(&rec).unwrap(), None);
         let mut doc = ProjectDoc::new("Jam", 48_000, 1);
         doc.loop_ = Some(LoopDoc { period_frames: 100.0, extra: Default::default() });
-        let audio = vec![TrackAudio { layers: vec![vec![0.25f32; 100].into()], redo: vec![] }];
+        let audio = vec![TrackAudio { layers: vec![vec![0.25f32; 100].into()], ..TrackAudio::default() }];
         autosave(&rec, &doc, &audio, None, None, &mut |_| {}).unwrap();
         let info = find(&rec).unwrap().expect("recoverable");
         assert_eq!(info.project_name, "Jam");
@@ -111,7 +111,7 @@ mod tests {
         assert_eq!(package::load_audio(&opened.path, &opened.doc, &mut |_| {}).unwrap(), audio);
 
         // A second autosave refreshes it.
-        let audio2 = vec![TrackAudio { layers: vec![vec![0.5f32; 100].into()], redo: vec![] }];
+        let audio2 = vec![TrackAudio { layers: vec![vec![0.5f32; 100].into()], ..TrackAudio::default() }];
         autosave(&rec, &opened.doc, &audio2, None, Some(Path::new("/x/Jam.voiceloop")), &mut |_| {}).unwrap();
         assert_eq!(find(&rec).unwrap().unwrap().original_path.as_deref(), Some("/x/Jam.voiceloop"));
 

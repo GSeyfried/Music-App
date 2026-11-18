@@ -38,6 +38,8 @@ pub type Samples = Arc<[f32]>;
 pub struct TrackAudio {
     pub layers: Vec<Samples>,
     pub redo: Vec<Samples>,
+    pub layer_offsets: Vec<i64>,
+    pub redo_offsets: Vec<i64>,
 }
 
 /// Progress callback: fraction 0..=1.
@@ -143,7 +145,7 @@ pub fn save_package(
     for (ti, track_audio) in audio.iter().enumerate() {
         let track = &mut out.tracks[ti];
         let old: Vec<LayerDoc> = track.layers.iter().chain(&track.redo_layers).cloned().collect();
-        let mut build = |set: &[Samples], redo: bool| -> Result<Vec<LayerDoc>> {
+        let mut build = |set: &[Samples], offsets: &[i64], redo: bool| -> Result<Vec<LayerDoc>> {
             let mut docs = Vec::with_capacity(set.len());
             for (li, samples) in set.iter().enumerate() {
                 let what = format!("{} {} {}", track.name, if redo { "undone layer" } else { "layer" }, li + 1);
@@ -155,6 +157,7 @@ pub fn save_package(
                     frames: 0,
                     channels: 1,
                     start_frame: 0,
+                    nudge_frames: 0,
                     loop_period_frames: period,
                     checksum: String::new(),
                     derived_from: None,
@@ -165,14 +168,15 @@ pub fn save_package(
                 l.frames = samples.len() as u64;
                 l.channels = 1;
                 l.loop_period_frames = period;
+                l.nudge_frames = offsets.get(li).copied().unwrap_or(0);
                 docs.push(l);
                 done += 1;
                 progress(0.9 * done as f32 / total as f32);
             }
             Ok(docs)
         };
-        let layers = build(&track_audio.layers, false)?;
-        let redo = build(&track_audio.redo, true)?;
+        let layers = build(&track_audio.layers, &track_audio.layer_offsets, false)?;
+        let redo = build(&track_audio.redo, &track_audio.redo_offsets, true)?;
         track.layers = layers;
         track.redo_layers = redo;
     }
@@ -335,9 +339,13 @@ pub fn load_audio(dir: &Path, doc: &ProjectDoc, progress: Progress) -> Result<Ve
     let mut out = Vec::with_capacity(doc.tracks.len());
     for track in &doc.tracks {
         let mut ta = TrackAudio::default();
-        for (set, dst) in [(&track.layers, &mut ta.layers), (&track.redo_layers, &mut ta.redo)] {
+        for (set, dst, offsets) in [
+            (&track.layers, &mut ta.layers, &mut ta.layer_offsets),
+            (&track.redo_layers, &mut ta.redo, &mut ta.redo_offsets),
+        ] {
             for layer in set.iter() {
                 dst.push(load_layer(dir, doc, layer)?);
+                offsets.push(layer.nudge_frames);
                 done += 1;
                 progress(done as f32 / total as f32);
             }
@@ -362,8 +370,12 @@ mod tests {
         d.tracks[1].gain = 0.5;
         d.tracks[1].muted = true;
         let audio = vec![
-            TrackAudio { layers: vec![layer(4_800, 0.0), layer(4_800, 1.0)], redo: vec![layer(4_800, 2.0)] },
-            TrackAudio { layers: vec![layer(4_800, 3.0)], redo: vec![] },
+            TrackAudio {
+                layers: vec![layer(4_800, 0.0), layer(4_800, 1.0)],
+                redo: vec![layer(4_800, 2.0)],
+                ..TrackAudio::default()
+            },
+            TrackAudio { layers: vec![layer(4_800, 3.0)], ..TrackAudio::default() },
         ];
         (d, audio)
     }
@@ -498,7 +510,7 @@ mod practice_tests {
         let dir = crate::test_dir("pkg-practice").join("p.voiceloop");
         let mut d = ProjectDoc::new("Song", 48_000, 1);
         d.loop_ = Some(LoopDoc { period_frames: 10.0, extra: Default::default() });
-        let audio = vec![TrackAudio { layers: vec![vec![0.5f32; 10].into()], redo: vec![] }];
+        let audio = vec![TrackAudio { layers: vec![vec![0.5f32; 10].into()], ..TrackAudio::default() }];
         let lib = br#"{"formatVersion":1,"references":[{"id":"r1"}]}"#;
         let saved = save_package(&dir, &d, &audio, Some(lib), &mut |_| {}).unwrap();
         let rel = saved.practice.library.clone().unwrap();

@@ -30,7 +30,7 @@ use crate::hardware::{
     self, AudioDiagnostics, CalibrationOutcome, DevicesChanged, Hardware, HardwareAction, SessionAction,
 };
 use crate::looper::io::{LooperPlayback, OutputInfo};
-use crate::looper::{LayerSummary, LooperCommand, LooperConfig, LooperNotice, LooperSnapshot, LooperState};
+use crate::looper::{LayerSummary, LayerTiming, LooperCommand, LooperConfig, LooperNotice, LooperSnapshot, LooperState};
 use crate::meter::{amplitude_to_db, MeterFrame};
 use crate::midi_in::{MidiBatch, MidiPortInfo};
 use crate::model::AudioDevice;
@@ -107,6 +107,8 @@ pub enum EngineEvent {
     LooperNotice(LooperNotice),
     /// Exact 128-bin peak envelope for one completed immutable loop layer.
     LayerSummary(LayerSummary),
+    /// Hit offsets from the nearest beat for one completed layer.
+    LayerTiming(LayerTiming),
     /// ~30 Hz while audio runs and analysis is enabled.
     Pitch(PitchUpdate),
     /// A sung or played note has ended (onset, offset, pitch, intonation).
@@ -875,6 +877,9 @@ impl ControlLoop {
         }
         while let Ok(summary) = p.handles.summaries.pop() {
             (self.sink)(EngineEvent::LayerSummary(summary));
+        }
+        while let Ok(timing) = p.handles.timings.pop() {
+            (self.sink)(EngineEvent::LayerTiming(timing));
         }
         while let Ok(snapshot) = p.handles.snapshots.pop() {
             self.latest_snapshot = Some(snapshot);

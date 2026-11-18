@@ -444,6 +444,8 @@ fn doc_from_captured(base: &ProjectDoc, cap: Captured, config: Option<&AudioConf
         audio.push(TrackAudio {
             layers: tr.layers.into_iter().map(Arc::from).collect(),
             redo: tr.redo.into_iter().map(Arc::from).collect(),
+            layer_offsets: tr.plan.layer_offsets[..tr.plan.layers as usize].to_vec(),
+            redo_offsets: tr.plan.redo_offsets[..tr.plan.redo as usize].to_vec(),
         });
     }
     (doc, audio)
@@ -495,6 +497,20 @@ fn loadable(doc: &ProjectDoc, audio: &[TrackAudio], period: Option<f64>, rate: u
             muted: d.muted,
             solo: d.solo,
             playing: d.playing,
+            layer_offsets: {
+                let mut values = [0; crate::looper::MAX_LAYERS_PER_TRACK];
+                for (slot, layer) in values.iter_mut().zip(d.layers.iter()) {
+                    *slot = layer.nudge_frames;
+                }
+                values
+            },
+            redo_offsets: {
+                let mut values = [0; crate::looper::MAX_LAYERS_PER_TRACK];
+                for (slot, layer) in values.iter_mut().zip(d.redo_layers.iter()) {
+                    *slot = layer.nudge_frames;
+                }
+                values
+            },
         };
         for (i, l) in a.layers.iter().enumerate() {
             layers.push((t as u8, LayerSlot::Active(i as u8), l.to_vec()));
@@ -1788,7 +1804,10 @@ mod tests {
     fn rate_conversion_scales_the_loop_period() {
         let mut doc = ProjectDoc::new("x", 48_000, 1);
         doc.loop_ = Some(LoopDoc { period_frames: 48_000.0, extra: Default::default() });
-        let mut audio = vec![TrackAudio { layers: vec![Arc::from(vec![0.1f32; 48_000])], redo: vec![] }];
+        let mut audio = vec![TrackAudio {
+            layers: vec![Arc::from(vec![0.1f32; 48_000])],
+            ..TrackAudio::default()
+        }];
         let p = convert_rate(&doc, &mut audio, 44_100).unwrap();
         assert_eq!(p, 44_100.0);
         assert_eq!(audio[0].layers[0].len(), 44_100);

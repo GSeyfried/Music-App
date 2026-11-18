@@ -6,12 +6,22 @@ import { useEngineActions, useEngineState } from "../engine/EngineContext";
 import { formatGain, formatSeconds } from "../lib/format";
 import { trackStateLabel } from "../lib/looperControls";
 import { trackActions } from "../lib/trackActions";
+import { useAppSetting } from "../settings/appSettings";
 import { Button, Sheet } from "./ui/controls";
 import { useUi } from "./UiContext";
+import "./TrackInspector.css";
+
+function timingLabel(ms: number): string {
+  const rounded = Math.round(Math.abs(ms));
+  if (rounded === 0) return "On the beat";
+  return `${rounded} ms ${ms > 0 ? "late" : "early"}`;
+}
 
 export function TrackInspector() {
   const { overlay, setOverlay, selectedTrack } = useUi();
   const view = useEngineState((s) => s.looper);
+  const timings = useEngineState((s) => s.layerTimings[selectedTrack]) ?? [];
+  const showTiming = useAppSetting("view.timingReadout");
   const { sendLooper } = useEngineActions();
   const t = view?.tracks[selectedTrack];
   const open = overlay === "inspector" && !!view && !!t;
@@ -44,13 +54,39 @@ export function TrackInspector() {
           <h3 id="track-layers-heading">Layers</h3>
           {t.layers > 0 ? (
             <ol className="diag layer-list" aria-label={`Track ${selectedTrack + 1} layers`}>
-              <li className="diag-row"><span>Layer 1</span><span>Base loop</span></li>
-              {Array.from({ length: Math.max(0, t.layers - 1) }, (_, index) => (
-                <li className="diag-row" key={`layer-${index + 2}`}>
-                  <span>Layer {index + 2}</span>
-                  <span>Overdub</span>
-                </li>
-              ))}
+              {Array.from({ length: t.layers }, (_, layer) => {
+                const timing = timings[layer];
+                const fiveMsFrames = Math.round(sr * 0.005);
+                return (
+                  <li className="timing-layer" key={`layer-${layer + 1}`}>
+                    <div className="diag-row">
+                      <span>Layer {layer + 1}</span>
+                      <span>{layer === 0 ? "Base loop" : "Overdub"}</span>
+                    </div>
+                    {showTiming ? (
+                      <div className="timing-readout">
+                        <span>{timing ? timingLabel(timing.medianOffsetMs) : "Timing unavailable"}</span>
+                        <span className="timing-offset">Nudge: {t.layerOffsets[layer] ?? 0} frames</span>
+                        <div className="timing-actions" aria-label={`Layer ${layer + 1} timing controls`}>
+                          <Button
+                            variant="outline"
+                            disabled={!timing || timing.suggestedNudgeFrames === 0}
+                            onPress={() => timing && sendLooper({ type: "nudgeLayer", track: selectedTrack, layer, frames: timing.suggestedNudgeFrames })}
+                          >
+                            Nudge to the beat
+                          </Button>
+                          <Button variant="outline" onPress={() => sendLooper({ type: "nudgeLayer", track: selectedTrack, layer, frames: -fiveMsFrames })}>
+                            − 5 ms
+                          </Button>
+                          <Button variant="outline" onPress={() => sendLooper({ type: "nudgeLayer", track: selectedTrack, layer, frames: fiveMsFrames })}>
+                            + 5 ms
+                          </Button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </li>
+                );
+              })}
             </ol>
           ) : (
             <p className="hint">No recorded layers yet.</p>

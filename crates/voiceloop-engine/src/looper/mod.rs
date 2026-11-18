@@ -35,8 +35,8 @@ use crate::transport::{MusicalPosition, TransportState};
 pub use click::Accent;
 pub use pool::{LayerRecycler, StorageSink};
 pub use processor::{
-    soft_limit, LayerSummary, LooperCommand, LooperCore, LooperHandles, LooperNotice, LooperSnapshot, RejectReason,
-    RunState, TrackSnapshot, TrackState, LIMIT_KNEE, MAX_TRANSPORT_FRAME,
+    soft_limit, LayerSummary, LayerTiming, TimingHit, LooperCommand, LooperCore, LooperHandles, LooperNotice,
+    LooperSnapshot, RejectReason, RunState, TrackSnapshot, TrackState, LIMIT_KNEE, MAX_TRANSPORT_FRAME,
 };
 
 /// Hard upper bound on tracks (snapshot and plan arrays are sized by this).
@@ -51,6 +51,35 @@ pub const MAX_TRACKS: usize = 16;
 
 /// Fixed wire-format resolution of one completed layer around its loop.
 pub const LAYER_SUMMARY_BINS: usize = 128;
+/// Fixed upper bound for timing hits sent for one layer.
+pub const MAX_TIMING_HITS: usize = 32;
+
+/// Bounded onset detector used while the realtime-safe layer summary scan runs.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LayerTimingConfig {
+    pub window_frames: u32,
+    pub minimum_rms: f32,
+    pub rise_ratio: f32,
+    pub release_ratio: f32,
+    pub minimum_spacing_ms: u32,
+    pub max_hits: usize,
+    pub whole_beat_tolerance_frames: f64,
+}
+
+impl Default for LayerTimingConfig {
+    fn default() -> Self {
+        Self {
+            window_frames: 64,
+            minimum_rms: 0.02,
+            rise_ratio: 2.0,
+            release_ratio: 0.6,
+            minimum_spacing_ms: 80,
+            max_hits: 32,
+            whole_beat_tolerance_frames: 1.0,
+        }
+    }
+}
 
 /// Realtime work bounds. Every layer is a pool buffer, so `pool_layers`
 /// bounds both the layers summed per output sample and the buffers released
@@ -90,6 +119,8 @@ pub struct LooperConfig {
     /// Extra input retained after the first-take boundary. It is hidden by
     /// the default loop length but remains available to the future clip editor.
     pub capture_tail_ms: u32,
+    /// Per-layer hit timing analysis performed during the summary scan.
+    pub timing: LayerTimingConfig,
 }
 
 impl Default for LooperConfig {
@@ -107,6 +138,7 @@ impl Default for LooperConfig {
             fade_frames: 64,
             gain_smoothing_frames: 256,
             capture_tail_ms: 100,
+            timing: LayerTimingConfig::default(),
         }
     }
 }
@@ -154,6 +186,21 @@ impl LooperConfig {
         }
         if self.capture_tail_ms > 2_000 {
             return Err(EngineError::Invalid("capture_tail_ms must be at most 2000".into()));
+        }
+        if self.timing.window_frames == 0
+            || self.timing.window_frames > 4_096
+            || !(self.timing.minimum_rms.is_finite() && self.timing.minimum_rms >= 0.0)
+            || !(self.timing.rise_ratio.is_finite() && self.timing.rise_ratio >= 1.0)
+            || !(self.timing.release_ratio.is_finite()
+                && self.timing.release_ratio > 0.0
+                && self.timing.release_ratio < 1.0)
+            || self.timing.minimum_spacing_ms > 10_000
+            || self.timing.max_hits == 0
+            || self.timing.max_hits > MAX_TIMING_HITS
+            || !(self.timing.whole_beat_tolerance_frames.is_finite()
+                && self.timing.whole_beat_tolerance_frames >= 0.0)
+        {
+            return Err(EngineError::Invalid("invalid layer timing analysis configuration".into()));
         }
         Ok(frames)
     }

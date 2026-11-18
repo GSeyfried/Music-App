@@ -370,6 +370,8 @@ export interface TrackSnapshot {
   redoLayers: number;
   recordStart: number | null;
   recordEnd: number | null;
+  /** Signed playback shifts, one per active layer, in frames. */
+  layerOffsets: number[];
 }
 
 export interface MusicalPosition {
@@ -415,9 +417,24 @@ export interface LayerSummary {
   bins: number[];
 }
 
+export interface TimingHit {
+  /** One-based beat number within the loop. */
+  beat: number;
+  offsetMs: number;
+}
+
+export interface LayerTiming {
+  track: number;
+  layer: number;
+  hits: TimingHit[];
+  medianOffsetMs: number;
+  suggestedNudgeFrames: number;
+}
+
 /** Mirrors `looper::LooperConfig` (serde camelCase, every field defaulted). */
 export interface LooperConfig {
   maxTracks: number;
+  trackCapacity: number;
   maxLoopSeconds: number;
   poolLayers: number;
   maxLayersPerTrack: number;
@@ -425,6 +442,15 @@ export interface LooperConfig {
   fadeFrames: number;
   gainSmoothingFrames: number;
   captureTailMs: number;
+  timing: {
+    windowFrames: number;
+    minimumRms: number;
+    riseRatio: number;
+    releaseRatio: number;
+    minimumSpacingMs: number;
+    maxHits: number;
+    wholeBeatToleranceFrames: number;
+  };
 }
 
 export type RejectReason =
@@ -463,6 +489,7 @@ export type LooperCommand =
   | { type: "setGain"; track: number; gain: number }
   | { type: "undo"; track: number }
   | { type: "redo"; track: number }
+  | { type: "nudgeLayer"; track: number; layer: number; frames: number }
   | { type: "clear"; track: number }
   | { type: "clearAll" }
   /** Activate one more (preallocated) track, appended at the end. `trackLimit` at capacity. */
@@ -643,6 +670,7 @@ export type EngineEvent =
   | { type: "looper"; payload: LooperState }
   | { type: "looperNotice"; payload: LooperNotice }
   | { type: "layerSummary"; payload: LayerSummary }
+  | { type: "layerTiming"; payload: LayerTiming }
   | { type: "pitch"; payload: PitchUpdate }
   | { type: "note"; payload: NoteEvent }
   | { type: "onset"; payload: Onset }
@@ -668,6 +696,7 @@ export const EVENT_TYPES: readonly EngineEventType[] = [
   "looper",
   "looperNotice",
   "layerSummary",
+  "layerTiming",
   "pitch",
   "note",
   "onset",

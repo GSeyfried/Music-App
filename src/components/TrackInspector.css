@@ -1,0 +1,23 @@
+.timing-layer {
+  display: grid;
+  gap: 0.5rem;
+  padding-block: 0.55rem;
+}
+
+.timing-readout {
+  display: grid;
+  gap: 0.45rem;
+  padding-inline: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.timing-offset {
+  font-variant-numeric: tabular-nums;
+}
+
+.timing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}

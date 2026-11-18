@@ -32,7 +32,7 @@ use super::transfer::{
     Chunk, Inventory, JobKind, LayerJob, LayerSlot, ParkedLooper, ParkedTrack, RestorePlan, TrackPlan, CHUNK_FRAMES,
     JOBS_PER_BLOCK, JOB_CAPACITY,
 };
-use super::{LooperConfig, LAYER_SUMMARY_BINS, MAX_POOL_LAYERS, MAX_TRACKS};
+use super::{LayerTimingConfig, LooperConfig, LAYER_SUMMARY_BINS, MAX_LAYERS_PER_TRACK, MAX_POOL_LAYERS, MAX_TIMING_HITS, MAX_TRACKS};
 use crate::error::EngineError;
 use crate::model::LoopMode;
 use crate::transport::{
@@ -42,6 +42,7 @@ use crate::transport::{
 const COMMAND_CAPACITY: usize = 64;
 const SNAPSHOT_CAPACITY: usize = 8;
 const NOTICE_CAPACITY: usize = 32;
+const TIMING_CAPACITY: usize = MAX_POOL_LAYERS;
 
 /// The transport stops itself here instead of approaching `i64` overflow.
 /// 2^52 frames is ~2,900 years at 48 kHz, and every frame below it is exact
@@ -105,6 +106,12 @@ pub enum LooperCommand {
     /// recording on the track discards its redo history.
     Redo {
         track: u8,
+    },
+    /// Shift one immutable layer on the loop clock. Positive frames play later.
+    NudgeLayer {
+        track: u8,
+        layer: u8,
+        frames: i64,
     },
     /// Activate one more track (preallocated, so no stream restart). It is
     /// appended after the existing tracks. Rejected with `trackLimit` at capacity.
@@ -201,6 +208,33 @@ pub struct TrackSnapshot {
     /// An input discontinuity happened while this track recorded its newest
     /// take: that take may be shifted in time. Cleared by the next take or Clear.
     pub timing_suspect: bool,
+    /// Signed playback offsets for the active layers, in frames.
+    pub layer_offsets: LayerOffsets,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerOffsets {
+    len: u8,
+    values: [i64; MAX_LAYERS_PER_TRACK],
+}
+
+impl LayerOffsets {
+    const EMPTY: Self = Self { len: 0, values: [0; MAX_LAYERS_PER_TRACK] };
+    fn from_slice(values: &[i64]) -> Self {
+        let mut out = Self::EMPTY;
+        out.len = values.len().min(MAX_LAYERS_PER_TRACK) as u8;
+        out.values[..out.len as usize].copy_from_slice(&values[..out.len as usize]);
+        out
+    }
+}
+
+impl Serialize for LayerOffsets {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.values[..self.len as usize].serialize(serializer)
+    }
 }
 
 impl TrackSnapshot {
@@ -215,6 +249,7 @@ impl TrackSnapshot {
         record_start: None,
         record_end: None,
         timing_suspect: false,
+        layer_offsets: LayerOffsets::EMPTY,
     };
 }
 
@@ -250,6 +285,36 @@ pub struct LayerSummary {
     pub bins: [f32; LAYER_SUMMARY_BINS],
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimingHit {
+    pub beat: u32,
+    pub offset_ms: f32,
+}
+
+/// Compact timing result for one completed layer; never contains raw audio.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayerTiming {
+    pub track: u8,
+    pub layer: u8,
+    #[serde(serialize_with = "serialize_timing_hits")]
+    pub hits: [TimingHit; MAX_TIMING_HITS],
+    #[serde(skip)]
+    pub hit_count: u8,
+    pub median_offset_ms: f32,
+    pub suggested_nudge_frames: i64,
+}
+
+fn serialize_timing_hits<S>(hits: &[TimingHit; MAX_TIMING_HITS], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    // Unused entries are trailing defaults. The scan keeps valid hits packed.
+    let len = hits.iter().rposition(|h| h.beat != 0 || h.offset_ms != 0.0).map_or(0, |i| i + 1);
+    hits[..len].serialize(serializer)
+}
+
 fn serialize_summary_bins<S>(bins: &[f32; LAYER_SUMMARY_BINS], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -264,6 +329,7 @@ pub struct LooperHandles {
     pub notices: Consumer<LooperNotice>,
     /// Completed layer summaries; raw samples never leave the looper.
     pub summaries: Consumer<LayerSummary>,
+    pub timings: Consumer<LayerTiming>,
     pub recycler: LayerRecycler,
     /// Layer export/import requests (see [`super::transfer`]); at most
     /// [`JOBS_PER_BLOCK`] are served per callback.
@@ -334,10 +400,35 @@ struct Recording {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct TimingScan {
+    window_sum: f32,
+    window_count: u32,
+    previous_rms: f32,
+    armed: bool,
+    last_hit: i64,
+    hits: [TimingHit; MAX_TIMING_HITS],
+    hit_frames: [i64; MAX_TIMING_HITS],
+    hit_count: u8,
+}
+
+impl TimingScan {
+    const EMPTY: Self = Self {
+        window_sum: 0.0,
+        window_count: 0,
+        previous_rms: 0.0,
+        armed: true,
+        last_hit: i64::MIN / 2,
+        hits: [TimingHit { beat: 0, offset_ms: 0.0 }; MAX_TIMING_HITS],
+        hit_frames: [0; MAX_TIMING_HITS],
+        hit_count: 0,
+    };
+}
+
+#[derive(Debug, Clone, Copy)]
 enum SummaryState {
     Recording,
-    Scanning { cursor: usize, bins: [f32; LAYER_SUMMARY_BINS] },
-    Ready { bins: [f32; LAYER_SUMMARY_BINS], emitted: bool },
+    Scanning { cursor: usize, bins: [f32; LAYER_SUMMARY_BINS], timing: TimingScan },
+    Ready { bins: [f32; LAYER_SUMMARY_BINS], timing: Option<LayerTiming>, summary_emitted: bool, timing_emitted: bool },
 }
 
 struct Track {
@@ -349,6 +440,8 @@ struct Track {
     redo: Vec<LayerBuf>,
     /// Kept parallel with `redo`, so Undo/Redo preserves the exact summary.
     redo_summaries: Vec<SummaryState>,
+    offsets: Vec<i64>,
+    redo_offsets: Vec<i64>,
     rec: Option<Recording>,
     playing: bool,
     muted: bool,
@@ -432,6 +525,8 @@ pub struct LooperCore {
     snap_tx: Producer<LooperSnapshot>,
     notice_tx: Producer<LooperNotice>,
     summary_tx: Producer<LayerSummary>,
+    timing_tx: Producer<LayerTiming>,
+    timing_config: LayerTimingConfig,
     frames_processed: u64,
     /// Publish a snapshot at most every this many frames (~10 ms).
     snapshot_interval: u64,
@@ -459,6 +554,7 @@ impl LooperCore {
         let (snap_tx, snap_rx) = RingBuffer::new(SNAPSHOT_CAPACITY);
         let (notice_tx, notice_rx) = RingBuffer::new(NOTICE_CAPACITY);
         let (summary_tx, summary_rx) = RingBuffer::new(MAX_POOL_LAYERS);
+        let (timing_tx, timing_rx) = RingBuffer::new(TIMING_CAPACITY);
         let (jobs_tx, job_rx) = RingBuffer::new(JOB_CAPACITY);
         let (job_tx, results_rx) = RingBuffer::new(JOB_CAPACITY);
         let (park_tx, park_rx) = mpsc::channel();
@@ -479,6 +575,8 @@ impl LooperCore {
                 summaries: Vec::with_capacity(config.max_layers_per_track),
                 redo: Vec::with_capacity(config.max_layers_per_track),
                 redo_summaries: Vec::with_capacity(config.max_layers_per_track),
+                offsets: Vec::with_capacity(config.max_layers_per_track),
+                redo_offsets: Vec::with_capacity(config.max_layers_per_track),
                 rec: None,
                 playing: true,
                 muted: false,
@@ -532,6 +630,8 @@ impl LooperCore {
             snap_tx,
             notice_tx,
             summary_tx,
+            timing_tx,
+            timing_config: config.timing,
             frames_processed: 0,
             snapshot_interval: (sample_rate as u64 / 100).max(1),
             // Publish on the first block so the UI sees state immediately.
@@ -542,6 +642,7 @@ impl LooperCore {
             snapshots: snap_rx,
             notices: notice_rx,
             summaries: summary_rx,
+            timings: timing_rx,
             recycler,
             jobs: jobs_tx,
             job_results: results_rx,
@@ -644,8 +745,11 @@ impl LooperCore {
                 }
                 if tr.level > 0.0 {
                     let mut s = 0.0f32;
-                    for layer in &tr.layers {
-                        s += layer.get(idx).copied().unwrap_or(0.0);
+                    let frames = m.period.ceil().max(1.0) as i64;
+                    for (layer_index, layer) in tr.layers.iter().enumerate() {
+                        let offset = tr.offsets.get(layer_index).copied().unwrap_or(0);
+                        let source = (idx as i64 - offset).rem_euclid(frames) as usize;
+                        s += layer.get(source).copied().unwrap_or(0.0);
                     }
                     y += s * tr.level;
                 }
@@ -732,7 +836,11 @@ impl LooperCore {
             tr.rec = None;
             tr.playing = true;
             if let Some(summary) = tr.summaries.last_mut() {
-                *summary = SummaryState::Scanning { cursor: 0, bins: [0.0; LAYER_SUMMARY_BINS] };
+                *summary = SummaryState::Scanning {
+                    cursor: 0,
+                    bins: [0.0; LAYER_SUMMARY_BINS],
+                    timing: TimingScan::EMPTY,
+                };
             }
         }
     }
@@ -751,24 +859,94 @@ impl LooperCore {
             return;
         }
 
+        let beat_frames = self.transport.frames_per_beat();
+        let beats_exact = master.period / beat_frames;
+        let beats = beats_exact.round() as i64;
+        let timing_enabled = beats > 0
+            && (master.period - beats as f64 * beat_frames).abs() <= self.timing_config.whole_beat_tolerance_frames;
+        let window_frames = self.timing_config.window_frames;
+        let spacing_frames =
+            (self.timing_config.minimum_spacing_ms as u64 * self.sample_rate as u64 / 1_000) as i64;
+        let max_hits = self.timing_config.max_hits.min(MAX_TIMING_HITS);
+
         let mut budget = CHUNK_FRAMES;
-        for tr in &mut self.tracks {
-            for (layer, state) in tr.layers.iter().zip(tr.summaries.iter_mut()) {
+        for (track_index, tr) in self.tracks.iter_mut().enumerate() {
+            for (layer_index, (layer, state)) in tr.layers.iter().zip(tr.summaries.iter_mut()).enumerate() {
                 if budget == 0 {
                     break;
                 }
-                let SummaryState::Scanning { cursor, bins } = state else { continue };
+                let SummaryState::Scanning { cursor, bins, timing } = state else { continue };
                 let end = cursor.saturating_add(budget).min(frames);
                 for index in *cursor..end {
                     let bin = index * LAYER_SUMMARY_BINS / frames;
-                    let sample = layer.get(index).copied().unwrap_or(0.0).abs();
-                    let peak = if sample.is_finite() { sample.min(1.0) } else { 0.0 };
+                    let raw = layer.get(index).copied().unwrap_or(0.0);
+                    let sample = if raw.is_finite() { raw } else { 0.0 };
+                    let peak = sample.abs().min(1.0);
                     bins[bin] = bins[bin].max(peak);
+                    if timing_enabled {
+                        timing.window_sum += sample * sample;
+                        timing.window_count += 1;
+                        if timing.window_count == window_frames || index + 1 == frames {
+                            let rms = (timing.window_sum / timing.window_count.max(1) as f32).sqrt();
+                            let center = index as i64 - timing.window_count as i64 / 2;
+                            if timing.armed
+                                && rms >= self.timing_config.minimum_rms
+                                && rms >= timing.previous_rms.max(1.0e-6) * self.timing_config.rise_ratio
+                                && center - timing.last_hit >= spacing_frames
+                                && (timing.hit_count as usize) < max_hits
+                            {
+                                let nearest = (center as f64 / beat_frames).round() as i64;
+                                let offset_frames = center - grid_frame(nearest, beat_frames);
+                                let slot = timing.hit_count as usize;
+                                timing.hits[slot] = TimingHit {
+                                    beat: nearest.rem_euclid(beats) as u32 + 1,
+                                    offset_ms: offset_frames as f32 * 1_000.0 / self.sample_rate as f32,
+                                };
+                                timing.hit_frames[slot] = offset_frames;
+                                timing.hit_count += 1;
+                                timing.last_hit = center;
+                                timing.armed = false;
+                            } else if !timing.armed
+                                && (rms < self.timing_config.minimum_rms
+                                    || rms <= timing.previous_rms * self.timing_config.release_ratio)
+                            {
+                                timing.armed = true;
+                            }
+                            timing.previous_rms = rms;
+                            timing.window_sum = 0.0;
+                            timing.window_count = 0;
+                        }
+                    }
                 }
                 budget -= end - *cursor;
                 *cursor = end;
                 if end == frames {
-                    *state = SummaryState::Ready { bins: *bins, emitted: false };
+                    let result = if timing_enabled && timing.hit_count > 0 {
+                        let count = timing.hit_count as usize;
+                        let mut sorted = timing.hit_frames;
+                        sorted[..count].sort_unstable();
+                        let median_frames = if count % 2 == 1 {
+                            sorted[count / 2] as f64
+                        } else {
+                            (sorted[count / 2 - 1] as f64 + sorted[count / 2] as f64) / 2.0
+                        };
+                        Some(LayerTiming {
+                            track: track_index as u8,
+                            layer: layer_index as u8,
+                            hits: timing.hits,
+                            hit_count: timing.hit_count,
+                            median_offset_ms: (median_frames * 1_000.0 / self.sample_rate as f64) as f32,
+                            suggested_nudge_frames: (-median_frames).round() as i64,
+                        })
+                    } else {
+                        None
+                    };
+                    *state = SummaryState::Ready {
+                        bins: *bins,
+                        timing: result,
+                        summary_emitted: false,
+                        timing_emitted: false,
+                    };
                 }
             }
         }
@@ -777,15 +955,24 @@ impl LooperCore {
         // event is never silently lost. Redo marks its preserved state un-emitted.
         for (track, tr) in self.tracks.iter_mut().enumerate() {
             for (layer, state) in tr.summaries.iter_mut().enumerate() {
-                let SummaryState::Ready { bins, emitted } = state else { continue };
-                if *emitted {
-                    continue;
+                let SummaryState::Ready { bins, timing, summary_emitted, timing_emitted } = state else { continue };
+                if !*summary_emitted {
+                    let event = LayerSummary { track: track as u8, layer: layer as u8, bins: *bins };
+                    if self.summary_tx.push(event).is_err() {
+                        return;
+                    }
+                    *summary_emitted = true;
                 }
-                let event = LayerSummary { track: track as u8, layer: layer as u8, bins: *bins };
-                if self.summary_tx.push(event).is_err() {
-                    return;
+                if let Some(mut event) = *timing {
+                    if !*timing_emitted {
+                        event.track = track as u8;
+                        event.layer = layer as u8;
+                        if self.timing_tx.push(event).is_err() {
+                            return;
+                        }
+                        *timing_emitted = true;
+                    }
                 }
-                *emitted = true;
             }
         }
     }
@@ -1013,6 +1200,7 @@ impl LooperCore {
             }
             C::Undo { track } => self.undo(track as usize),
             C::Redo { track } => self.redo(track as usize),
+            C::NudgeLayer { track, layer, frames } => self.nudge_layer(track as usize, layer as usize, frames),
             C::Clear { track } => self.clear(track as usize),
             C::AddTrack => self.add_track(),
             C::RemoveTrack { track } => self.remove_track(track as usize),
@@ -1212,6 +1400,7 @@ impl LooperCore {
         while let Some(buf) = tr.redo.pop() {
             pool.release(buf);
             tr.redo_summaries.pop();
+            tr.redo_offsets.pop();
         }
     }
 
@@ -1223,6 +1412,7 @@ impl LooperCore {
         Self::release_redo(&mut self.pool, tr);
         tr.layers.push(buf); // within capacity: checked by check_can_add_layer
         tr.summaries.push(SummaryState::Recording);
+        tr.offsets.push(0);
         tr.rec = Some(rec);
         tr.timing_suspect = false;
         tr.playing = true;
@@ -1332,9 +1522,11 @@ impl LooperCore {
         self.epoch = self.epoch.wrapping_add(1);
         if let Some(buf) = tr.layers.pop() {
             let summary = tr.summaries.pop().unwrap_or(SummaryState::Recording);
+            let offset = tr.offsets.pop().unwrap_or(0);
             if tr.redo.len() < tr.redo.capacity() {
                 tr.redo.push(buf);
                 tr.redo_summaries.push(summary);
+                tr.redo_offsets.push(offset);
             } else {
                 self.pool.release(buf);
             }
@@ -1351,13 +1543,27 @@ impl LooperCore {
             return Err(RejectReason::LayerLimit);
         }
         let buf = tr.redo.pop().ok_or(RejectReason::NothingToRedo)?;
-        let mut summary =
-            tr.redo_summaries.pop().unwrap_or(SummaryState::Scanning { cursor: 0, bins: [0.0; LAYER_SUMMARY_BINS] });
-        if let SummaryState::Ready { emitted, .. } = &mut summary {
-            *emitted = false;
+        let mut summary = tr.redo_summaries.pop().unwrap_or(SummaryState::Scanning {
+            cursor: 0,
+            bins: [0.0; LAYER_SUMMARY_BINS],
+            timing: TimingScan::EMPTY,
+        });
+        if let SummaryState::Ready { summary_emitted, timing_emitted, .. } = &mut summary {
+            *summary_emitted = false;
+            *timing_emitted = false;
         }
         tr.layers.push(buf);
         tr.summaries.push(summary);
+        tr.offsets.push(tr.redo_offsets.pop().unwrap_or(0));
+        self.touch();
+        Ok(())
+    }
+
+    fn nudge_layer(&mut self, ti: usize, li: usize, frames: i64) -> Result<(), RejectReason> {
+        let half_loop = self.master.map(|m| (m.period / 2.0).floor() as i64).ok_or(RejectReason::TrackEmpty)?;
+        let tr = self.tracks.get_mut(ti).ok_or(RejectReason::NoSuchTrack)?;
+        let offset = tr.offsets.get_mut(li).ok_or(RejectReason::TrackEmpty)?;
+        *offset = offset.saturating_add(frames).clamp(-half_loop, half_loop);
         self.touch();
         Ok(())
     }
@@ -1373,6 +1579,8 @@ impl LooperCore {
         tr.timing_suspect = false;
         tr.summaries.clear();
         tr.redo_summaries.clear();
+        tr.offsets.clear();
+        tr.redo_offsets.clear();
         self.tracks.push(tr); // within capacity: total tracks never exceed track_capacity
         self.touch();
         Ok(())
@@ -1393,8 +1601,9 @@ impl LooperCore {
         // ready summary so replacing/removing a middle track cannot mislabel it.
         for shifted in self.tracks.iter_mut().skip(ti) {
             for summary in &mut shifted.summaries {
-                if let SummaryState::Ready { emitted, .. } = summary {
-                    *emitted = false;
+                if let SummaryState::Ready { summary_emitted, timing_emitted, .. } = summary {
+                    *summary_emitted = false;
+                    *timing_emitted = false;
                 }
             }
         }
@@ -1429,6 +1638,7 @@ impl LooperCore {
             self.pool.release(buf);
         }
         tr.summaries.clear();
+        tr.offsets.clear();
         Self::release_redo(&mut self.pool, tr);
         if self.transport.mode == LoopMode::Free && !self.has_content() && !self.any_recording() {
             self.master = None;
@@ -1479,6 +1689,8 @@ impl LooperCore {
                 muted: tr.muted,
                 solo: tr.solo,
                 playing: tr.playing,
+                layer_offsets: LayerOffsets::from_slice(&tr.offsets).values,
+                redo_offsets: LayerOffsets::from_slice(&tr.redo_offsets).values,
             };
         }
         Inventory {
@@ -1575,16 +1787,26 @@ impl LooperCore {
             return Err(RejectReason::PoolExhausted);
         }
         for (tr, tp) in self.tracks.iter_mut().zip(plan.tracks.iter()) {
-            for _ in 0..tp.layers {
+            for i in 0..tp.layers {
                 if let Some(buf) = self.pool.acquire() {
                     tr.layers.push(buf);
-                    tr.summaries.push(SummaryState::Scanning { cursor: 0, bins: [0.0; LAYER_SUMMARY_BINS] });
+                    tr.summaries.push(SummaryState::Scanning {
+                        cursor: 0,
+                        bins: [0.0; LAYER_SUMMARY_BINS],
+                        timing: TimingScan::EMPTY,
+                    });
+                    tr.offsets.push(tp.layer_offsets[i as usize]);
                 }
             }
-            for _ in 0..tp.redo {
+            for i in 0..tp.redo {
                 if let Some(buf) = self.pool.acquire() {
                     tr.redo.push(buf);
-                    tr.redo_summaries.push(SummaryState::Scanning { cursor: 0, bins: [0.0; LAYER_SUMMARY_BINS] });
+                    tr.redo_summaries.push(SummaryState::Scanning {
+                        cursor: 0,
+                        bins: [0.0; LAYER_SUMMARY_BINS],
+                        timing: TimingScan::EMPTY,
+                    });
+                    tr.redo_offsets.push(tp.redo_offsets[i as usize]);
                 }
             }
             tr.gain = if tp.gain.is_finite() { tp.gain.clamp(0.0, 2.0) } else { 1.0 };
@@ -1668,6 +1890,7 @@ impl LooperCore {
             gain: tr.gain,
             redo_layers: tr.redo.len().min(u8::MAX as usize) as u8,
             timing_suspect: tr.timing_suspect,
+            layer_offsets: LayerOffsets::from_slice(&tr.offsets),
             record_start: tr.rec.map(|r| r.start),
             record_end: tr.rec.and_then(|r| r.end),
         }
@@ -1705,6 +1928,8 @@ impl Drop for LooperCore {
                     muted: tr.muted,
                     solo: tr.solo,
                     playing: tr.playing,
+                    layer_offsets: LayerOffsets::from_slice(&tr.offsets).values,
+                    redo_offsets: LayerOffsets::from_slice(&tr.redo_offsets).values,
                 },
                 layers: std::mem::take(&mut tr.layers),
                 redo: std::mem::take(&mut tr.redo),

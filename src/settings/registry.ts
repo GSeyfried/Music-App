@@ -83,6 +83,13 @@ export interface AppSettings {
   "audio.previewTuningA4": number;
   /** Hidden dashboard widgets, as "<workspace>:<widget id>". */
   "widgets.hidden": string[];
+  "looper.timing.windowFrames": number;
+  "looper.timing.minimumRms": number;
+  "looper.timing.riseRatio": number;
+  "looper.timing.releaseRatio": number;
+  "looper.timing.minimumSpacingMs": number;
+  "looper.timing.maxHits": number;
+  "looper.timing.wholeBeatToleranceFrames": number;
   "theme.mode": ThemeMode;
   "theme.pitchReactive": boolean;
   "theme.pitchReactiveStrength": number;
@@ -151,6 +158,13 @@ export const APP_DEFAULTS: AppSettings = {
   "practice.startNote.holdMs": 600,
   "audio.previewVolume": 0.5,
   "audio.previewTuningA4": 440,
+  "looper.timing.windowFrames": 64,
+  "looper.timing.minimumRms": 0.02,
+  "looper.timing.riseRatio": 2,
+  "looper.timing.releaseRatio": 0.6,
+  "looper.timing.minimumSpacingMs": 80,
+  "looper.timing.maxHits": 32,
+  "looper.timing.wholeBeatToleranceFrames": 1,
   "theme.mode": "system",
   "theme.pitchReactive": false,
   "theme.pitchReactiveStrength": 0.35,
@@ -270,6 +284,41 @@ export const SETTINGS: SettingDef[] = [
     category: "Studio",
     tier: "daily",
     scope: "app",
+  },
+  {
+    id: "looper.timing.windowFrames", source: "app", kind: "number", min: 16, max: 4096, step: 1,
+    label: "Timing energy window", description: "Frames per energy window in completed-layer onset detection.",
+    category: "Looper", tier: "internal", scope: "app",
+  },
+  {
+    id: "looper.timing.minimumRms", source: "app", kind: "number", min: 0, max: 1, step: 0.01,
+    label: "Timing minimum energy", description: "Minimum RMS energy for a completed-layer hit.",
+    category: "Looper", tier: "internal", scope: "app",
+  },
+  {
+    id: "looper.timing.riseRatio", source: "app", kind: "number", min: 1, max: 10, step: 0.1,
+    label: "Timing rise ratio", description: "Energy-rise ratio required to mark a hit.",
+    category: "Looper", tier: "internal", scope: "app",
+  },
+  {
+    id: "looper.timing.releaseRatio", source: "app", kind: "number", min: 0.1, max: 0.9, step: 0.05,
+    label: "Timing release ratio", description: "Energy fall required before another hit can arm.",
+    category: "Looper", tier: "internal", scope: "app",
+  },
+  {
+    id: "looper.timing.minimumSpacingMs", source: "app", kind: "number", min: 0, max: 10000, step: 1,
+    label: "Timing hit spacing", description: "Minimum time between detected hits in milliseconds.",
+    category: "Looper", tier: "internal", scope: "app",
+  },
+  {
+    id: "looper.timing.maxHits", source: "app", kind: "number", min: 1, max: 32, step: 1,
+    label: "Timing hit limit", description: "Maximum hit offsets emitted for one layer.",
+    category: "Looper", tier: "internal", scope: "app",
+  },
+  {
+    id: "looper.timing.wholeBeatToleranceFrames", source: "app", kind: "number", min: 0, max: 32, step: 0.5,
+    label: "Whole-beat tolerance", description: "Frame tolerance used to decide whether a loop contains whole beats.",
+    category: "Looper", tier: "internal", scope: "app",
   },
   // ---- Practice -------------------------------------------------------------
   {

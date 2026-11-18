@@ -144,6 +144,8 @@ interface Recording {
 interface MockTrack {
   layers: number;
   redo: number;
+  offsets: number[];
+  redoOffsets: number[];
   muted: boolean;
   solo: boolean;
   playing: boolean;
@@ -926,7 +928,7 @@ export class MockEngine implements EngineTransport {
   // ---- Looper state machine ------------------------------------------------------
 
   private emptyTrack(): MockTrack {
-    return { layers: 0, redo: 0, muted: false, solo: false, playing: true, gain: 1, rec: null };
+    return { layers: 0, redo: 0, offsets: [], redoOffsets: [], muted: false, solo: false, playing: true, gain: 1, rec: null };
   }
 
   private resetLooper(): void {
@@ -1035,6 +1037,7 @@ export class MockEngine implements EngineTransport {
         if (tr.layers < 2) return "nothingToUndo";
         tr.layers -= 1;
         tr.redo += 1; // the buffer stays reserved for Redo, so `free` does not change
+        tr.redoOffsets.push(tr.offsets.pop() ?? 0);
         return null;
       case "redo":
         if (tr.rec) return "trackBusy";
@@ -1042,8 +1045,15 @@ export class MockEngine implements EngineTransport {
         if (tr.redo === 0) return "nothingToRedo";
         tr.redo -= 1;
         tr.layers += 1;
+        tr.offsets.push(tr.redoOffsets.pop() ?? 0);
         this.emitLayerSummary(cmd.track, tr.layers - 1);
         return null;
+      case "nudgeLayer": {
+        if (cmd.layer < 0 || cmd.layer >= tr.layers) return "trackEmpty";
+        const half = Math.floor((this.period ?? 0) / 2);
+        tr.offsets[cmd.layer] = Math.max(-half, Math.min(half, (tr.offsets[cmd.layer] ?? 0) + Math.round(cmd.frames)));
+        return null;
+      }
       case "clear":
         this.clear(cmd.track);
         return null;
@@ -1115,6 +1125,7 @@ export class MockEngine implements EngineTransport {
   private discard(tr: MockTrack): void {
     tr.rec = null;
     tr.layers = Math.max(0, tr.layers - 1);
+    tr.offsets.pop();
     this.free += 1;
     if (this.transport.mode === "free" && !this.hasContent() && !this.anyRecording()) this.period = null;
   }
@@ -1156,6 +1167,7 @@ export class MockEngine implements EngineTransport {
       for (const other of this.tracks) {
         this.free += other.redo;
         other.redo = 0;
+        other.redoOffsets = [];
       }
       return "poolExhausted";
     }
@@ -1166,7 +1178,9 @@ export class MockEngine implements EngineTransport {
     this.free -= 1;
     this.free += tr.redo; // a new take discards this track's redo history
     tr.redo = 0;
+    tr.redoOffsets = [];
     tr.layers += 1;
+    tr.offsets.push(0);
     tr.rec = rec;
     tr.playing = true;
   }
@@ -1238,6 +1252,8 @@ export class MockEngine implements EngineTransport {
     this.free += tr.layers + tr.redo;
     tr.layers = 0;
     tr.redo = 0;
+    tr.offsets = [];
+    tr.redoOffsets = [];
     tr.rec = null;
     tr.playing = true;
     if (this.transport.mode === "free" && !this.hasContent() && !this.anyRecording()) this.period = null;
@@ -1253,6 +1269,26 @@ export class MockEngine implements EngineTransport {
       return Math.min(1, body + accents + layer * 0.05);
     });
     this.emit({ type: "layerSummary", payload: { track, layer, bins } });
+    if (this.period !== null) {
+      const beats = this.period / this.framesPerBeat();
+      if (Math.abs(beats - Math.round(beats)) < 1e-6) {
+        const medianOffsetMs = ((track + layer) % 2 === 0 ? 12 : -7) + layer * 2;
+        const suggestedNudgeFrames = Math.round((-medianOffsetMs * this.sampleRate) / 1_000);
+        this.emit({
+          type: "layerTiming",
+          payload: {
+            track,
+            layer,
+            hits: Array.from({ length: Math.min(4, Math.max(1, Math.round(beats))) }, (_, beat) => ({
+              beat: beat + 1,
+              offsetMs: medianOffsetMs + (beat % 2 === 0 ? -2 : 2),
+            })),
+            medianOffsetMs,
+            suggestedNudgeFrames,
+          },
+        });
+      }
+    }
   }
 
   private advanceLooper(frames: number): void {
@@ -1294,6 +1330,7 @@ export class MockEngine implements EngineTransport {
       redoLayers: tr.redo,
       recordStart: tr.rec ? tr.rec.start : null,
       recordEnd: tr.rec ? tr.rec.end : null,
+      layerOffsets: [...tr.offsets],
     };
   }
 

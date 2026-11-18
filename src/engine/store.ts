@@ -30,6 +30,7 @@ import {
   type LevelReading,
   type LooperNotice,
   type LooperState,
+  type LayerTiming,
   type MidiEvent,
   type MidiPortInfo,
   type NoteEvent,
@@ -151,6 +152,8 @@ export interface EngineSnapshot {
   looper: LooperView | null;
   /** Compact loudness rings by track, then layer index (zero = base). */
   layerSummaries: Record<number, number[][]>;
+  /** Timing analysis by track and active layer; null means no whole-beat result. */
+  layerTimings: Record<number, (LayerTiming | null)[]>;
   errors: ErrorEntry[];
   warnings: EngineWarning[];
   notices: NoticeEntry[];
@@ -269,6 +272,7 @@ export class EngineStore {
       busy: false,
       looper: null,
       layerSummaries: {},
+      layerTimings: {},
       errors: [],
       warnings: [],
       notices: [],
@@ -353,9 +357,10 @@ export class EngineStore {
         const view = looperView(event.payload);
         const key = JSON.stringify(view);
         const layerSummaries = this.trimLayerSummaries(event.payload.tracks);
-        if (key !== this.looperKey || layerSummaries !== this.snapshot.layerSummaries) {
+        const layerTimings = this.trimLayerTimings(event.payload.tracks);
+        if (key !== this.looperKey || layerSummaries !== this.snapshot.layerSummaries || layerTimings !== this.snapshot.layerTimings) {
           this.looperKey = key;
-          this.set({ looper: view, layerSummaries });
+          this.set({ looper: view, layerSummaries, layerTimings });
         }
         return;
       }
@@ -364,6 +369,13 @@ export class EngineStore {
         const trackLayers = [...(this.snapshot.layerSummaries[track] ?? [])];
         trackLayers[layer] = [...bins];
         this.set({ layerSummaries: { ...this.snapshot.layerSummaries, [track]: trackLayers } });
+        return;
+      }
+      case "layerTiming": {
+        const timing = event.payload;
+        const trackLayers = [...(this.snapshot.layerTimings[timing.track] ?? [])];
+        trackLayers[timing.layer] = timing;
+        this.set({ layerTimings: { ...this.snapshot.layerTimings, [timing.track]: trackLayers } });
         return;
       }
       case "status":
@@ -482,6 +494,27 @@ export class EngineStore {
         changed = true;
       } else {
         next[track] = summaries;
+      }
+    }
+    if (Object.keys(current).some((track) => Number(track) >= tracks.length)) changed = true;
+    return changed ? next : current;
+  }
+
+  private trimLayerTimings(tracks: TrackSnapshot[]): Record<number, (LayerTiming | null)[]> {
+    const current = this.snapshot.layerTimings;
+    let changed = false;
+    const next: Record<number, (LayerTiming | null)[]> = {};
+    for (let track = 0; track < tracks.length; track += 1) {
+      const timings = current[track];
+      if (!timings) continue;
+      const count = tracks[track].layers;
+      if (count === 0) {
+        changed = true;
+      } else if (timings.length > count) {
+        next[track] = timings.slice(0, count);
+        changed = true;
+      } else {
+        next[track] = timings;
       }
     }
     if (Object.keys(current).some((track) => Number(track) >= tracks.length)) changed = true;

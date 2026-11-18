@@ -185,6 +185,9 @@ pub struct LayerDoc {
     /// Where phase 0 of the layer sits on the session timeline (0 for loops).
     #[serde(default)]
     pub start_frame: u64,
+    /// Non-destructive signed playback shift on the loop clock.
+    #[serde(default)]
+    pub nudge_frames: i64,
     /// Loop period this layer was recorded against.
     pub loop_period_frames: f64,
     /// `fnv1a64:<16 hex>` over the samples, to detect damaged or swapped files.
@@ -524,6 +527,7 @@ mod tests {
             frames: 96_001,
             channels: 1,
             start_frame: 0,
+            nudge_frames: 0,
             loop_period_frames: 96_000.5,
             checksum: "fnv1a64:0000000000000001".into(),
             derived_from: None,

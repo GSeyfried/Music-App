@@ -35,7 +35,7 @@ use rtrb::{Consumer, Producer};
 
 use super::pool::{LayerBuf, LayerRecycler};
 use super::processor::{LooperHandles, RejectReason, RunState};
-use super::MAX_TRACKS;
+use super::{MAX_LAYERS_PER_TRACK, MAX_TRACKS};
 use crate::transport::TransportState;
 
 /// Capacity of the job and result rings. The control side keeps at most this
@@ -65,10 +65,21 @@ pub struct TrackPlan {
     pub muted: bool,
     pub solo: bool,
     pub playing: bool,
+    pub layer_offsets: [i64; MAX_LAYERS_PER_TRACK],
+    pub redo_offsets: [i64; MAX_LAYERS_PER_TRACK],
 }
 
 impl TrackPlan {
-    pub const EMPTY: Self = Self { layers: 0, redo: 0, gain: 1.0, muted: false, solo: false, playing: true };
+    pub const EMPTY: Self = Self {
+        layers: 0,
+        redo: 0,
+        gain: 1.0,
+        muted: false,
+        solo: false,
+        playing: true,
+        layer_offsets: [0; MAX_LAYERS_PER_TRACK],
+        redo_offsets: [0; MAX_LAYERS_PER_TRACK],
+    };
 }
 
 /// What the looper holds, as seen by one consistent `Describe`.
