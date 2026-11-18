@@ -21,6 +21,15 @@ Personal project workspace for the Music App. Remote:
 - `reference-packages/*/` is git-ignored reference source. Never import or compile it, and never copy
   or translate code from GPL/AGPL references (Tracktion, JUCE, mloop, Essentia).
 
+## Settings principle
+
+Any new variable that affects the interface or the sound (thresholds,
+defaults, timings, colors, modes) is defined once in the global settings
+registry, with a row in `docs/projects/settings/SETTINGS_INDEX.md`. Do this even
+if it is never exposed as a user setting. Skip it only for values that truly
+don't matter. Whether and where it becomes a visible setting is decided
+separately. See `docs/projects/settings/README.md`.
+
 ## Checks
 
 On the Mac: `npm run engine:test`, `npm run typecheck`, `cargo build -p voiceloop`, `npm run refs:verify`.

@@ -154,6 +154,32 @@ Detailed evidence and integration gaps are maintained in
 - Initial acceptance: on a physical iPhone or iPad in Airplane Mode, record,
   loop, overdub, play, undo, save, terminate, and reopen without data loss.
 
+## Near-term build sequence (agreed 2026-11-17)
+
+Runs alongside milestone 1's hardware checks: the H4n, the MIDI keyboard and the
+timing matrix in `projects/quality/TIMING_TEST_PLAN.md`.
+
+1. **Settings foundation:**
+   - a global registry of every interface/sound variable (see
+     [settings](projects/settings/README.md))
+   - three tiers: day-to-day controls, an advanced pop-up, and macOS Preferences
+   - move Overdub start out of the transport bar
+   - output device picker next to the input picker
+2. **Practice quick wins:** Easy/Medium/Hard, preset scale exercises, and
+   stopping Studio when entering Practice
+   ([practice-lab/NEXT.md](projects/practice-lab/NEXT.md)).
+3. **Loop circle visuals:** a ring per layer, playhead emphasis, and beat/bar
+   ticks ([visualization](projects/visualization/README.md)).
+4. **Timing help:**
+   - per-layer nudge
+   - optional snapping of a take's start to the beat
+   - a readout of how far hits landed from the beat
+5. **Note colors and theme:** system theme by default, an editable color per
+   note, and an opt-in pitch-reactive theme.
+6. **Notation:** a single-voice staff in Practice.
+7. **Chord recognition:** chord labels first, then which notes are sounding
+   ([polyphonic-analysis](projects/polyphonic-analysis/README.md)).
+
 ## Prioritized milestones
 
 Each milestone is intentionally a small vertical slice and includes its UI and
