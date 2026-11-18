@@ -36,6 +36,17 @@ export type GrooveDifficulty = "easy" | "medium" | "hard";
 export type GrooveInputMode = "pads" | "microphone" | "midi";
 export type GrooveMode = "echo" | "freePlay";
 export type PitchCatcherOctaves = "single" | "range";
+// PRODUCE (docs/projects/produce/README.md)
+export type ProduceSnap = "off" | "bar" | "beat" | "1/8" | "1/16";
+export type ProduceRegionColorMode = "lane" | "source" | "neutral";
+export type ProduceWaveformStyle = "filled" | "line" | "off";
+export const PRODUCE_SNAP_OPTIONS: { value: ProduceSnap; label: string }[] = [
+  { value: "off", label: "Off" },
+  { value: "bar", label: "Bar" },
+  { value: "beat", label: "Beat" },
+  { value: "1/8", label: "1/8" },
+  { value: "1/16", label: "1/16" },
+];
 
 export const GROOVE_MODE_OPTIONS: { value: GrooveMode; label: string }[] = [
   { value: "echo", label: "Echo" },
@@ -97,6 +108,30 @@ export interface AppSettings {
   "view.playheadEmphasis": boolean;
   "view.timingReadout": boolean;
   "view.livePitchPanel": boolean;
+  // ---- PRODUCE (src/produce) ----
+  "produce.snap": ProduceSnap;
+  /** Timeline zoom in pixels per second. */
+  "produce.zoom": number;
+  /** Zoom in/out multiplies or divides by this. */
+  "produce.zoomStep": number;
+  "produce.trackHeight": number;
+  "produce.followPlayhead": boolean;
+  "produce.defaultRepeats": number;
+  "produce.bringInPerLayer": boolean;
+  "produce.bringInAtPlayhead": boolean;
+  "produce.regionColorMode": ProduceRegionColorMode;
+  "produce.waveformStyle": ProduceWaveformStyle;
+  "produce.mixerVisible": boolean;
+  "produce.browserVisible": boolean;
+  "produce.inspectorVisible": boolean;
+  "produce.bounceLoopRange": boolean;
+  "produce.syncDebounceMs": number;
+  "produce.undoDepth": number;
+  "produce.minRegionMs": number;
+  "produce.nudgeMs": number;
+  "produce.edgeHandlePx": number;
+  "produce.tailBars": number;
+  "produce.headerWidth": number;
   /** New tracks' loop settings (PER_TRACK_LOOPS.md); the engine default is "song". */
   "looper.trackDefaults.mode": TrackLoopMode;
   "looper.trackDefaults.bars": number;
@@ -210,6 +245,27 @@ export const APP_DEFAULTS: AppSettings = {
   "view.playheadEmphasis": true,
   "view.timingReadout": true,
   "view.livePitchPanel": false,
+  "produce.snap": "beat",
+  "produce.zoom": 80,
+  "produce.zoomStep": 1.5,
+  "produce.trackHeight": 88,
+  "produce.followPlayhead": true,
+  "produce.defaultRepeats": 4,
+  "produce.bringInPerLayer": false,
+  "produce.bringInAtPlayhead": true,
+  "produce.regionColorMode": "lane",
+  "produce.waveformStyle": "filled",
+  "produce.mixerVisible": false,
+  "produce.browserVisible": true,
+  "produce.inspectorVisible": true,
+  "produce.bounceLoopRange": false,
+  "produce.syncDebounceMs": 150,
+  "produce.undoDepth": 200,
+  "produce.minRegionMs": 10,
+  "produce.nudgeMs": 10,
+  "produce.edgeHandlePx": 8,
+  "produce.tailBars": 8,
+  "produce.headerWidth": 232,
   "looper.trackDefaults.mode": DEFAULT_TRACK_LOOP.mode,
   "looper.trackDefaults.bars": DEFAULT_TRACK_LOOP.bars,
   "looper.trackDefaults.beats": DEFAULT_TRACK_LOOP.beats,
@@ -1386,6 +1442,261 @@ export const SETTINGS: SettingDef[] = [
     label: "Start note hold",
     description: "How long (ms) to hold the note for \"Start from my note\".",
     category: "Practice scales",
+    tier: "internal",
+    scope: "app",
+  },
+  // ---- PRODUCE (src/produce; docs/projects/produce/README.md) -------------
+  {
+    id: "produce.snap",
+    source: "app",
+    kind: "choice",
+    label: "Snap",
+    description: "Where moved, trimmed and split edits land: whole bars, beats, eighth or sixteenth notes, or anywhere (Off).",
+    category: "Produce",
+    tier: "daily",
+    scope: "app",
+    options: PRODUCE_SNAP_OPTIONS,
+  },
+  {
+    id: "produce.zoom",
+    source: "app",
+    kind: "number",
+    min: 5,
+    max: 800,
+    step: 1,
+    label: "Timeline zoom",
+    description: "How wide one second of the arrangement is, in pixels.",
+    category: "Produce",
+    tier: "daily",
+    scope: "app",
+  },
+  {
+    id: "produce.zoomStep",
+    source: "app",
+    kind: "number",
+    min: 1.1,
+    max: 4,
+    step: 0.1,
+    label: "Zoom step",
+    description: "Zoom in and out multiply or divide the zoom by this.",
+    category: "Produce",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "produce.trackHeight",
+    source: "app",
+    kind: "number",
+    min: 48,
+    max: 240,
+    step: 4,
+    label: "Lane height",
+    description: "Height of each arrangement lane, in pixels.",
+    category: "Produce",
+    tier: "preferences",
+    scope: "app",
+  },
+  {
+    id: "produce.followPlayhead",
+    source: "app",
+    kind: "bool",
+    label: "Follow playhead",
+    description: "Scroll the timeline to keep the playhead in view while playing.",
+    category: "Produce",
+    tier: "daily",
+    scope: "app",
+  },
+  {
+    id: "produce.defaultRepeats",
+    source: "app",
+    kind: "number",
+    min: 1,
+    max: 64,
+    step: 1,
+    label: "Bring-in repeats",
+    description: "How many loop cycles a looper track fills when you bring it in from PLAY.",
+    category: "Produce",
+    tier: "preferences",
+    scope: "app",
+  },
+  {
+    id: "produce.bringInPerLayer",
+    source: "app",
+    kind: "bool",
+    label: "Bring in each layer",
+    description: "Bring each overdub layer in as its own lane instead of one mixed lane per track.",
+    category: "Produce",
+    tier: "preferences",
+    scope: "app",
+  },
+  {
+    id: "produce.bringInAtPlayhead",
+    source: "app",
+    kind: "bool",
+    label: "Bring in at playhead",
+    description: "Place brought-in loops at the playhead (off: at the start of the song).",
+    category: "Produce",
+    tier: "preferences",
+    scope: "app",
+  },
+  {
+    id: "produce.regionColorMode",
+    source: "app",
+    kind: "choice",
+    label: "Region colors",
+    description: "Color regions by their lane, by the PLAY track they came from, or plainly.",
+    category: "Produce",
+    tier: "preferences",
+    scope: "app",
+    options: [
+      { value: "lane", label: "Lane" },
+      { value: "source", label: "Source" },
+      { value: "neutral", label: "Plain" },
+    ],
+  },
+  {
+    id: "produce.waveformStyle",
+    source: "app",
+    kind: "choice",
+    label: "Waveform style",
+    description: "How region waveforms are drawn.",
+    category: "Produce",
+    tier: "preferences",
+    scope: "app",
+    options: [
+      { value: "filled", label: "Filled" },
+      { value: "line", label: "Outline" },
+      { value: "off", label: "Off" },
+    ],
+  },
+  {
+    id: "produce.mixerVisible",
+    source: "app",
+    kind: "bool",
+    label: "Show mixer",
+    description: "Show the mixer (a channel strip per lane) under the timeline.",
+    category: "Produce",
+    tier: "daily",
+    scope: "app",
+  },
+  {
+    id: "produce.browserVisible",
+    source: "app",
+    kind: "bool",
+    label: "Show browser",
+    description: "Show the browser (PLAY tracks and project audio) beside the timeline.",
+    category: "Produce",
+    tier: "daily",
+    scope: "app",
+  },
+  {
+    id: "produce.inspectorVisible",
+    source: "app",
+    kind: "bool",
+    label: "Show inspector",
+    description: "Show the inspector for the selected region or lane.",
+    category: "Produce",
+    tier: "daily",
+    scope: "app",
+  },
+  {
+    id: "produce.bounceLoopRange",
+    source: "app",
+    kind: "bool",
+    label: "Bounce the loop range",
+    description: "Bounce only the loop range when one is set (off: the whole arrangement).",
+    category: "Produce",
+    tier: "preferences",
+    scope: "app",
+  },
+  {
+    id: "produce.syncDebounceMs",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 2000,
+    step: 10,
+    label: "Arrangement sync delay",
+    description: "Edits are sent to the engine after this many ms without another edit.",
+    category: "Produce",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "produce.undoDepth",
+    source: "app",
+    kind: "number",
+    min: 10,
+    max: 1000,
+    step: 10,
+    label: "Undo steps",
+    description: "How many arrangement edits Undo remembers.",
+    category: "Produce",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "produce.minRegionMs",
+    source: "app",
+    kind: "number",
+    min: 1,
+    max: 1000,
+    step: 1,
+    label: "Shortest region",
+    description: "Trimming never makes a region shorter than this many ms.",
+    category: "Produce",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "produce.nudgeMs",
+    source: "app",
+    kind: "number",
+    min: 1,
+    max: 1000,
+    step: 1,
+    label: "Nudge step",
+    description: "Arrow keys move a selected region by this many ms when Snap is Off.",
+    category: "Produce",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "produce.edgeHandlePx",
+    source: "app",
+    kind: "number",
+    min: 4,
+    max: 24,
+    step: 1,
+    label: "Edge handle width",
+    description: "Width of the trim zone at a region's edges, in pixels.",
+    category: "Produce",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "produce.tailBars",
+    source: "app",
+    kind: "number",
+    min: 1,
+    max: 64,
+    step: 1,
+    label: "Space after the end",
+    description: "Empty bars shown after the last region.",
+    category: "Produce",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "produce.headerWidth",
+    source: "app",
+    kind: "number",
+    min: 160,
+    max: 400,
+    step: 4,
+    label: "Lane header width",
+    description: "Width of the lane headers, in pixels.",
+    category: "Produce",
     tier: "internal",
     scope: "app",
   },

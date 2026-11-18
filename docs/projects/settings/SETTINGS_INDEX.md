@@ -220,3 +220,30 @@ tuning; only the first few are likely user-facing.
 | `looper.timing.minimumSpacingMs` | Timing hit spacing | Minimum distance between detected attacks. | 80 ms | app | Track Details timing readout | exists (engine internal) |
 | `looper.timing.maxHits` | Timing hit limit | Maximum attack offsets carried in one layer-timing event. | 32 | app | Track Details timing readout | exists (engine internal) |
 | `looper.timing.wholeBeatToleranceFrames` | Whole-beat tolerance | Maximum period mismatch allowed before beat-relative timing is withheld. | 1 frame | app | Track Details timing readout | exists (engine internal) |
+
+## PRODUCE (exists: `src/produce/`; see [produce](../produce/README.md))
+
+| ID | Label | Description | Default | Scope | Connected element | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `produce.snap` | Snap | Where moved, trimmed and split edits land: whole bars, beats, eighth or sixteenth notes, or anywhere (Off). | Beat | app | PRODUCE toolbar › Snap; region drag/trim/split, ruler seek, arrow-key nudge | exists |
+| `produce.zoom` | Timeline zoom | How wide one second of the arrangement is, in pixels. | 80 px/s | app | PRODUCE toolbar › zoom in/out/fit; `=` / `-` / `Z` | exists |
+| `produce.zoomStep` | Zoom step | Zoom in and out multiply or divide the zoom by this. | 1.5 | app | Zoom buttons and keys | internal |
+| `produce.trackHeight` | Lane height | Height of each arrangement lane, in pixels. | 88 px | app | Lane headers and lanes | exists |
+| `produce.followPlayhead` | Follow playhead | Scroll the timeline to keep the playhead in view while playing. | on | app | PRODUCE toolbar › Follow; `F` | exists |
+| `produce.defaultRepeats` | Bring-in repeats | How many loop cycles a looper track fills when you bring it in from PLAY. | 4 | app | Browser › PLAY tracks › Repeats | exists |
+| `produce.bringInPerLayer` | Bring in each layer | Bring each overdub layer in as its own lane instead of one mixed lane per track. | off | app | Browser › PLAY tracks › Mixed / Per layer | exists |
+| `produce.bringInAtPlayhead` | Bring in at playhead | Place brought-in loops at the playhead (off: at the start of the song). | on | app | Browser › PLAY tracks › At playhead | exists |
+| `produce.regionColorMode` | Region colors | Color regions by their lane, by the PLAY track they came from, or plainly. | Lane | app | Regions | exists |
+| `produce.waveformStyle` | Waveform style | How region waveforms are drawn (filled, outline, or off). | Filled | app | Regions | exists |
+| `produce.mixerVisible` | Show mixer | Show the mixer (a channel strip per lane) under the timeline. | off | app | PRODUCE toolbar › Mixer | exists |
+| `produce.browserVisible` | Show browser | Show the browser (PLAY tracks and project audio) beside the timeline. | on | app | PRODUCE toolbar › Browser | exists |
+| `produce.inspectorVisible` | Show inspector | Show the inspector for the selected region or lane. | on | app | PRODUCE toolbar › Inspector | exists |
+| `produce.bounceLoopRange` | Bounce the loop range | Bounce only the loop range when one is set (off: the whole arrangement). | off | app | PRODUCE toolbar › Bounce | exists |
+| `produce.syncDebounceMs` | Arrangement sync delay | Edits are sent to the engine (`arrangement_set`) after this many ms without another edit. | 150 ms | app | `src/produce/arrangementStore.ts` | internal |
+| `produce.undoDepth` | Undo steps | How many arrangement edits Undo remembers. | 200 | app | PRODUCE undo/redo | internal |
+| `produce.minRegionMs` | Shortest region | Trimming never makes a region shorter than this many ms. | 10 ms | app | Region trim, split | internal |
+| `produce.nudgeMs` | Nudge step | Arrow keys move a selected region by this many ms when Snap is Off. | 10 ms | app | Region keyboard nudge | internal |
+| `produce.edgeHandlePx` | Edge handle width | Width of the trim zone at a region's edges, in pixels. | 8 px | app | Region trim handles | internal |
+| `produce.tailBars` | Space after the end | Empty bars shown after the last region. | 8 | app | Timeline width | internal |
+| `produce.headerWidth` | Lane header width | Width of the lane headers, in pixels. | 232 px | app | Lane headers | internal |
+| (const) `LANE_PALETTE` | Lane colors | Colors offered by the lane color picker for a lane with no color of its own (mirrors the `--track-1..8` tokens; a lane with `color: null` follows the theme). | Track palette | app | Lane header color, regions, mixer | internal |
