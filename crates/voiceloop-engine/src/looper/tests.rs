@@ -22,6 +22,7 @@ fn config(fade: u32) -> LooperConfig {
         fade_frames: fade,
         gain_smoothing_frames: 0,
         capture_tail_ms: 0,
+        timing: LayerTimingConfig::default(),
     }
 }
 
@@ -123,6 +124,14 @@ impl Rig {
         let mut v = Vec::new();
         while let Ok(summary) = self.h.summaries.pop() {
             v.push(summary);
+        }
+        v
+    }
+
+    fn timings(&mut self) -> Vec<LayerTiming> {
+        let mut v = Vec::new();
+        while let Ok(timing) = self.h.timings.pop() {
+            v.push(timing);
         }
         v
     }
@@ -272,6 +281,57 @@ fn free_loop_repeats_at_exact_period() {
     r.silence(10_000);
     let expected: Vec<usize> = (1..=10).map(|k| 100 + k * 1_000).collect();
     assert_eq!(nonzero_from(&r.out, 0), expected);
+}
+
+#[test]
+fn nudge_shifts_one_layer_and_survives_undo_redo() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(1_000, impulse(100));
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1);
+
+    // A positive nudge means the layer is heard later on the loop clock.
+    r.send(C::NudgeLayer { track: 0, layer: 0, frames: 50 });
+    let before = r.out.len();
+    r.silence(1_000);
+    assert_eq!(nonzero_from(&r.out, before), vec![before + 149]);
+    assert_eq!(serde_json::to_value(r.snap().tracks[0]).unwrap()["layerOffsets"], serde_json::json!([50]));
+
+    // Base layers cannot be undone, so add an overdub to exercise offset stack order.
+    r.send(C::Overdub { track: 0 });
+    let start = r.frame;
+    r.run(1_000, impulse(start + 200));
+    r.send(C::StopRecording { track: 0 });
+    r.silence(1);
+    r.send(C::NudgeLayer { track: 0, layer: 1, frames: -25 });
+    r.silence(1);
+    r.send(C::Undo { track: 0 });
+    r.silence(1);
+    assert_eq!(serde_json::to_value(r.snap().tracks[0]).unwrap()["layerOffsets"], serde_json::json!([50]));
+    r.send(C::Redo { track: 0 });
+    r.silence(1);
+    assert_eq!(serde_json::to_value(r.snap().tracks[0]).unwrap()["layerOffsets"], serde_json::json!([50, -25]));
+}
+
+#[test]
+fn completed_whole_beat_layer_emits_bounded_timing() {
+    let mut cfg = config(0);
+    cfg.timing.window_frames = 32;
+    cfg.timing.minimum_rms = 0.02;
+    let mut r = Rig::new(cfg, one_bar_synced());
+    r.send(C::Record { track: 0 });
+    r.run(2_001, impulse(550));
+    // Summary scanning is bounded to one chunk per callback, so allow it to finish.
+    r.silence(2_100);
+    let timings = r.timings();
+    assert_eq!(timings.len(), 1);
+    let timing = timings[0];
+    assert_eq!((timing.track, timing.layer), (0, 0));
+    assert_eq!(timing.hit_count, 1);
+    assert_eq!(timing.hits[0].beat, 2);
+    assert!(timing.median_offset_ms > 0.0);
+    assert!(timing.suggested_nudge_frames < 0);
 }
 
 #[test]

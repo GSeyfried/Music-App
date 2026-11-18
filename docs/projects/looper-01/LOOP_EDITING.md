@@ -39,6 +39,21 @@ functional but discard their edits on save.
 
 ## Meter and discoverability
 
+## Timing help and layer nudge
+
+When a completed layer belongs to a loop with a whole number of beats, the
+engine performs a bounded RMS/onset scan alongside its existing post-recording
+summary scan. It reports compact hit offsets and a median early/late estimate;
+raw audio is never sent to the frontend. The Track Details sheet can hide this
+readout with `view.timingReadout`.
+
+Each active layer has a non-destructive signed playback nudge in frames. A
+positive value plays later; the command is clamped to half a loop, applies in
+the output callback without allocation, follows Undo/Redo, and persists with
+the project. This is an alignment aid, not time stretching: it cannot correct
+uneven timing within a take. Timing analysis is withheld for cycles that are
+not whole-beat lengths. Hardware validation of the detector remains PENDING.
+
 The Studio transport presents 3, 4, 5, and 7 as common meter choices while
 retaining a 1–32 custom measure-length control. The denominator remains
 independent, so 3/4, 5/4, 7/8 and other combinations work normally.

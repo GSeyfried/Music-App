@@ -370,8 +370,8 @@ export interface TrackSnapshot {
   redoLayers: number;
   recordStart: number | null;
   recordEnd: number | null;
-  /** Signed playback shifts, one per active layer, in frames. */
-  layerOffsets: number[];
+  /** Signed playback shifts, one per active layer, in frames (absent on older engines). */
+  layerOffsets?: number[];
 }
 
 export interface MusicalPosition {

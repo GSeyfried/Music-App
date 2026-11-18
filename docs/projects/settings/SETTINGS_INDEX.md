@@ -160,3 +160,9 @@ tuning; only the first few are likely user-facing.
 | `practice.startNote.holdMs` | Start note hold | How long (ms) to hold the note for "Start from my note". | 600 ms | app | Scale card | exists (internal) |
 | `view.livePitchPanel` | Live pitch panel | Show the tuner and pitch curve beside the tracks in Studio. Pitch analysis only runs while something needs it (this panel, Practice Lab, Games, or pitch-reactive colors). | off | app | Studio "Live pitch" toggle; tuner, pitch curve | exists |
 | `practice.scale.followRange` | Fit scales to my range | When you pick a key, start the scale in the octave that fits the range from the Range Finder (Games tab). | on | app | Scale card octave; "Fit my range" buttons | exists |
+| `looper.timing.windowFrames` | Timing energy window | Frames in each RMS window while scanning a completed layer for attacks. | 64 frames | app | Track Details timing readout | exists (engine internal) |
+| `looper.timing.minimumRms` | Timing minimum energy | Minimum RMS required for a completed-layer attack. | 0.02 | app | Track Details timing readout | exists (engine internal) |
+| `looper.timing.riseRatio` / `releaseRatio` | Timing onset shape | Required RMS rise to mark an attack and fall before another can arm. | 2.0 / 0.6 | app | Track Details timing readout | exists (engine internal) |
+| `looper.timing.minimumSpacingMs` | Timing hit spacing | Minimum distance between detected attacks. | 80 ms | app | Track Details timing readout | exists (engine internal) |
+| `looper.timing.maxHits` | Timing hit limit | Maximum attack offsets carried in one layer-timing event. | 32 | app | Track Details timing readout | exists (engine internal) |
+| `looper.timing.wholeBeatToleranceFrames` | Whole-beat tolerance | Maximum period mismatch allowed before beat-relative timing is withheld. | 1 frame | app | Track Details timing readout | exists (engine internal) |

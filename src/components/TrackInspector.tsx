@@ -66,7 +66,7 @@ export function TrackInspector() {
                     {showTiming ? (
                       <div className="timing-readout">
                         <span>{timing ? timingLabel(timing.medianOffsetMs) : "Timing unavailable"}</span>
-                        <span className="timing-offset">Nudge: {t.layerOffsets[layer] ?? 0} frames</span>
+                        <span className="timing-offset">Nudge: {t.layerOffsets?.[layer] ?? 0} frames</span>
                         <div className="timing-actions" aria-label={`Layer ${layer + 1} timing controls`}>
                           <Button
                             variant="outline"
