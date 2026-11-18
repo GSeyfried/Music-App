@@ -915,7 +915,7 @@ export const SETTINGS: SettingDef[] = [
     step: 0.01,
     editable: true,
     label: "Course speed factor",
-    description: "Multiplies the course's written tempo. Type any factor from 0.05× to 12×; 1× follows the written BPM and 0.5× is half speed.",
+    description: "Multiplies the course's written tempo: the pipes come faster or slower while keeping the melody's rhythmic spacing. Type any factor from 0.05× to 12×; 1× follows the written BPM and 0.5× is half speed.",
     category: "Games",
     tier: "daily",
     scope: "app",

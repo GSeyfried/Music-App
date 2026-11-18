@@ -300,6 +300,21 @@ describe("pitch glider", () => {
     expect(makeGate(1, extreme, 0, undefined, course[0], 0).width).toBeLessThan(courseBeatSpacing(extreme));
   });
 
+  it("a faster course scrolls faster; the pipes keep their spacing", () => {
+    const course = [{ midi: 60, beats: 1 }, { midi: 64, beats: 1 }];
+    const normal = gameConfig(2, "hard", range, "normal", 0, 0, 12, 5, course, 120, 1);
+    const fast = gameConfig(2, "hard", range, "normal", 0, 0, 12, 5, course, 120, 2);
+    const slow = gameConfig(2, "hard", range, "normal", 0, 0, 12, 5, course, 120, 0.5);
+    expect(courseBeatSpacing(fast)).toBeCloseTo(courseBeatSpacing(normal));
+    expect(courseBeatSpacing(slow)).toBeCloseTo(courseBeatSpacing(normal));
+    expect(fast.speed).toBeCloseTo(normal.speed * 2);
+    expect(slow.speed).toBeCloseTo(normal.speed / 2);
+    // Free flight (no course) ignores the course factor.
+    expect(gameConfig(2, "hard", range, "normal", 0, 0, 12, 5, undefined, 120, 2).speed).toBeCloseTo(
+      gameConfig(2, "hard", range, "normal", 0, 0, 12, 5).speed,
+    );
+  });
+
   it("finishes after the last course gate is cleanly passed", () => {
     const course = [{ midi: 60, beats: 1 }];
     const courseConfig = gameConfig(2, "superEasy", range, "slow", 0, 0, 12, 5, course, 120, 1);

@@ -286,7 +286,9 @@ export function gameConfig(
     stabilityToleranceCents: stabilityToleranceCentsFor(difficulty),
     pipeWidth: GAME_GATE_WIDTHS[difficulty],
     viewportSemitones,
-    speed: speedFor(speed),
+    // A course's tempo factor changes how fast the pipes come, not how far
+    // apart they are: the scroll speed scales and a beat keeps its width.
+    speed: speedFor(speed) * (courseNotes ? clamp(courseSpeedFactor, 0.05, 12) : 1),
     gravity,
     smoothingMs,
     spacing: GAME_GATE_SPACING,
@@ -297,7 +299,10 @@ export function gameConfig(
   };
 }
 
-/** World distance of one written course beat at the selected tempo factor. */
+/**
+ * World distance of one written course beat. The tempo factor is already in
+ * `cfg.speed`, so this is the same at every factor (faster = scrolls faster).
+ */
 export function courseBeatSpacing(cfg: Pick<GameConfig, "speed" | "courseBpm" | "courseSpeedFactor">): number {
   return (cfg.speed * 60) / Math.max(1, cfg.courseBpm) / clamp(cfg.courseSpeedFactor, 0.05, 12);
 }
