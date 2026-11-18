@@ -148,6 +148,8 @@ export interface EngineSnapshot {
   status: EngineStatus;
   busy: boolean;
   looper: LooperView | null;
+  /** Compact loudness rings by track, then layer index (zero = base). */
+  layerSummaries: Record<number, number[][]>;
   errors: ErrorEntry[];
   warnings: EngineWarning[];
   notices: NoticeEntry[];
@@ -254,6 +256,7 @@ export class EngineStore {
       status: IDLE_STATUS,
       busy: false,
       looper: null,
+      layerSummaries: {},
       errors: [],
       warnings: [],
       notices: [],
@@ -331,10 +334,18 @@ export class EngineStore {
         live.looperAt = now;
         const view = looperView(event.payload);
         const key = JSON.stringify(view);
-        if (key !== this.looperKey) {
+        const layerSummaries = this.trimLayerSummaries(event.payload.tracks);
+        if (key !== this.looperKey || layerSummaries !== this.snapshot.layerSummaries) {
           this.looperKey = key;
-          this.set({ looper: view });
+          this.set({ looper: view, layerSummaries });
         }
+        return;
+      }
+      case "layerSummary": {
+        const { track, layer, bins } = event.payload;
+        const trackLayers = [...(this.snapshot.layerSummaries[track] ?? [])];
+        trackLayers[layer] = [...bins];
+        this.set({ layerSummaries: { ...this.snapshot.layerSummaries, [track]: trackLayers } });
         return;
       }
       case "status":
@@ -426,6 +437,33 @@ export class EngineStore {
       patch.looper = null;
     }
     this.set(patch);
+  }
+
+  /** Undo/Clear need no extra event: the authoritative layer counts trim rings.
+   * Redo re-emits its preserved engine summary, while imported layers emit once
+   * their restored buffers have finished loading.
+   */
+  private trimLayerSummaries(tracks: TrackSnapshot[]): Record<number, number[][]> {
+    const current = this.snapshot.layerSummaries;
+    let changed = false;
+    const next: Record<number, number[][]> = {};
+    for (let track = 0; track < tracks.length; track += 1) {
+      const summaries = current[track];
+      if (!summaries) continue;
+      const count = tracks[track].layers;
+      if (count === 0) {
+        changed = true;
+        continue;
+      }
+      if (summaries.length > count) {
+        next[track] = summaries.slice(0, count);
+        changed = true;
+      } else {
+        next[track] = summaries;
+      }
+    }
+    if (Object.keys(current).some((track) => Number(track) >= tracks.length)) changed = true;
+    return changed ? next : current;
   }
 
   private clearAnalysisHistory(): void {

@@ -30,7 +30,7 @@ use crate::hardware::{
     self, AudioDiagnostics, CalibrationOutcome, DevicesChanged, Hardware, HardwareAction, SessionAction,
 };
 use crate::looper::io::{LooperPlayback, OutputInfo};
-use crate::looper::{LooperCommand, LooperConfig, LooperNotice, LooperSnapshot, LooperState};
+use crate::looper::{LayerSummary, LooperCommand, LooperConfig, LooperNotice, LooperSnapshot, LooperState};
 use crate::meter::{amplitude_to_db, MeterFrame};
 use crate::midi_in::{MidiBatch, MidiPortInfo};
 use crate::model::AudioDevice;
@@ -105,6 +105,8 @@ pub enum EngineEvent {
     Warning(EngineWarning),
     Looper(LooperState),
     LooperNotice(LooperNotice),
+    /// Exact 128-bin peak envelope for one completed immutable loop layer.
+    LayerSummary(LayerSummary),
     /// ~30 Hz while audio runs and analysis is enabled.
     Pitch(PitchUpdate),
     /// A sung or played note has ended (onset, offset, pitch, intonation).
@@ -869,6 +871,9 @@ impl ControlLoop {
         while let Ok(notice) = p.handles.notices.pop() {
             (self.sink)(EngineEvent::LooperNotice(notice));
         }
+        while let Ok(summary) = p.handles.summaries.pop() {
+            (self.sink)(EngineEvent::LayerSummary(summary));
+        }
         while let Ok(snapshot) = p.handles.snapshots.pop() {
             self.latest_snapshot = Some(snapshot);
         }
@@ -1095,6 +1100,16 @@ mod tests {
         let ev = EngineEvent::Warning(EngineWarning::SilentInput("x".into()));
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(json, r#"{"type":"warning","payload":{"kind":"silentInput","message":"x"}}"#);
+
+        let mut bins = [0.0; crate::looper::LAYER_SUMMARY_BINS];
+        bins[7] = 0.75;
+        let ev = EngineEvent::LayerSummary(LayerSummary { track: 2, layer: 1, bins });
+        let json = serde_json::to_value(ev).unwrap();
+        assert_eq!(json["type"], "layerSummary");
+        assert_eq!(json["payload"]["track"], 2);
+        assert_eq!(json["payload"]["layer"], 1);
+        assert_eq!(json["payload"]["bins"].as_array().unwrap().len(), crate::looper::LAYER_SUMMARY_BINS);
+        assert_eq!(json["payload"]["bins"][7], 0.75);
     }
 
     #[test]

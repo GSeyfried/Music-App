@@ -1,8 +1,9 @@
 # Visualization
 
-Status: **proposed (2026-11-17), not started.** Design notes only. Nothing here
-compiles, has tests, or has been verified on hardware. Settings for this area
-are listed in [settings/SETTINGS_INDEX.md](../settings/SETTINGS_INDEX.md).
+Status: **layer-summary data path implemented (2026-11-17); rendering proposed.**
+The engine, bridge contract, store, and mock provide per-layer loudness data;
+the loop-circle UI itself is not implemented or hardware-verified. Settings for
+this area are listed in [settings/SETTINGS_INDEX.md](../settings/SETTINGS_INDEX.md).
 
 ## 1. Loop circles: radial histogram, playhead, beat ticks
 
@@ -13,11 +14,17 @@ Proposed:
 
 - **Radial histogram:** each layer gets its own concentric ring showing loudness
   around the loop.
-  - When a layer is committed, the engine computes a small loudness summary
-    (128–256 slices) and sends it as an event. Raw audio never crosses the bridge
+  - When a layer is committed, the engine sends 128 peak-absolute-value bins
+    covering equal slices of the loop. Raw audio never crosses the bridge
     (AGENTS.md).
-  - The summary is computed off the realtime thread, never inside the audio
-    callback.
+  - Completed immutable buffers are scanned in bounded chunks in the realtime
+    callback, using only preallocated arrays and a preallocated event ring. This
+    produces the exact final envelope for multi-pass overdubs without allocating,
+    locking, blocking, logging, or doing I/O in the callback.
+  - Events identify `track` and `layer` (`0` = base). The frontend trims entries
+    to the authoritative layer count on Undo/Clear; Redo re-emits the preserved
+    summary. Project-restored active layers are scanned and emitted after import
+    finishes.
 - **Playhead emphasis:** the slice under the playhead (and a short trail) is
   drawn brighter and slightly larger.
 - **Ticks:** bar marks (long) and beat marks (short) around the circle, derived
@@ -52,10 +59,8 @@ Proposed:
 
 - Ticks for **free-length loops** (`LoopMode` without a bar/beat length): no
   ticks, ticks from the master loop, or ticks from an inferred tempo?
-- Histogram resolution (slices per loop), and whether the summary is per layer
-  only or also a mixed total.
-- Loudness measure for the histogram: peak, RMS, or both (for example RMS fill
-  with a peak outline).
+- Whether to add a separate mixed-total summary in addition to the implemented
+  per-layer peak envelope.
 - Default 12-color palette (for example a hue wheel aligned to the circle of
   fifths, or to chromatic order).
 - Whether loop rings color layers by detected note, or keep a per-track color.

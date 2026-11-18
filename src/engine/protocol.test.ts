@@ -103,6 +103,7 @@ describe("engine events parse from the Rust JSON", () => {
         "warning",
         "looper",
         "looperNotice",
+        "layerSummary",
         "pitch",
         "note",
         "onset",
