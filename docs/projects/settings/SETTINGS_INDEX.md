@@ -44,6 +44,28 @@ Scopes: app / project / track / session.
 | `tuner.range` | Pitch range | The range of notes the detector listens for: Voice 65–1400 Hz, Low 40–700 Hz, High 100–2000 Hz. | Voice | app (PENDING: confirm) | Tuner; pitch curve | exists |
 | `analysis.enabled` | Pitch analysis | Turn live pitch detection on or off. | PENDING: confirm | app | Tuner; diagnostics "Analysis" | exists |
 
+## Chord analysis (exists: voiceloop-analysis, not yet wired to the UI)
+
+Fields of `ChordConfig` in `crates/voiceloop-analysis/src/chord.rs`. See
+[polyphonic-analysis](../polyphonic-analysis/README.md). Most are advanced
+tuning; only the first few are likely user-facing.
+
+| ID | Label | Description | Default | Scope | Connected element | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `analysis.chord.minConfidence` | Chord confidence | How closely the sound must match a chord before a name is shown (0–1). Higher shows fewer, surer chords. | 0.8 | app | (none yet) | exists |
+| `analysis.chord.holdFrames` | Chord hold | How many analysis frames in a row a new chord must win before the display changes. Higher is steadier but slower. | 3 | app | (none yet) | exists |
+| `analysis.chord.tuningA4Hz` | Chord reference A4 | Pitch of A4 used to map frequencies to note names. Should follow `tuner.referenceA4`. | 440 Hz | app | (none yet) | exists |
+| `analysis.chord.minRmsDb` | Chord silence level | Below this level (dBFS) no chord is reported. | -50 dB | app | (none yet) | exists |
+| `analysis.chord.minHz` / `maxHz` | Chord frequency range | Frequencies considered when reading chords and notes. | 55 / 2000 Hz | app | (none yet) | exists |
+| `analysis.chord.minFftSize` | Analysis resolution | Each block is padded to at least this many samples before the FFT. | 8192 | app | (none yet) | exists |
+| `analysis.chord.peakFloorDb` | Peak floor | Spectral peaks this many dB below the strongest are ignored. | -40 dB | app | (none yet) | exists |
+| `analysis.chord.significantLevel` | Significant peak level | Fraction of the strongest peak a peak needs to count as the bass or as a fundamental of overtones. | 0.1 | app | (none yet) | exists |
+| `analysis.chord.harmonicWeight` / `maxHarmonic` / `harmonicToleranceCents` | Overtone attenuation | Overtones (up to harmonic 8, within 25 cents) count at this fraction of their strength. | 0.5 / 8 / 25 | app | (none yet) | exists |
+| `analysis.chord.bassRootBonus` | Bass root preference | Score bonus for chords whose root is the lowest note; settles sus2/sus4 ambiguity. | 0.03 | app | (none yet) | exists |
+| `analysis.chord.alternatives` | Alternative chords | How many runner-up chords are reported. | 3 | app | (none yet) | exists |
+| `analysis.chord.maxNotes` | Max sounding notes | Most notes reported by the sounding-notes estimate. | 4 | app | (none yet) | exists |
+| `analysis.chord.noteMinSalience` / `noteHarmonics` / `noteHarmonicDecay` | Note detection tuning | Relative strength a note needs, harmonics summed per note, and their weight decay. | 0.25 / 6 / 0.8 | app | (none yet) | exists |
+
 ## Practice scoring (exists: `ScoringConfig`, `src/practice/types.ts`)
 
 | ID | Label | Description | Default | Scope | Connected element | Status |

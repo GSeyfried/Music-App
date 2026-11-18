@@ -22,10 +22,13 @@
 //! - [`melody`]   reference melodies and performed-versus-reference comparison
 //! - [`practice`] Practice Lab takes, attempt scoring, feedback items, progress trend
 //! - [`theory`]   intervals, scales, key estimation, chord identification
+//! - [`chord`]    chord recognition from mixed audio: chroma, template matching, multi-note, smoothing
+//! - [`spectrum`] Hann-windowed FFT magnitude spectrum and spectral peaks
 //! - [`midi`]     MIDI-compatible events and Standard MIDI File export
 //! - [`note`]     frequency ↔ note arithmetic
 //! - [`signal`]   deterministic synthetic signals for tests and benchmarks
 
+pub mod chord;
 pub mod melody;
 pub mod midi;
 pub mod note;
@@ -35,9 +38,11 @@ pub mod practice;
 pub mod rhythm;
 pub mod segment;
 pub mod signal;
+pub mod spectrum;
 pub mod theory;
 pub mod tracker;
 
+pub use chord::{ChordAnalyzer, ChordConfig, ChordEstimate, ChordFrame, ChordSmoother, Chroma, SoundingNote};
 pub use note::{NoteReading, Tuning};
 pub use onset::{Onset, OnsetConfig, OnsetDetector};
 pub use pitch::{PitchConfig, PitchDetector, PitchEstimate, Unpitched};
