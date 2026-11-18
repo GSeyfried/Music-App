@@ -1,7 +1,9 @@
 // One looper track: a large circular pad (record / overdub / stop) wrapped in
 // a loop-progress ring, plus play, mute, solo, level, undo, redo, clear.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useAppSetting } from "../settings/appSettings";
+import { framesPerBeat, loopTicks } from "../lib/loopTicks";
 import { useEngineActions, useEngineState, useLive } from "../engine/EngineContext";
 import type { LooperView } from "../engine/store";
 import { formatGain } from "../lib/format";
@@ -18,21 +20,56 @@ import { addTrackState, trackActions } from "../lib/trackActions";
 const RING_R = 46;
 const RING_C = 2 * Math.PI * RING_R;
 
-function LoopRing({ track }: { track: number }) {
+/** Point on a circle of radius r at `fraction` of a turn, clockwise from the top. */
+const polar = (r: number, fraction: number) => {
+  const a = fraction * 2 * Math.PI - Math.PI / 2;
+  return { x: 50 + r * Math.cos(a), y: 50 + r * Math.sin(a) };
+};
+
+function RingTicks({ view }: { view: LooperView }) {
+  const show = useAppSetting("view.loopRingTicks");
+  const tr = view.transport;
+  const ticks = useMemo(
+    () => loopTicks(view.loopPeriodFrames, framesPerBeat(view.sampleRate || tr.sampleRate, tr.bpm), tr.timeSignature.numerator),
+    [view.loopPeriodFrames, view.sampleRate, tr.sampleRate, tr.bpm, tr.timeSignature.numerator],
+  );
+  if (!show || ticks.length === 0) return null;
+  return (
+    <g className="ring-ticks">
+      {ticks.map((t) => {
+        const a = polar(t.bar ? RING_R - 5 : RING_R - 3, t.fraction);
+        const b = polar(t.bar ? RING_R + 4 : RING_R + 3, t.fraction);
+        return (
+          <line key={t.fraction} className={t.bar ? "tick tick-bar" : "tick"} x1={a.x} y1={a.y} x2={b.x} y2={b.y} />
+        );
+      })}
+    </g>
+  );
+}
+
+function LoopRing({ track, view }: { track: number; view: LooperView }) {
   const live = useLive();
   const arc = useRef<SVGCircleElement>(null);
   const root = useRef<SVGSVGElement>(null);
+  const head = useRef<SVGCircleElement>(null);
   const caption = useRef<HTMLSpanElement>(null);
+  const emphasis = useAppSetting("view.playheadEmphasis");
   useFrame((now) => {
     const p = ringProgress(live.looper, track, now - live.looperAt);
     setAttr(root.current, "data-mode", p.mode);
     setAttr(arc.current, "stroke-dashoffset", (RING_C * (1 - p.fraction)).toFixed(2));
     setText(caption.current, p.caption);
+    if (head.current) {
+      const pt = polar(RING_R, p.fraction);
+      setAttr(head.current, "cx", pt.x.toFixed(2));
+      setAttr(head.current, "cy", pt.y.toFixed(2));
+    }
   });
   return (
     <>
       <svg className="ring" viewBox="0 0 100 100" ref={root} data-mode="idle" aria-hidden="true">
         <circle className="ring-track" cx="50" cy="50" r={RING_R} />
+        <RingTicks view={view} />
         <circle
           className="ring-arc"
           ref={arc}
@@ -43,6 +80,7 @@ function LoopRing({ track }: { track: number }) {
           strokeDashoffset={RING_C.toFixed(2)}
           transform="rotate(-90 50 50)"
         />
+        {emphasis && <circle className="ring-head" ref={head} cx="50" cy={50 - RING_R} r="4.5" />}
       </svg>
       <span className="ring-caption num" ref={caption} aria-hidden="true" />
     </>
@@ -182,7 +220,7 @@ export function TrackCard({
           title={main.reason}
           {...press}
         >
-          <LoopRing track={track} />
+          <LoopRing track={track} view={view} />
           <span className="pad-face">
             <Icon name={main.tone === "overdub" ? "overdub" : main.tone === "record" ? "record" : "stop"} size={30} />
             <span className="pad-label">{main.label}</span>

@@ -1312,6 +1312,37 @@ input[type="range"] {
   opacity: 0;
 }
 
+/* Beat and bar ticks (view.loopRingTicks) */
+.ring .tick {
+  stroke: var(--text-dim);
+  stroke-width: 0.8;
+  stroke-linecap: round;
+  opacity: 0.55;
+}
+.ring .tick-bar {
+  stroke: var(--text);
+  stroke-width: 1.4;
+  opacity: 0.85;
+}
+
+/* Playhead (view.playheadEmphasis): brighter and larger than the arc */
+.ring-head {
+  fill: var(--tc);
+  stroke: var(--bg);
+  stroke-width: 1.2;
+  filter: drop-shadow(0 0 2.5px var(--tc));
+}
+.ring[data-mode="idle"] .ring-head,
+.ring[data-mode="armed"] .ring-head,
+.ring[data-mode="countIn"] .ring-head {
+  opacity: 0;
+}
+.ring[data-mode="take"] .ring-head,
+.ring[data-mode="freeTake"] .ring-head {
+  fill: var(--record);
+  filter: drop-shadow(0 0 2.5px var(--record));
+}
+
 .ring[data-mode="take"] .ring-arc,
 .ring[data-mode="freeTake"] .ring-arc {
   stroke: var(--record);
