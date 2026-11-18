@@ -36,6 +36,28 @@ Scopes: app / project / track / session.
 | `metronome.gainDb` | Click volume | Metronome volume. | PENDING: confirm | project | Transport bar | exists |
 | `metronome.countInBars` | Count-in | Bars of click before recording starts. | PENDING: confirm | project | Transport bar | exists |
 
+## Per-track loops (exists: `TrackLoop` in `transport.rs` / `domain.ts`; see [PER_TRACK_LOOPS.md](../looper-01/PER_TRACK_LOOPS.md))
+
+Each track's own values live in the engine (`SetTrackLoop`, saved with the project). The
+`looper.trackDefaults.*` settings are what a new track starts with; when they differ from the
+engine default (Same as song), the UI sends `setTrackLoop` right after adding the track.
+
+| ID | Label | Description | Default | Scope | Connected element | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `track.loop.mode` | Track loop | How this track loops: Same as song, Bars, Multiple (of the base loop) or Free. Changes only while the track is empty. | Same as song | track | Transport bar "Track N loop" group; track card summary; Track details "Loops" | exists |
+| `track.loop.bars` / `beats` | Track bars / + beats | Bars mode: this track's loop length on the song's grid. Changes while empty, or while stopped (layers are kept). | 1 bar + 0 | track | Transport bar "Track N loop" group; track ring ticks | exists |
+| `track.loop.ratio` | Track multiple | Multiple mode: ×¼, ×½, ×1, ×1.5, ×2, ×3, ×4, ×8 or ×16 of the base loop. Changes while empty, or while stopped. | ×1 | track | Transport bar "Track N loop" group | exists |
+| `track.loop.countInBars` | Track count-in | Bars of click before recording on this track starts from stopped. | 1 | track | Transport bar "Track N loop" group | exists |
+| `track.loop.overdubStart` | Track overdub start | When an overdub on this track begins. | Loop start | track | Transport bar "Track N loop" group | exists |
+| `track.loop.loopFit` | Track fit first take | How this track's first take is fitted (Free, or the first Multiple take). | Nearest | track | Transport bar "Track N loop" group | exists |
+| `looper.trackDefaults.mode` | New track loops | How a new track loops. Same as song follows the song's loop; Bars uses its own number of bars on the song's grid; Multiple is a multiple of the first Multiple loop; Free is as long as its first take. | Same as song | app | Settings › New tracks; Add track | exists |
+| `looper.trackDefaults.bars` | New track bars | Loop length in whole bars for a new track in Bars mode (plus the extra beats). | 1 | app | Settings › New tracks | exists |
+| `looper.trackDefaults.beats` | New track extra beats | Beats added after the whole bars for a new track in Bars mode. | 0 | app | Settings › New tracks | exists |
+| `looper.trackDefaults.ratio` | New track multiple | For a new track in Multiple mode: how many times the base loop it lasts. | ×1 | app | Settings › New tracks | exists |
+| `looper.trackDefaults.countInBars` | New track count-in | Bars of click before a new track starts recording from stopped. | 1 | app | Settings › New tracks | exists |
+| `looper.trackDefaults.overdubStart` | New track overdub start | When an overdub on a new track begins. | Loop start | app | Settings › New tracks | exists |
+| `looper.trackDefaults.loopFit` | New track fit | How a new Free track's first take (or the first Multiple take) is fitted when you stop. | Nearest | app | Settings › New tracks | exists |
+
 ## Tuner and pitch analysis (exists: `SettingsSheet.tsx` › TunerSettings)
 
 | ID | Label | Description | Default | Scope | Connected element | Status |

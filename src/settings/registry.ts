@@ -9,7 +9,15 @@
 // Engine-owned values from other sources (audio devices, analysis, practice
 // scoring) are still listed in SETTINGS_INDEX.md and join here as they move.
 
-import type { TransportState } from "../models/domain";
+import {
+  DEFAULT_TRACK_LOOP,
+  LOOP_RATIOS,
+  type LoopFit,
+  type OverdubStart,
+  type TrackLoop,
+  type TrackLoopMode,
+  type TransportState,
+} from "../models/domain";
 import { DEFAULT_NOTE_COLORS } from "./noteColors";
 
 /** day-to-day controls are shown in place; the rest live in the advanced pop-up or Preferences. */
@@ -89,6 +97,15 @@ export interface AppSettings {
   "view.playheadEmphasis": boolean;
   "view.timingReadout": boolean;
   "view.livePitchPanel": boolean;
+  /** New tracks' loop settings (PER_TRACK_LOOPS.md); the engine default is "song". */
+  "looper.trackDefaults.mode": TrackLoopMode;
+  "looper.trackDefaults.bars": number;
+  "looper.trackDefaults.beats": number;
+  /** One of LOOP_RATIOS, as a string ("0.25" … "16"). */
+  "looper.trackDefaults.ratio": string;
+  "looper.trackDefaults.countInBars": number;
+  "looper.trackDefaults.overdubStart": OverdubStart;
+  "looper.trackDefaults.loopFit": LoopFit;
   "practice.scale.instrument": "piano";
   "practice.scale.followRange": boolean;
   "practice.startNote.minClarity": number;
@@ -190,6 +207,13 @@ export const APP_DEFAULTS: AppSettings = {
   "view.playheadEmphasis": true,
   "view.timingReadout": true,
   "view.livePitchPanel": false,
+  "looper.trackDefaults.mode": DEFAULT_TRACK_LOOP.mode,
+  "looper.trackDefaults.bars": DEFAULT_TRACK_LOOP.bars,
+  "looper.trackDefaults.beats": DEFAULT_TRACK_LOOP.beats,
+  "looper.trackDefaults.ratio": String(DEFAULT_TRACK_LOOP.ratio),
+  "looper.trackDefaults.countInBars": DEFAULT_TRACK_LOOP.countInBars,
+  "looper.trackDefaults.overdubStart": DEFAULT_TRACK_LOOP.overdubStart,
+  "looper.trackDefaults.loopFit": DEFAULT_TRACK_LOOP.loopFit,
   "widgets.hidden": [],
   "practice.scale.instrument": "piano",
   "practice.scale.followRange": true,
@@ -275,6 +299,57 @@ export type SettingDef =
   | (Base & { id: AppSettingId; source: "app"; kind: "colors" })
   | (Base & { id: `transport.${string}`; source: "transport"; key: keyof TransportState; kind: "choice"; options: Choice[] });
 
+// ---- Per-track loop choices (PER_TRACK_LOOPS.md; also used by the transport bar) ----
+
+export const TRACK_LOOP_MODE_OPTIONS: { value: TrackLoopMode; label: string }[] = [
+  { value: "song", label: "Same as song" },
+  { value: "bars", label: "Bars" },
+  { value: "multiple", label: "Multiple" },
+  { value: "free", label: "Free" },
+];
+
+/** LOOP_RATIOS as choices: "×¼", "×½", "×1" … "×16". */
+export const RATIO_OPTIONS: Choice[] = LOOP_RATIOS.map((r) => ({
+  value: String(r),
+  label: r === 0.25 ? "×¼" : r === 0.5 ? "×½" : `×${r}`,
+}));
+
+export const OVERDUB_START_OPTIONS: { value: OverdubStart; label: string }[] = [
+  { value: "loopStart", label: "Loop start" },
+  { value: "nextBar", label: "Next bar" },
+  { value: "immediate", label: "Now" },
+];
+
+export const LOOP_FIT_OPTIONS: { value: LoopFit; label: string }[] = [
+  { value: "exact", label: "Exact" },
+  { value: "nearestBeat", label: "Nearest" },
+  { value: "roundDown", label: "Down" },
+  { value: "roundUp", label: "Up" },
+];
+
+/** The loop settings a new track starts with, from the `looper.trackDefaults.*` settings. */
+export function trackLoopDefaults(get: <K extends AppSettingId>(id: K) => AppSettings[K]): TrackLoop {
+  const ratio = Number(get("looper.trackDefaults.ratio"));
+  return {
+    mode: get("looper.trackDefaults.mode"),
+    bars: get("looper.trackDefaults.bars"),
+    beats: get("looper.trackDefaults.beats"),
+    ratio: (LOOP_RATIOS as readonly number[]).includes(ratio) ? ratio : DEFAULT_TRACK_LOOP.ratio,
+    countInBars: get("looper.trackDefaults.countInBars"),
+    overdubStart: get("looper.trackDefaults.overdubStart"),
+    loopFit: get("looper.trackDefaults.loopFit"),
+  };
+}
+
+export const sameTrackLoop = (a: TrackLoop, b: TrackLoop) =>
+  a.mode === b.mode &&
+  a.bars === b.bars &&
+  a.beats === b.beats &&
+  a.ratio === b.ratio &&
+  a.countInBars === b.countInBars &&
+  a.overdubStart === b.overdubStart &&
+  a.loopFit === b.loopFit;
+
 export const SETTINGS: SettingDef[] = [
   // ---- Looper ---------------------------------------------------------------
   {
@@ -293,6 +368,91 @@ export const SETTINGS: SettingDef[] = [
       { value: "nextBar", label: "Next bar" },
       { value: "immediate", label: "Now" },
     ],
+  },
+  // ---- New tracks (per-track loops, PER_TRACK_LOOPS.md) ---------------------
+  {
+    id: "looper.trackDefaults.mode",
+    source: "app",
+    kind: "choice",
+    label: "New track loops",
+    description:
+      "How a new track loops. Same as song follows the song's loop; Bars uses its own number of bars on the song's grid; Multiple is a multiple of the first Multiple loop; Free is as long as its first take.",
+    category: "New tracks",
+    tier: "preferences",
+    scope: "app",
+    options: TRACK_LOOP_MODE_OPTIONS,
+  },
+  {
+    id: "looper.trackDefaults.bars",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 256,
+    step: 1,
+    label: "New track bars",
+    description: "Loop length in whole bars for a new track in Bars mode (plus the extra beats below).",
+    category: "New tracks",
+    tier: "preferences",
+    scope: "app",
+  },
+  {
+    id: "looper.trackDefaults.beats",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 64,
+    step: 1,
+    label: "New track extra beats",
+    description: "Beats added after the whole bars for a new track in Bars mode, for example 1 bar + 2 beats.",
+    category: "New tracks",
+    tier: "preferences",
+    scope: "app",
+  },
+  {
+    id: "looper.trackDefaults.ratio",
+    source: "app",
+    kind: "choice",
+    label: "New track multiple",
+    description: "For a new track in Multiple mode: how many times the base loop it lasts (×¼ to ×16).",
+    category: "New tracks",
+    tier: "preferences",
+    scope: "app",
+    options: RATIO_OPTIONS,
+  },
+  {
+    id: "looper.trackDefaults.countInBars",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 8,
+    step: 1,
+    label: "New track count-in",
+    description: "Bars of click before a new track starts recording from stopped (not used by Same as song tracks, which use the song's count-in).",
+    category: "New tracks",
+    tier: "preferences",
+    scope: "app",
+  },
+  {
+    id: "looper.trackDefaults.overdubStart",
+    source: "app",
+    kind: "choice",
+    label: "New track overdub start",
+    description: "When an overdub on a new track begins: at its loop start, the next bar, or at once.",
+    category: "New tracks",
+    tier: "preferences",
+    scope: "app",
+    options: OVERDUB_START_OPTIONS,
+  },
+  {
+    id: "looper.trackDefaults.loopFit",
+    source: "app",
+    kind: "choice",
+    label: "New track fit",
+    description: "How a new Free track's first take (or the first Multiple take) is fitted when you stop: exact, or to the nearest, lower or higher whole beat.",
+    category: "New tracks",
+    tier: "preferences",
+    scope: "app",
+    options: LOOP_FIT_OPTIONS,
   },
   // ---- Loop display ---------------------------------------------------------
   {
