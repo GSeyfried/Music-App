@@ -14,6 +14,11 @@ audio never crosses the bridge. Courses move by whole octaves toward the saved
 voice range, retain their relative durations, can be previewed with the piano,
 and end with a distinct completion state.
 
+Pitch Glider currently scores one target note at a time. Full sing-through
+melody matching—such as singing all of Twinkle and receiving per-note
+matches/misses—fits the Practice Lab's reference-performance workflow and
+remains PENDING there rather than being duplicated inside the arcade game.
+
 Pitch Glider now uses exact semitone targets and has no hidden pitch or
 stability verdict. Every pipe opening is drawn from that target's cents
 tolerance plus the visible craft radius. Live `stabilityCents` expands a
@@ -63,7 +68,8 @@ should feed one shared start action. Exact prompts, scoring, accessibility, and
 whether octave matters remain PENDING.
 4. **Play scales and Practice references in the game (implemented).** One
    opening is generated per note and spacing follows note duration. Course
-   tempo ranges from 50–150%.
+   speed is a directly editable 0.05×–12× factor, with 1× derived from the
+   course's written BPM rather than the old arbitrary scroll spacing.
 5. **Public-domain song library (first set implemented).** Four melodies are
    bundled. Difficulty grouping and a larger catalog remain PENDING.
 6. **Bring your own songs (research).** Import a melody from a MIDI or

@@ -25,7 +25,13 @@ export type GameDifficulty = "superEasy" | "easy" | "medium" | "hard";
 export type GameRangeSource = "myRange" | "custom";
 export type GameSpeed = "slow" | "normal" | "fast";
 export type GrooveDifficulty = "easy" | "medium" | "hard";
-export type GrooveInputMode = "pads" | "microphone";
+export type GrooveInputMode = "pads" | "microphone" | "midi";
+export type GrooveMode = "echo" | "freePlay";
+
+export const GROOVE_MODE_OPTIONS: { value: GrooveMode; label: string }[] = [
+  { value: "echo", label: "Echo" },
+  { value: "freePlay", label: "Free drums" },
+];
 
 /** Pitch accuracy required to clear a Pitch Glider gate, in cents. */
 export const GAME_DIFFICULTY_TOLERANCE_CENTS: Record<GameDifficulty, number> = {
@@ -127,8 +133,8 @@ export interface AppSettings {
   "games.speed": GameSpeed;
   /** Free flight, a bundled course id, or `reference:<id>`. */
   "games.courseId": string;
-  /** Course rhythm multiplier: 100 follows the encoded note durations. */
-  "games.courseTempoPercent": number;
+  /** 1 follows the course's written BPM; 2 is twice as fast. */
+  "games.courseSpeedFactor": number;
   /** Requested interval between consecutive pipe targets, in semitones. */
   "games.pipeDistanceSemitones": number;
   "games.voiceStartHoldMs": number;
@@ -142,9 +148,15 @@ export interface AppSettings {
   /** Best Pitch Glider score per difficulty. */
   "games.bestScores": Record<GameDifficulty, number>;
   "groove.difficulty": GrooveDifficulty;
+  "groove.mode": GrooveMode;
   "groove.inputMode": GrooveInputMode;
   "groove.bpm": number;
   "groove.timingToleranceMs": number;
+  "groove.micMinLevelDb": number;
+  "groove.micMinRiseDb": number;
+  "groove.midiLowNote": number;
+  "groove.midiHighNote": number;
+  "groove.autoAdvance": boolean;
   "groove.bestScores": Record<GrooveDifficulty, number>;
 }
 
@@ -197,7 +209,7 @@ export const APP_DEFAULTS: AppSettings = {
   "games.rangeHighMidi": 72,
   "games.speed": "normal",
   "games.courseId": "free",
-  "games.courseTempoPercent": 100,
+  "games.courseSpeedFactor": 1,
   "games.pipeDistanceSemitones": GAME_PIPE_DISTANCE_SEMITONES,
   "games.voiceStartHoldMs": GAME_VOICE_START_HOLD_MS,
   "games.voiceStartToleranceCents": GAME_VOICE_START_TOLERANCE_CENTS,
@@ -207,9 +219,15 @@ export const APP_DEFAULTS: AppSettings = {
   "games.minClarity": 0.8,
   "games.bestScores": { superEasy: 0, easy: 0, medium: 0, hard: 0 },
   "groove.difficulty": "easy",
+  "groove.mode": "echo",
   "groove.inputMode": "pads",
   "groove.bpm": 92,
   "groove.timingToleranceMs": 140,
+  "groove.micMinLevelDb": -24,
+  "groove.micMinRiseDb": 18,
+  "groove.midiLowNote": 36,
+  "groove.midiHighNote": 38,
+  "groove.autoAdvance": true,
   "groove.bestScores": { easy: 0, medium: 0, hard: 0 },
 };
 
@@ -227,7 +245,7 @@ export type Choice = { value: string; label: string };
 export type SettingDef =
   | (Base & { id: AppSettingId; source: "app"; kind: "bool" })
   | (Base & { id: AppSettingId; source: "app"; kind: "choice"; options: Choice[] })
-  | (Base & { id: AppSettingId; source: "app"; kind: "number"; min: number; max: number; step: number })
+  | (Base & { id: AppSettingId; source: "app"; kind: "number"; min: number; max: number; step: number; editable?: boolean })
   | (Base & { id: AppSettingId; source: "app"; kind: "colors" })
   | (Base & { id: `transport.${string}`; source: "transport"; key: keyof TransportState; kind: "choice"; options: Choice[] });
 
@@ -671,8 +689,8 @@ export const SETTINGS: SettingDef[] = [
     id: "games.speed",
     source: "app",
     kind: "choice",
-    label: "Game speed",
-    description: "How fast the gates scroll toward you.",
+    label: "Scroll speed",
+    description: "How fast gates approach. Course rhythm follows the written BPM and speed factor.",
     category: "Games",
     tier: "daily",
     scope: "app",
@@ -698,14 +716,15 @@ export const SETTINGS: SettingDef[] = [
     ],
   },
   {
-    id: "games.courseTempoPercent",
+    id: "games.courseSpeedFactor",
     source: "app",
     kind: "number",
-    min: 50,
-    max: 150,
-    step: 10,
-    label: "Course tempo",
-    description: "Stretches or compresses the distance between course notes. 100% follows the melody or reference rhythm; lower values give you more time.",
+    min: 0.05,
+    max: 12,
+    step: 0.01,
+    editable: true,
+    label: "Course speed factor",
+    description: "Multiplies the course's written tempo. Type any factor from 0.05× to 12×; 1× follows the written BPM and 0.5× is half speed.",
     category: "Games",
     tier: "daily",
     scope: "app",
@@ -817,6 +836,17 @@ export const SETTINGS: SettingDef[] = [
     ],
   },
   {
+    id: "groove.mode",
+    source: "app",
+    kind: "choice",
+    label: "GROOVE mode",
+    description: "Echo plays a phrase for you to answer from memory. Free drums gives you unscored visual input feedback.",
+    category: "Groove",
+    tier: "daily",
+    scope: "app",
+    options: GROOVE_MODE_OPTIONS,
+  },
+  {
     id: "groove.inputMode",
     source: "app",
     kind: "choice",
@@ -828,6 +858,7 @@ export const SETTINGS: SettingDef[] = [
     options: [
       { value: "pads", label: "Pads + F/J" },
       { value: "microphone", label: "Microphone" },
+      { value: "midi", label: "External MIDI drums" },
     ],
   },
   {
@@ -854,6 +885,68 @@ export const SETTINGS: SettingDef[] = [
     description: "Maximum early or late distance used to match a performed hit to the remembered phrase.",
     category: "Groove",
     tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "groove.micMinLevelDb",
+    source: "app",
+    kind: "number",
+    min: -60,
+    max: -6,
+    step: 1,
+    label: "Microphone noise gate",
+    description: "Reject acoustic attacks quieter than this level. Raise it toward -6 dB to ignore more background noise.",
+    category: "Groove",
+    tier: "daily",
+    scope: "app",
+  },
+  {
+    id: "groove.micMinRiseDb",
+    source: "app",
+    kind: "number",
+    min: 3,
+    max: 40,
+    step: 1,
+    label: "Attack contrast",
+    description: "Reject sounds that do not rise sharply enough above recent background level.",
+    category: "Groove",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "groove.midiLowNote",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 127,
+    step: 1,
+    label: "External low-drum note",
+    description: "MIDI note number used for the low drum. General MIDI kick is 36.",
+    category: "Groove",
+    tier: "daily",
+    scope: "app",
+  },
+  {
+    id: "groove.midiHighNote",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 127,
+    step: 1,
+    label: "External high-drum note",
+    description: "MIDI note number used for the high drum. General MIDI snare is 38.",
+    category: "Groove",
+    tier: "daily",
+    scope: "app",
+  },
+  {
+    id: "groove.autoAdvance",
+    source: "app",
+    kind: "bool",
+    label: "Automatically get harder",
+    description: "A score of 80 or higher advances Easy to Medium to Hard. Success on Hard raises the tempo.",
+    category: "Groove",
+    tier: "daily",
     scope: "app",
   },
   {

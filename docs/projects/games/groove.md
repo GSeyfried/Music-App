@@ -6,21 +6,27 @@ exploratory/PENDING.
 ## Implemented: Echo
 
 Echo plays a generated two-drum phrase after a four-click count-in, then gives
-another four-click count-in before a silent performance window. The player
-answers on two touch pads / F and J keys, or with acoustic drum attacks through
-the selected microphone. Acoustic mode deliberately scores onset timing only;
-it does not pretend to classify drum timbre.
+another four-click count-in before a player-controlled performance window. The
+answer starts on its first hit and ends only when the player presses Done, so a
+slow answer is not failed. Scoring fits the answer's tempo and evaluates its
+rhythmic proportions. The player can answer on two touch pads / F and J keys,
+with threshold-gated acoustic attacks, or with configurable low/high MIDI notes
+from an external drum or controller.
 
-The performance view shows pulse state and the number of played hits, never the
-upcoming answer. After the phrase ends, results show matched, missed and extra
-hits, mean absolute timing error, drum-choice accuracy where applicable, a
-post-performance timeline, and a saved best score per difficulty. Pure scoring
-tests cover exact, early/late, missed, extra, wrong-lane, and microphone cases.
+The performance view shows accepted system beats as they occur and accepted
+player beats as they arrive, using distinct low/high shapes; it never reveals a
+future beat. After the player finishes, results show matched, missed and extra
+hits, tempo-fitted timing error, answer tempo, drum-choice accuracy where
+applicable, a post-performance timeline, and a saved best score per difficulty.
+Scores of 80+ automatically advance difficulty; Hard success raises tempo.
 
-PENDING real-hardware tuning: microphone event-delivery latency, onset
-thresholds for bongos versus hand claps, the 140 ms default matching window,
-phrase density, synthesized drum sound, and whether count-ins should vary by
-difficulty.
+The mode dropdown also includes **Free drums**, an unscored input visualizer for
+testing pads, F/J, a microphone, or external MIDI before starting Echo.
+
+PENDING real-hardware tuning: microphone event-delivery latency, the −24 dBFS / 18 dB
+noise thresholds for bongos versus hand claps, the 140 ms proportional timing
+window, phrase density, synthesized drum sound, external drum note defaults,
+and whether count-ins should vary by difficulty.
 
 GROOVE is a family of short timing exercises for voice, acoustic instruments
 (including bongos and piano), MIDI controllers, and touch. The shared design principle is that visuals reward

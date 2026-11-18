@@ -22,6 +22,23 @@ export interface PlayedHit {
   lane: DrumLane;
 }
 
+/** True only for a distinct acoustic attack that clears both background filters. */
+export function acceptsAcousticHit(
+  levelDb: number,
+  riseDb: number,
+  minLevelDb: number,
+  minRiseDb: number,
+): boolean {
+  return levelDb >= minLevelDb && riseDb >= minRiseDb;
+}
+
+/** Map an external MIDI note to a drum lane; unrelated notes are ignored. */
+export function drumLaneForMidi(note: number, lowNote: number, highNote: number): DrumLane | null {
+  if (note === lowNote) return "low";
+  if (note === highNote) return "high";
+  return null;
+}
+
 export interface ScoredHit {
   expected: RhythmHit;
   played: PlayedHit | null;
@@ -36,6 +53,9 @@ export interface RhythmScore {
   extra: number;
   meanAbsErrorMs: number | null;
   laneAccuracy: number | null;
+  /** Performed beat length divided by the heard beat length. >1 means a slower answer. */
+  tempoRatio: number;
+  responseBpm: number;
   hits: ScoredHit[];
 }
 
@@ -113,6 +133,69 @@ export function scoreRhythm(
     extra,
     meanAbsErrorMs,
     laneAccuracy,
+    tempoRatio: 1,
+    responseBpm: bpm,
     hits,
   };
+}
+
+/**
+ * Score the remembered rhythm at the player's own speed. The first hit is the
+ * performance origin, and candidate tempo ratios are fitted from later hits.
+ * This measures rhythmic proportions and drum choices without punishing a
+ * deliberately slow answer.
+ */
+export function scoreRhythmFlexible(
+  pattern: RhythmPattern,
+  played: readonly PlayedHit[],
+  heardBpm: number,
+  toleranceMs: number,
+  scoreLanes = true,
+): RhythmScore {
+  if (played.length === 0) return scoreRhythm(pattern, played, heardBpm, toleranceMs, scoreLanes);
+  const ordered = [...played].sort((a, b) => a.atMs - b.atMs);
+  const origin = ordered[0].atMs;
+  const normalized = ordered.map((hit) => ({ ...hit, atMs: hit.atMs - origin }));
+  const heardBeatMs = 60_000 / heardBpm;
+  const ratios = new Set<number>([1]);
+  const comparable = Math.min(normalized.length, pattern.hits.length);
+  for (let i = 1; i < comparable; i++) {
+    const expectedSpan = (pattern.hits[i].beat - pattern.hits[0].beat) * heardBeatMs;
+    const playedSpan = normalized[i].atMs;
+    if (expectedSpan > 0 && playedSpan > 0) ratios.add(Math.max(0.2, Math.min(5, playedSpan / expectedSpan)));
+  }
+  // A modest grid protects fitting when a player omitted or added one event.
+  for (let ratio = 0.25; ratio <= 5; ratio += 0.25) ratios.add(ratio);
+  let best: RhythmScore | null = null;
+  for (const tempoRatio of ratios) {
+    const responseBpm = heardBpm / tempoRatio;
+    const scored = scoreRhythm(pattern, normalized, responseBpm, toleranceMs * Math.max(1, tempoRatio), scoreLanes);
+    const candidate = { ...scored, tempoRatio, responseBpm };
+    if (
+      best === null ||
+      candidate.score > best.score ||
+      (candidate.score === best.score && (candidate.meanAbsErrorMs ?? Infinity) < (best.meanAbsErrorMs ?? Infinity))
+    ) best = candidate;
+  }
+  return best as RhythmScore;
+}
+
+export interface ChallengeAdvance {
+  difficulty: GrooveDifficulty;
+  bpm: number;
+  advanced: boolean;
+}
+
+/** Successful rounds climb difficulty; continued Hard success raises tempo. */
+export function advanceChallenge(
+  difficulty: GrooveDifficulty,
+  bpm: number,
+  score: number,
+  enabled: boolean,
+): ChallengeAdvance {
+  if (!enabled || score < 80) return { difficulty, bpm, advanced: false };
+  if (difficulty === "easy") return { difficulty: "medium", bpm, advanced: true };
+  if (difficulty === "medium") return { difficulty: "hard", bpm, advanced: true };
+  const faster = Math.min(180, bpm + 6);
+  return { difficulty, bpm: faster, advanced: faster !== bpm };
 }

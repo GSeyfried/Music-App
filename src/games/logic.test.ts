@@ -3,6 +3,7 @@ import type { PitchFrame } from "../engine/protocol";
 import {
   CRAFT_X,
   CRAFT_RADIUS,
+  courseBeatSpacing,
   craftRadiusFor,
   envelopeRadiusFor,
   gateGeometry,
@@ -279,7 +280,7 @@ describe("pitch glider", () => {
       { midi: 64, beats: 2 },
       { midi: 67, beats: 0.5 },
     ];
-    const courseConfig = gameConfig(2, "superEasy", range, "slow", 0, 0, 12, 5, course, 100);
+    const courseConfig = gameConfig(2, "superEasy", range, "slow", 0, 0, 12, 5, course, 120, 1);
     let s = playing();
     for (let i = 0; i < 700 && s.gates.length < course.length; i++) {
       s = stepGame(s, courseConfig, 16, 60, 0, () => 0.5);
@@ -287,13 +288,23 @@ describe("pitch glider", () => {
     expect(s.gates.map((gate) => gate.targetMidi)).toEqual([60, 64, 67]);
     expect(s.gates.map((gate) => gate.courseIndex)).toEqual([0, 1, 2]);
     expect(s.nextCourseIndex).toBe(3);
-    expect(s.gates[2].x - s.gates[1].x).toBeCloseTo(courseConfig.spacing * 2, 1);
+    expect(s.gates[2].x - s.gates[1].x).toBeCloseTo(courseConfig.speed * (60 / 120) * 2, 1);
+  });
+
+  it("uses written BPM at 1x and keeps extreme speed-factor pipes from overlapping", () => {
+    const course = [{ midi: 60, beats: 1 }, { midi: 64, beats: 1 }];
+    const normal = gameConfig(2, "hard", range, "normal", 0, 0, 12, 5, course, 120, 1);
+    const extreme = gameConfig(2, "hard", range, "normal", 0, 0, 12, 5, course, 120, 12);
+    expect(courseBeatSpacing(normal) / normal.speed).toBeCloseTo(0.5);
+    expect(courseBeatSpacing(extreme) / extreme.speed).toBeCloseTo(0.5 / 12);
+    expect(makeGate(1, extreme, 0, undefined, course[0], 0).width).toBeLessThan(courseBeatSpacing(extreme));
   });
 
   it("finishes after the last course gate is cleanly passed", () => {
     const course = [{ midi: 60, beats: 1 }];
-    const courseConfig = gameConfig(2, "superEasy", range, "slow", 0, 0, 12, 5, course, 100);
-    const gate = makeGate(CRAFT_X - CRAFT_RADIUS - courseConfig.pipeWidth + 0.001, courseConfig, 0, undefined, course[0], 0);
+    const courseConfig = gameConfig(2, "superEasy", range, "slow", 0, 0, 12, 5, course, 120, 1);
+    const gate = makeGate(0, courseConfig, 0, undefined, course[0], 0);
+    gate.x = CRAFT_X - CRAFT_RADIUS - gate.width + 0.001;
     const s = playing({ craftY: gate.gapY, gates: [gate], nextCourseIndex: 1 });
     const next = stepGame(s, courseConfig, 16, 60, 0, () => 0);
     expect(next.score).toBe(1);

@@ -246,8 +246,10 @@ export interface GameConfig {
   pipeDistanceSemitones: number;
   /** Omitted for endless, procedurally generated free flight. */
   courseNotes?: readonly CourseNote[];
-  /** 100 follows encoded rhythm; lower values spread gates farther apart. */
-  courseTempoPercent: number;
+  /** Written tempo of the selected course. */
+  courseBpm: number;
+  /** 1 follows the written tempo; 2 is twice as fast. */
+  courseSpeedFactor: number;
 }
 
 export function newGame(): GameState {
@@ -274,7 +276,8 @@ export function gameConfig(
   viewportSemitones = 12,
   pipeDistanceSemitones = GAME_PIPE_DISTANCE_SEMITONES,
   courseNotes?: readonly CourseNote[],
-  courseTempoPercent = 100,
+  courseBpm = 80,
+  courseSpeedFactor = 1,
 ): GameConfig {
   return {
     width,
@@ -289,8 +292,14 @@ export function gameConfig(
     spacing: GAME_GATE_SPACING,
     pipeDistanceSemitones,
     courseNotes,
-    courseTempoPercent,
+    courseBpm,
+    courseSpeedFactor,
   };
+}
+
+/** World distance of one written course beat at the selected tempo factor. */
+export function courseBeatSpacing(cfg: Pick<GameConfig, "speed" | "courseBpm" | "courseSpeedFactor">): number {
+  return (cfg.speed * 60) / Math.max(1, cfg.courseBpm) / clamp(cfg.courseSpeedFactor, 0.05, 12);
 }
 
 /** World-coordinate radius that renders as the configured screen-height radius in a zoomed viewport. */
@@ -363,10 +372,13 @@ export function makeGate(
   const targetMidi = courseNote?.midi ?? notes[Math.min(notes.length - 1, Math.floor(clamp(rand01, 0, 0.999999) * notes.length))];
   const craftRadius = craftRadiusFor(targetMidi, cfg);
   const geometry = gateGeometry(targetMidi, cfg.toleranceCents, cfg.range, craftRadius);
+  // At extreme course factors, preserve a visible gap between consecutive
+  // pipes. Otherwise their solid walls overlap and make the course impossible.
+  const width = cfg.courseNotes ? Math.min(cfg.pipeWidth, courseBeatSpacing(cfg) * 0.65) : cfg.pipeWidth;
   return {
     x,
     targetMidi,
-    width: cfg.pipeWidth,
+    width,
     craftRadius,
     ...geometry,
     passed: false,
@@ -423,8 +435,9 @@ export function stepGame(
     gates.push(moved);
   }
   const last = gates[gates.length - 1];
-  const rhythmScale = 100 / clamp(cfg.courseTempoPercent, 50, 150);
-  const nextX = last ? last.x + cfg.spacing * Math.max(0.25, last.beats ?? 1) * rhythmScale : cfg.width + GAME_FIRST_GATE_DELAY;
+  const courseSpacing = courseBeatSpacing(cfg);
+  const beatSpacing = cfg.courseNotes ? courseSpacing : cfg.spacing;
+  const nextX = last ? last.x + beatSpacing * Math.max(0.25, last.beats ?? 1) : cfg.width + GAME_FIRST_GATE_DELAY;
   if (nextX < cfg.width + cfg.spacing) {
     const courseNote = cfg.courseNotes?.[nextCourseIndex];
     if (!cfg.courseNotes || courseNote) {

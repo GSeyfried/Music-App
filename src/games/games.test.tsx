@@ -21,7 +21,12 @@ describe("Games workspace", () => {
     expect(await screen.findByRole("heading", { name: "GROOVE · Echo" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Low drum/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /High drum/ })).toBeTruthy();
-    expect(screen.getByText(/Upcoming hits are never shown/)).toBeTruthy();
+    expect(screen.getByText(/answer at any speed/)).toBeTruthy();
+    expect(screen.getByText("System")).toBeTruthy();
+    expect(screen.getByText("You")).toBeTruthy();
+    const mode = screen.getByRole("combobox", { name: "GROOVE mode" });
+    fireEvent.change(mode, { target: { value: "freePlay" } });
+    expect(await screen.findByRole("heading", { name: "GROOVE · Free drums" })).toBeTruthy();
   });
 
   it("offers bundled scales and public-domain melodies as Pitch Glider courses", async () => {

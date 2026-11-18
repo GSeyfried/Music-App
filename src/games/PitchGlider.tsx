@@ -69,7 +69,7 @@ export function PitchGlider() {
   const difficulty = useAppSetting("games.difficulty");
   const viewportSemitones = useAppSetting("games.viewportSemitones");
   const courseId = useAppSetting("games.courseId");
-  const courseTempoPercent = useAppSetting("games.courseTempoPercent");
+  const courseSpeedFactor = useAppSetting("games.courseSpeedFactor");
   const noteColors = useAppSetting("notes.colorMap");
   const best = useAppSetting("games.bestScores");
   const [references, setReferences] = useState<ReferenceSummary[]>([]);
@@ -188,7 +188,8 @@ export function PitchGlider() {
       getAppSetting("games.viewportSemitones"),
       getAppSetting("games.pipeDistanceSemitones"),
       selectedCourse?.notes,
-      getAppSetting("games.courseTempoPercent"),
+      selectedCourse?.bpm,
+      getAppSetting("games.courseSpeedFactor"),
     );
     const midi = steeringPitch(live.lastPitch, now - live.pitchAt, getAppSetting("games.minClarity"), STALE_MS);
     const stabilityCents = midi === null ? null : live.lastPitch?.stabilityCents ?? null;
@@ -262,10 +263,10 @@ export function PitchGlider() {
 
   const previewCourse = () => {
     if (!selectedCourse) return;
-    const secondsPerBeat = 60 / selectedCourse.bpm / (courseTempoPercent / 100);
+    const secondsPerBeat = 60 / selectedCourse.bpm / courseSpeedFactor;
     let beat = 0;
     const notes: PreviewNote[] = selectedCourse.notes.map((note) => {
-      const preview = { midi: note.midi, start: beat * secondsPerBeat, duration: Math.max(0.12, note.beats * secondsPerBeat * 0.86) };
+      const preview = { midi: note.midi, start: beat * secondsPerBeat, duration: Math.max(0.02, note.beats * secondsPerBeat * 0.86) };
       beat += note.beats;
       return preview;
     });
@@ -356,7 +357,7 @@ export function PitchGlider() {
           </select>
         </label>
         {selectedCourse && <Button variant="ghost" size="sm" icon="play" onPress={previewCourse}>Hear course</Button>}
-        {selectedCourse && <Setting id="games.courseTempoPercent" />}
+        {selectedCourse && <Setting id="games.courseSpeedFactor" />}
         <Setting id="games.difficulty" />
         <Setting id="games.speed" />
         <Setting id="games.pipeDistanceSemitones" />
