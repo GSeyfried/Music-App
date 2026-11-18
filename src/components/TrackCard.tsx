@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAppSetting } from "../settings/appSettings";
 import { framesPerBeat, loopTicks } from "../lib/loopTicks";
+import { PLAYHEAD_SCALE, PLAYHEAD_TRAIL_BINS, binAt, layerBands, radialAreaPath } from "../lib/layerRings";
 import { useEngineActions, useEngineState, useLive } from "../engine/EngineContext";
 import type { LooperView } from "../engine/store";
 import { formatGain } from "../lib/format";
@@ -47,13 +48,32 @@ function RingTicks({ view }: { view: LooperView }) {
   );
 }
 
+const NO_LAYERS: number[][] = [];
+
+/** One loudness ring per layer (view.loopRingLayers), base layer outermost, newest brightest. */
+function LayerRings({ summaries }: { summaries: number[][] }) {
+  const bands = useMemo(() => layerBands(summaries.length), [summaries.length]);
+  const paths = useMemo(() => summaries.map((bins, i) => radialAreaPath(bins, bands[i])), [summaries, bands]);
+  return (
+    <g className="ring-layers">
+      {paths.map((d, i) => (
+        <path key={i} className="ring-layer" d={d} style={{ opacity: 0.35 + 0.45 * ((i + 1) / paths.length) }} />
+      ))}
+    </g>
+  );
+}
+
 function LoopRing({ track, view }: { track: number; view: LooperView }) {
   const live = useLive();
   const arc = useRef<SVGCircleElement>(null);
   const root = useRef<SVGSVGElement>(null);
   const head = useRef<SVGCircleElement>(null);
+  const layerHead = useRef<SVGPathElement>(null);
   const caption = useRef<HTMLSpanElement>(null);
   const emphasis = useAppSetting("view.playheadEmphasis");
+  const showLayers = useAppSetting("view.loopRingLayers");
+  const summaries = useEngineState((s) => s.layerSummaries[track]) ?? NO_LAYERS;
+  const bands = useMemo(() => layerBands(summaries.length), [summaries.length]);
   useFrame((now) => {
     const p = ringProgress(live.looper, track, now - live.looperAt);
     setAttr(root.current, "data-mode", p.mode);
@@ -64,10 +84,23 @@ function LoopRing({ track, view }: { track: number; view: LooperView }) {
       setAttr(head.current, "cx", pt.x.toFixed(2));
       setAttr(head.current, "cy", pt.y.toFixed(2));
     }
+    if (layerHead.current) {
+      // The slice playing now (plus a short trail), brighter and larger on every layer.
+      let d = "";
+      if (p.mode === "loop") {
+        summaries.forEach((bins, i) => {
+          const k = binAt(p.fraction, bins.length);
+          d += radialAreaPath(bins, bands[i], k - PLAYHEAD_TRAIL_BINS, k + 1, PLAYHEAD_SCALE) + " ";
+        });
+      }
+      setAttr(layerHead.current, "d", d.trim());
+    }
   });
   return (
     <>
       <svg className="ring" viewBox="0 0 100 100" ref={root} data-mode="idle" aria-hidden="true">
+        {showLayers && summaries.length > 0 && <LayerRings summaries={summaries} />}
+        {showLayers && emphasis && summaries.length > 0 && <path className="ring-layer-head" ref={layerHead} />}
         <circle className="ring-track" cx="50" cy="50" r={RING_R} />
         <RingTicks view={view} />
         <circle

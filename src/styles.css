@@ -2283,3 +2283,16 @@ input[type="range"] {
   border: 0;
   background: none;
 }
+
+/* Per-layer loudness rings (view.loopRingLayers) and the playing slice */
+.ring-layer {
+  fill: var(--tc);
+  stroke: none;
+}
+.ring-layer-head {
+  fill: var(--tc);
+  filter: drop-shadow(0 0 1.5px var(--tc)) brightness(1.35);
+}
+.track-card[data-state="overdubbing"] .ring-layer-head {
+  fill: var(--overdub);
+}
