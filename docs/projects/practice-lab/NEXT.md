@@ -37,6 +37,7 @@ match (or Custom) instead of overwriting them.
 
 | Mode | wrongNoteCents | notePitchThresholdCents | noteTimingThresholdMs |
 | --- | --- | --- | --- |
+| Super Easy | 125 | 50 | 150 |
 | Easy | 50 | 35 | 100 |
 | Medium (current defaults) | 50 | 25 | 60 |
 | Hard | 35 | 12 | 35 |

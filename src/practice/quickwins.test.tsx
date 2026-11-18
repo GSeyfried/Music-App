@@ -22,7 +22,7 @@ describe("difficulty presets", () => {
     expect(DIFFICULTY_PRESETS.medium).toEqual({ wrongNoteCents: 50, notePitchThresholdCents: 25, noteTimingThresholdMs: 60 });
     expect(DIFFICULTY_PRESETS.hard).toEqual({ wrongNoteCents: 35, notePitchThresholdCents: 12, noteTimingThresholdMs: 35 });
     expect(difficultyOf(DEFAULT_SCORING)).toBe("medium");
-    for (const d of ["easy", "medium", "hard"] as const) expect(difficultyOf({ ...DEFAULT_SCORING, ...DIFFICULTY_PRESETS[d] })).toBe(d);
+    for (const d of ["superEasy", "easy", "medium", "hard"] as const) expect(difficultyOf({ ...DEFAULT_SCORING, ...DIFFICULTY_PRESETS[d] })).toBe(d);
     expect(difficultyOf({ ...DEFAULT_SCORING, noteTimingThresholdMs: 70 })).toBe("custom");
   });
 

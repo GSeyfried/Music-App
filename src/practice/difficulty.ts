@@ -14,6 +14,9 @@ export const TOLERANCE_KEYS: readonly ToleranceKey[] = ["wrongNoteCents", "noteP
 
 /** Easy and Hard are starting guesses (PENDING: tune on real voice takes). Medium = DEFAULT_SCORING. */
 export const DIFFICULTY_PRESETS: Record<DifficultyPreset, Tolerances> = {
+  // Accepts a note a sharp or flat away (a semitone is 100 cents; 125 leaves
+  // room for a slightly-off semitone). Timing is loose too.
+  superEasy: { wrongNoteCents: 125, notePitchThresholdCents: 50, noteTimingThresholdMs: 150 },
   easy: { wrongNoteCents: 50, notePitchThresholdCents: 35, noteTimingThresholdMs: 100 },
   medium: {
     wrongNoteCents: DEFAULT_SCORING.wrongNoteCents,
@@ -23,7 +26,7 @@ export const DIFFICULTY_PRESETS: Record<DifficultyPreset, Tolerances> = {
   hard: { wrongNoteCents: 35, notePitchThresholdCents: 12, noteTimingThresholdMs: 35 },
 };
 
-export const DIFFICULTY_ORDER: readonly DifficultyPreset[] = ["easy", "medium", "hard"];
+export const DIFFICULTY_ORDER: readonly DifficultyPreset[] = ["superEasy", "easy", "medium", "hard"];
 
 export const isPreset = (d: Difficulty): d is DifficultyPreset => d !== "custom";
 

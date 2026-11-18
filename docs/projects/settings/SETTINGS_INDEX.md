@@ -70,7 +70,7 @@ tuning; only the first few are likely user-facing.
 
 | ID | Label | Description | Default | Scope | Connected element | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| `practice.difficulty` | Difficulty | Easy, Medium or Hard. Sets the pitch and timing tolerances below; editing any one of them switches to Custom. | Medium | app | Practice Lab Difficulty control (presets in `src/practice/difficulty.ts`); tolerance band on the overlay (proposed) | exists |
+| `practice.difficulty` | Difficulty | Super Easy, Easy, Medium or Hard set how close pitch and timing must be. Super Easy accepts a note a sharp or flat away (125¢ / 50¢ / 150 ms). Editing a tolerance by hand switches to Custom. | Medium | app | Practice Lab Difficulty control (presets in `src/practice/difficulty.ts`); tolerance band on the overlay (proposed) | exists |
 | `practice.wrongNoteCents` | Wrong-note threshold | How far off a note can be, in cents, before it counts as a different note. | 50 | app | Practice overlay | exists |
 | `practice.notePitchThresholdCents` | In-tune threshold | How close, in cents, a note must be to count as in tune. | 25 | app | Results; overlay colors | exists |
 | `practice.noteTimingThresholdMs` | Timing threshold | How early or late, in ms, a note can be and still count as on time. | 60 | app | Results | exists |

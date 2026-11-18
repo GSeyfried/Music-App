@@ -16,7 +16,7 @@ import { DEFAULT_NOTE_COLORS } from "./noteColors";
 export type SettingTier = "daily" | "advanced" | "preferences" | "internal";
 export type SettingScope = "app" | "project" | "track" | "session";
 
-export type Difficulty = "easy" | "medium" | "hard" | "custom";
+export type Difficulty = "superEasy" | "easy" | "medium" | "hard" | "custom";
 export type ThemeMode = "system" | "light" | "dark";
 export type AccuracyEncoding = "brightness" | "saturation" | "opacity";
 export type ScaleDirection = "up" | "upDown";
@@ -229,11 +229,12 @@ export const SETTINGS: SettingDef[] = [
     kind: "choice",
     label: "Difficulty",
     description:
-      "Easy, Medium or Hard set how close pitch and timing must be. Editing a tolerance by hand switches to Custom.",
+      "Super Easy, Easy, Medium or Hard set how close pitch and timing must be. Super Easy accepts a note a sharp or flat away. Editing a tolerance by hand switches to Custom.",
     category: "Practice",
     tier: "daily",
     scope: "app",
     options: [
+      { value: "superEasy", label: "Super Easy" },
       { value: "easy", label: "Easy" },
       { value: "medium", label: "Medium" },
       { value: "hard", label: "Hard" },
