@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LAYER_RINGS_INNER, LAYER_RINGS_OUTER, LAYER_RING_MAX_BAND, binAt, layerBands, radialAreaPath } from "./layerRings";
+import { ringLevel, LAYER_RINGS_INNER, LAYER_RINGS_OUTER, LAYER_RING_MAX_BAND, binAt, layerBands, radialAreaPath } from "./layerRings";
 
 describe("layerBands", () => {
   it("puts the base layer outermost and stays within the ring area", () => {
@@ -34,5 +34,14 @@ describe("radialAreaPath", () => {
     expect(binAt(0, 128)).toBe(0);
     expect(binAt(0.999, 128)).toBe(127);
     expect(binAt(0.5, 128)).toBe(64);
+  });
+});
+
+describe("ringLevel", () => {
+  it("shows quiet singing clearly on a dB scale", () => {
+    expect(ringLevel(1)).toBe(1);
+    expect(ringLevel(0)).toBe(0);
+    expect(ringLevel(0.1)).toBeGreaterThan(0.5); // -20 dBFS
+    expect(ringLevel(0.001)).toBe(0); // below the floor
   });
 });

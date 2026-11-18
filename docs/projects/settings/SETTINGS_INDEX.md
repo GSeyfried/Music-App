@@ -115,3 +115,4 @@ tuning; only the first few are likely user-facing.
 | `looper.maxLayersPerTrack` | Layers per track | The most layers (base take plus overdubs) one track can hold. | 16 | app | Track layer count | exists (not in UI) |
 | `looper.maxLoopSeconds` | Longest loop | The longest loop you can record. Longer loops use more memory per layer. | 30 s | app | (none) | exists (not in UI) |
 | `looper.memoryLimitBytes` | Memory guard | Refuses layer settings that would reserve more than this. | 512 MB | app | Start-audio error | exists (not in UI) |
+| `view.loopRingFloorDb` | Layer ring floor | Quietest level drawn on the layer rings; louder parts reach further out. | −48 dBFS | app | Track card layer rings | exists (constant `LAYER_RING_FLOOR_DB`, not in UI) |

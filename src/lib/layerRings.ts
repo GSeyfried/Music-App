@@ -8,6 +8,20 @@ export const LAYER_RINGS_OUTER = 41;
 export const LAYER_RINGS_INNER = 27;
 /** Widest band one layer may take. */
 export const LAYER_RING_MAX_BAND = 5;
+/**
+ * Display floor for layer rings, in dBFS. Peaks are drawn on a decibel scale
+ * from this floor (empty) to 0 dBFS (full band), so a normally sung layer
+ * (peaks around −20 to −10 dBFS) fills most of its band. (setting view.loopRingFloorDb)
+ */
+export const LAYER_RING_FLOOR_DB = -48;
+
+/** Peak amplitude (0..1) → ring fill (0..1) on a dB scale. */
+export function ringLevel(peak: number, floorDb = LAYER_RING_FLOOR_DB): number {
+  if (!(peak > 0)) return 0;
+  const db = 20 * Math.log10(Math.min(1, peak));
+  return Math.max(0, Math.min(1, (db - floorDb) / -floorDb));
+}
+
 /** Bins either side of the playhead drawn emphasised. */
 export const PLAYHEAD_TRAIL_BINS = 2;
 /** How much larger the emphasised slice is drawn. */
@@ -35,12 +49,13 @@ const pt = (r: number, f: number) => {
 /**
  * Closed area path: the bin envelope on the outside, the baseline arc on the
  * inside, over bins [from, to) (indices may wrap past the end). `scale`
- * enlarges the envelope (playhead emphasis); amplitudes are clamped to 0..1.
+ * enlarges the envelope (playhead emphasis); bins are peak amplitudes, drawn
+ * on a dB scale (ringLevel).
  */
 export function radialAreaPath(bins: readonly number[], band: LayerBand, from = 0, to = bins.length, scale = 1): string {
   const n = bins.length;
   if (n === 0 || to <= from) return "";
-  const amp = (i: number) => Math.max(0, Math.min(1, bins[((i % n) + n) % n] ?? 0));
+  const amp = (i: number) => ringLevel(bins[((i % n) + n) % n] ?? 0);
   const outer: string[] = [];
   for (let i = from; i < to; i++) {
     const r = band.base + Math.max(0.35, amp(i) * band.width * 0.92 * scale);
