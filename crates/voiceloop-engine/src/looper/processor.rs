@@ -455,6 +455,10 @@ struct Track {
     level: f32,
     /// See [`TrackSnapshot::timing_suspect`].
     timing_suspect: bool,
+    /// This track's loop clock (phase 0 and period). Today every track follows
+    /// the song loop (`LooperCore::master`), kept in step by `set_master`;
+    /// per-track modes give a track its own (docs/projects/looper-01/PER_TRACK_LOOPS.md).
+    clock: Option<Master>,
 }
 
 impl Track {
@@ -587,6 +591,7 @@ impl LooperCore {
                 gain: 1.0,
                 level: 1.0,
                 timing_suspect: false,
+                clock: None,
             };
             if i < config.max_tracks {
                 tracks.push(tr);
@@ -596,7 +601,7 @@ impl LooperCore {
         }
 
         let fade = config.fade_frames;
-        let core = Self {
+        let mut core = Self {
             sample_rate,
             max_frames,
             max_layers: config.max_layers_per_track,
@@ -640,6 +645,7 @@ impl LooperCore {
             // Publish on the first block so the UI sees state immediately.
             frames_since_snapshot: u64::MAX / 2,
         };
+        core.set_master(core.master);
         let handles = LooperHandles {
             commands: cmd_tx,
             snapshots: snap_rx,
@@ -652,6 +658,15 @@ impl LooperCore {
             parked: Some(park_rx),
         };
         Ok((core, handles))
+    }
+
+    /// Set the song loop, and every track's clock with it (spare tracks too, so
+    /// an added track joins in step). No allocation.
+    fn set_master(&mut self, master: Option<Master>) {
+        self.master = master;
+        for tr in self.tracks.iter_mut().chain(self.spare.iter_mut()) {
+            tr.clock = master;
+        }
     }
 
     fn synced_master(t: &TransportState) -> Option<Master> {
@@ -737,8 +752,7 @@ impl LooperCore {
     fn render(&mut self, x: f32) -> f32 {
         let t = self.t;
         let mut y = 0.0f32;
-        if let Some(m) = self.master {
-            let (_, idx) = m.locate(t);
+        {
             let (any_solo, slew) = (self.any_solo, self.gain_slew);
             for tr in &mut self.tracks {
                 let target = tr.target_level(any_solo);
@@ -746,6 +760,8 @@ impl LooperCore {
                 if d != 0.0 {
                     tr.level = if d.abs() <= slew { target } else { tr.level + slew.copysign(d) };
                 }
+                let Some(m) = tr.clock else { continue };
+                let (_, idx) = m.locate(t);
                 if tr.level > 0.0 {
                     let mut s = 0.0f32;
                     let frames = m.period.ceil().max(1.0) as i64;
@@ -781,7 +797,7 @@ impl LooperCore {
             RecKind::FirstTake => {
                 let i = (tp - rec.start) as usize;
                 if i >= self.max_frames {
-                    if self.master.is_some() {
+                    if self.tracks[ti].clock.is_some() {
                         self.complete_recording(ti);
                     } else {
                         self.finish_first_take(ti, tp, false);
@@ -791,12 +807,12 @@ impl LooperCore {
                 }
                 i
             }
-            RecKind::NewLoop | RecKind::Overdub => match self.master {
+            RecKind::NewLoop | RecKind::Overdub => match self.tracks[ti].clock {
                 Some(m) => m.locate(tp).1,
                 None => return,
             },
         };
-        let g = self.ramp(&rec, tp);
+        let g = self.ramp(&rec, tp, self.tracks[ti].clock);
         if let Some(layer) = self.tracks[ti].layers.last_mut() {
             if let Some(s) = layer.get_mut(idx) {
                 *s += x * g;
@@ -805,7 +821,7 @@ impl LooperCore {
     }
 
     /// Edge fade for click-free recording boundaries. Timing is unchanged.
-    fn ramp(&self, rec: &Recording, tp: i64) -> f32 {
+    fn ramp(&self, rec: &Recording, tp: i64, clock: Option<Master>) -> f32 {
         if self.fade_frames == 0 {
             return 1.0;
         }
@@ -818,7 +834,7 @@ impl LooperCore {
         // Fade the audible loop boundary without fading or deleting the raw
         // post-roll stored beyond that boundary.
         if rec.kind == RecKind::FirstTake {
-            if let Some(master) = self.master {
+            if let Some(master) = clock {
                 let loop_end = rec.start + master.period.round() as i64;
                 if tp < loop_end {
                     g = g.min(((loop_end - tp) as f32 / f).min(1.0));
@@ -853,23 +869,22 @@ impl LooperCore {
         if self.loading {
             return;
         }
-        let Some(master) = self.master else { return };
-        let frames = (master.period.ceil().max(0.0) as usize).min(self.max_frames);
-        if frames == 0 {
-            return;
-        }
-
         let beat_frames = self.transport.frames_per_beat();
-        let beats_exact = master.period / beat_frames;
-        let beats = beats_exact.round() as i64;
-        let timing_enabled = beats > 0
-            && (master.period - beats as f64 * beat_frames).abs() <= self.timing_config.whole_beat_tolerance_frames;
         let window_frames = self.timing_config.window_frames;
         let spacing_frames = (self.timing_config.minimum_spacing_ms as u64 * self.sample_rate as u64 / 1_000) as i64;
         let max_hits = self.timing_config.max_hits.min(MAX_TIMING_HITS);
 
         let mut budget = CHUNK_FRAMES;
         for (track_index, tr) in self.tracks.iter_mut().enumerate() {
+            // Each track is scanned over its own loop.
+            let Some(master) = tr.clock else { continue };
+            let frames = (master.period.ceil().max(0.0) as usize).min(self.max_frames);
+            if frames == 0 {
+                continue;
+            }
+            let beats = (master.period / beat_frames).round() as i64;
+            let timing_enabled = beats > 0
+                && (master.period - beats as f64 * beat_frames).abs() <= self.timing_config.whole_beat_tolerance_frames;
             for (layer_index, (layer, state)) in tr.layers.iter().zip(tr.summaries.iter_mut()).enumerate() {
                 if budget == 0 {
                     break;
@@ -1009,7 +1024,7 @@ impl LooperCore {
                 }
             }
         }
-        self.master = Some(Master { origin: rec.start, period: len as f64 });
+        self.set_master(Some(Master { origin: rec.start, period: len as f64 }));
         let capture_end = raw_end
             .max(rec.start + len as i64)
             .saturating_add(self.capture_tail_frames as i64)
@@ -1052,7 +1067,7 @@ impl LooperCore {
         if let Some(r) = self.tracks.get_mut(ti).and_then(|tr| tr.rec.as_mut()) {
             r.end = Some(end);
         }
-        let Some(m) = self.master else { return };
+        let Some(m) = self.tracks.get(ti).and_then(|tr| tr.clock) else { return };
         let span = end - rec.start;
         if self.fade_frames == 0 || span <= 0 || span as f64 > m.period.floor() {
             return;
@@ -1097,7 +1112,7 @@ impl LooperCore {
             }
         }
         if self.transport.mode == LoopMode::Free && !self.has_content() {
-            self.master = None;
+            self.set_master(None);
         }
     }
 
@@ -1261,7 +1276,7 @@ impl LooperCore {
         }
         self.transport = new;
         if affects_loop {
-            self.master = Self::synced_master(&new);
+            self.set_master(Self::synced_master(&new));
         }
         self.resync_click();
         Ok(())
@@ -1355,8 +1370,8 @@ impl LooperCore {
         self.count_in_left = 0;
         self.count_in_total = 0;
         // Free loops restart from their beginning on the next Play.
-        if let Some(m) = self.master.as_mut() {
-            m.origin = 0;
+        if let Some(m) = self.master {
+            self.set_master(Some(Master { origin: 0, ..m }));
         }
         self.resync_click();
     }
@@ -1458,7 +1473,7 @@ impl LooperCore {
 
     fn overdub(&mut self, ti: usize) -> Result<(), RejectReason> {
         self.check_can_add_layer(ti)?;
-        if self.tracks[ti].layers.is_empty() || self.master.is_none() {
+        if self.tracks[ti].layers.is_empty() || self.tracks[ti].clock.is_none() {
             return Err(RejectReason::TrackEmpty);
         }
         match self.transport.mode {
@@ -1475,7 +1490,7 @@ impl LooperCore {
                 self.next_bar_at_or_after(self.t)
             }
             (OverdubStart::LoopStart, _) => {
-                let m = self.master.ok_or(RejectReason::TrackEmpty)?;
+                let m = self.tracks[ti].clock.ok_or(RejectReason::TrackEmpty)?;
                 let (cycle, phase) = m.locate(self.t);
                 m.cycle_start(if phase == 0 { cycle } else { cycle + 1 })
             }
@@ -1559,8 +1574,8 @@ impl LooperCore {
     }
 
     fn nudge_layer(&mut self, ti: usize, li: usize, frames: i64) -> Result<(), RejectReason> {
-        let half_loop = self.master.map(|m| (m.period / 2.0).floor() as i64).ok_or(RejectReason::TrackEmpty)?;
         let tr = self.tracks.get_mut(ti).ok_or(RejectReason::NoSuchTrack)?;
+        let half_loop = tr.clock.map(|m| (m.period / 2.0).floor() as i64).ok_or(RejectReason::TrackEmpty)?;
         let offset = tr.offsets.get_mut(li).ok_or(RejectReason::TrackEmpty)?;
         *offset = offset.saturating_add(frames).clamp(-half_loop, half_loop);
         self.touch();
@@ -1580,6 +1595,7 @@ impl LooperCore {
         tr.redo_summaries.clear();
         tr.offsets.clear();
         tr.redo_offsets.clear();
+        tr.clock = self.master;
         self.tracks.push(tr); // within capacity: total tracks never exceed track_capacity
         self.touch();
         Ok(())
@@ -1608,7 +1624,7 @@ impl LooperCore {
         }
         self.any_solo = self.tracks.iter().any(|t| t.solo);
         if self.transport.mode == LoopMode::Free && !self.has_content() && !self.any_recording() {
-            self.master = None;
+            self.set_master(None);
         }
         Ok(())
     }
@@ -1640,7 +1656,7 @@ impl LooperCore {
         tr.offsets.clear();
         Self::release_redo(&mut self.pool, tr);
         if self.transport.mode == LoopMode::Free && !self.has_content() && !self.any_recording() {
-            self.master = None;
+            self.set_master(None);
         }
         Ok(())
     }
@@ -1820,7 +1836,7 @@ impl LooperCore {
             tr.level = tr.target_level(any_solo);
         }
         self.transport = transport;
-        self.master = master;
+        self.set_master(master);
         self.latency = (plan.latency as i64).min(self.max_frames as i64 / 2);
         self.t = 0;
         self.loading = true;
