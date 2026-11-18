@@ -24,6 +24,8 @@ export type ScaleDirection = "up" | "upDown";
 export type GameDifficulty = "superEasy" | "easy" | "medium" | "hard";
 export type GameRangeSource = "myRange" | "custom";
 export type GameSpeed = "slow" | "normal" | "fast";
+export type GrooveDifficulty = "easy" | "medium" | "hard";
+export type GrooveInputMode = "pads" | "microphone";
 
 /** Pitch accuracy required to clear a Pitch Glider gate, in cents. */
 export const GAME_DIFFICULTY_TOLERANCE_CENTS: Record<GameDifficulty, number> = {
@@ -123,6 +125,10 @@ export interface AppSettings {
   "games.rangeLowMidi": number;
   "games.rangeHighMidi": number;
   "games.speed": GameSpeed;
+  /** Free flight, a bundled course id, or `reference:<id>`. */
+  "games.courseId": string;
+  /** Course rhythm multiplier: 100 follows the encoded note durations. */
+  "games.courseTempoPercent": number;
   /** Requested interval between consecutive pipe targets, in semitones. */
   "games.pipeDistanceSemitones": number;
   "games.voiceStartHoldMs": number;
@@ -135,6 +141,11 @@ export interface AppSettings {
   "games.minClarity": number;
   /** Best Pitch Glider score per difficulty. */
   "games.bestScores": Record<GameDifficulty, number>;
+  "groove.difficulty": GrooveDifficulty;
+  "groove.inputMode": GrooveInputMode;
+  "groove.bpm": number;
+  "groove.timingToleranceMs": number;
+  "groove.bestScores": Record<GrooveDifficulty, number>;
 }
 
 export type AppSettingId = keyof AppSettings;
@@ -185,6 +196,8 @@ export const APP_DEFAULTS: AppSettings = {
   "games.rangeLowMidi": 48,
   "games.rangeHighMidi": 72,
   "games.speed": "normal",
+  "games.courseId": "free",
+  "games.courseTempoPercent": 100,
   "games.pipeDistanceSemitones": GAME_PIPE_DISTANCE_SEMITONES,
   "games.voiceStartHoldMs": GAME_VOICE_START_HOLD_MS,
   "games.voiceStartToleranceCents": GAME_VOICE_START_TOLERANCE_CENTS,
@@ -193,6 +206,11 @@ export const APP_DEFAULTS: AppSettings = {
   "games.gravity": 0.25,
   "games.minClarity": 0.8,
   "games.bestScores": { superEasy: 0, easy: 0, medium: 0, hard: 0 },
+  "groove.difficulty": "easy",
+  "groove.inputMode": "pads",
+  "groove.bpm": 92,
+  "groove.timingToleranceMs": 140,
+  "groove.bestScores": { easy: 0, medium: 0, hard: 0 },
 };
 
 interface Base {
@@ -665,6 +683,34 @@ export const SETTINGS: SettingDef[] = [
     ],
   },
   {
+    id: "games.courseId",
+    source: "app",
+    kind: "choice",
+    label: "Glider course",
+    description: "Free flight generates targets forever. A scale, melody, or saved Practice reference gives the round an exact note order and finish line.",
+    category: "Games",
+    tier: "daily",
+    scope: "app",
+    options: [
+      { value: "free", label: "Free flight" },
+      { value: "scale:0:major", label: "C major" },
+      { value: "melody:twinkle", label: "Twinkle, Twinkle" },
+    ],
+  },
+  {
+    id: "games.courseTempoPercent",
+    source: "app",
+    kind: "number",
+    min: 50,
+    max: 150,
+    step: 10,
+    label: "Course tempo",
+    description: "Stretches or compresses the distance between course notes. 100% follows the melody or reference rhythm; lower values give you more time.",
+    category: "Games",
+    tier: "daily",
+    scope: "app",
+  },
+  {
     id: "games.pipeDistanceSemitones",
     source: "app",
     kind: "number",
@@ -753,6 +799,61 @@ export const SETTINGS: SettingDef[] = [
     description: "How clear your voice must be for the glider to follow it.",
     category: "Games",
     tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "groove.difficulty",
+    source: "app",
+    kind: "choice",
+    label: "Echo difficulty",
+    description: "Controls phrase length and rhythmic density. Hard includes syncopation; the game still never displays upcoming hits.",
+    category: "Groove",
+    tier: "daily",
+    scope: "app",
+    options: [
+      { value: "easy", label: "Easy" },
+      { value: "medium", label: "Medium" },
+      { value: "hard", label: "Hard" },
+    ],
+  },
+  {
+    id: "groove.inputMode",
+    source: "app",
+    kind: "choice",
+    label: "Echo input",
+    description: "Use the two screen pads or F/J keys, or detect acoustic drum attacks from the selected microphone. Microphone mode scores timing only.",
+    category: "Groove",
+    tier: "daily",
+    scope: "app",
+    options: [
+      { value: "pads", label: "Pads + F/J" },
+      { value: "microphone", label: "Microphone" },
+    ],
+  },
+  {
+    id: "groove.bpm",
+    source: "app",
+    kind: "number",
+    min: 50,
+    max: 180,
+    step: 2,
+    label: "Echo tempo",
+    description: "Tempo for the heard phrase and the count-in before your turn.",
+    category: "Groove",
+    tier: "daily",
+    scope: "app",
+  },
+  {
+    id: "groove.timingToleranceMs",
+    source: "app",
+    kind: "number",
+    min: 50,
+    max: 250,
+    step: 10,
+    label: "Echo timing window",
+    description: "Maximum early or late distance used to match a performed hit to the remembered phrase.",
+    category: "Groove",
+    tier: "advanced",
     scope: "app",
   },
   {

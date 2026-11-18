@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { PitchFrame } from "../engine/protocol";
 import {
   CRAFT_X,
+  CRAFT_RADIUS,
   craftRadiusFor,
   envelopeRadiusFor,
   gateGeometry,
@@ -272,6 +273,33 @@ describe("pitch glider", () => {
     expect(s.craftY).toBeGreaterThanOrEqual(0);
   });
 
+  it("spawns a deterministic course in note order with rhythmic spacing", () => {
+    const course = [
+      { midi: 60, beats: 1 },
+      { midi: 64, beats: 2 },
+      { midi: 67, beats: 0.5 },
+    ];
+    const courseConfig = gameConfig(2, "superEasy", range, "slow", 0, 0, 12, 5, course, 100);
+    let s = playing();
+    for (let i = 0; i < 700 && s.gates.length < course.length; i++) {
+      s = stepGame(s, courseConfig, 16, 60, 0, () => 0.5);
+    }
+    expect(s.gates.map((gate) => gate.targetMidi)).toEqual([60, 64, 67]);
+    expect(s.gates.map((gate) => gate.courseIndex)).toEqual([0, 1, 2]);
+    expect(s.nextCourseIndex).toBe(3);
+    expect(s.gates[2].x - s.gates[1].x).toBeCloseTo(courseConfig.spacing * 2, 1);
+  });
+
+  it("finishes after the last course gate is cleanly passed", () => {
+    const course = [{ midi: 60, beats: 1 }];
+    const courseConfig = gameConfig(2, "superEasy", range, "slow", 0, 0, 12, 5, course, 100);
+    const gate = makeGate(CRAFT_X - CRAFT_RADIUS - courseConfig.pipeWidth + 0.001, courseConfig, 0, undefined, course[0], 0);
+    const s = playing({ craftY: gate.gapY, gates: [gate], nextCourseIndex: 1 });
+    const next = stepGame(s, courseConfig, 16, 60, 0, () => 0);
+    expect(next.score).toBe(1);
+    expect(next.phase).toBe("won");
+  });
+
   it("starts, pauses, resumes and restarts", () => {
     const ready = newGame();
     const p = togglePlay(ready);
@@ -280,5 +308,6 @@ describe("pitch glider", () => {
     expect(stepGame(togglePlay(p), conf, 16, 60, 0, () => 0.5).craftY).toBe(0.5);
     const restarted = togglePlay({ ...p, phase: "over", score: 7 });
     expect(restarted).toMatchObject({ phase: "playing", score: 0, gates: [] });
+    expect(togglePlay({ ...p, phase: "won", score: 7 }).phase).toBe("playing");
   });
 });

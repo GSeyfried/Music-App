@@ -112,6 +112,8 @@ tuning; only the first few are likely user-facing.
 | `games.rangeLowMidi` | Custom low note | Bottom of the play field when Game range is Custom. | 48 (C3) | app | Pitch Glider custom range nudges | exists |
 | `games.rangeHighMidi` | Custom high note | Top of the play field when Game range is Custom. | 72 (C5) | app | Pitch Glider custom range nudges | exists |
 | `games.speed` | Game speed | How fast gates scroll: Slow/Normal/Fast = 0.22/0.32/0.45 play-field heights per second (`GAME_SPEEDS`). Gates are `GAME_GATE_SPACING` = 0.9 heights apart. | Normal | app | Games › Pitch Glider controls | exists |
+| `games.courseId` | Glider course | Free flight generates targets forever. A bundled scale/melody or saved Practice reference supplies an exact, finite note order. | Free flight | app | Pitch Glider course picker | exists |
+| `games.courseTempoPercent` | Course tempo | Stretches course rhythm spacing. 100% follows encoded note durations; lower values put gates farther apart. | 100% | app | Pitch Glider course controls | exists |
 | `games.pipeDistanceSemitones` | Pipe pitch distance | Requested melodic interval between consecutive pipe targets. The game chooses the nearest achievable exact semitone inside the selected range; larger values demand larger pitch changes in the same pipe travel time. | 5 semitones | app | Games › Pitch Glider controls | exists |
 | `games.voiceStartHoldMs` | Hands-free start hold | Continuous time on the randomized prompt note before a game starts. The Play button and Space remain available. | 250 ms | app | Pitch Glider start/game-over overlay | exists (internal; capped at 250 ms) |
 | `games.voiceStartToleranceCents` | Hands-free start tolerance | Maximum distance from the prompted semitone while holding it. Any octave currently qualifies; octave-specific starts are PENDING. | 45 cents | app | Pitch Glider start/game-over overlay | exists (internal) |
@@ -120,6 +122,11 @@ tuning; only the first few are likely user-facing.
 | `games.gravity` | Glider sink rate | How fast the glider visibly sinks without a confident pitch (play-field heights per second). PENDING real-voice tuning. | 0.25 | app | Pitch Glider; Advanced Games | exists |
 | `games.minClarity` | Glider clarity | Clarity a pitch frame needs for the glider to follow it. Internal. | 0.8 | app | Pitch Glider | exists |
 | `games.bestScores` | Best scores | Best Pitch Glider score per difficulty. Stored value, not a control. | 0 / 0 / 0 | app | Pitch Glider game-over screen | exists |
+| `groove.difficulty` | Echo difficulty | Controls remembered phrase length, density, and syncopation without displaying future hits. | Easy | app | Games › GROOVE Echo | exists |
+| `groove.inputMode` | Echo input | Play the two pads with touch/F/J, or use microphone onset detection for acoustic timing-only scoring. | Pads + F/J | app | GROOVE Echo pads/input note | exists |
+| `groove.bpm` | Echo tempo | Tempo of the heard phrase and both four-click count-ins. | 92 BPM | app | GROOVE Echo controls | exists |
+| `groove.timingToleranceMs` | Echo timing window | Maximum early/late distance used to match a performed onset to the remembered phrase. | 140 ms | app | GROOVE Echo scoring | exists |
+| `groove.bestScores` | Echo best scores | Best GROOVE Echo score for Easy, Medium, and Hard. Stored value, not a control. | 0 / 0 / 0 | app | GROOVE Echo result | exists |
 
 ## Visuals and theme (proposed; see [visualization](../visualization/README.md))
 

@@ -80,6 +80,12 @@ export interface MidiRange {
   high: number;
 }
 
+export interface CourseNote {
+  midi: number;
+  /** Relative duration; one beat is the normal distance between gates. */
+  beats: number;
+}
+
 /** Order the ends, keep them on the keyboard and at least one semitone apart. */
 export function normalizeRange(a: number, b: number): MidiRange {
   let low = clamp(Math.round(Math.min(a, b)), MIN_MIDI, MAX_MIDI - 1);
@@ -198,9 +204,13 @@ export interface Gate {
   gapY: number;
   gapSize: number;
   passed: boolean;
+  /** Encoded course duration; 1 for generated free-flight gates. */
+  beats?: number;
+  /** Zero-based course position, absent in free flight. */
+  courseIndex?: number;
 }
 
-export type GamePhase = "ready" | "playing" | "paused" | "over";
+export type GamePhase = "ready" | "playing" | "paused" | "over" | "won";
 
 export interface GameState {
   phase: GamePhase;
@@ -215,6 +225,8 @@ export interface GameState {
   score: number;
   /** Distance travelled, for the scrolling backdrop. */
   distance: number;
+  /** Next deterministic course note to spawn. */
+  nextCourseIndex: number;
 }
 
 export interface GameConfig {
@@ -232,6 +244,10 @@ export interface GameConfig {
   spacing: number;
   /** Requested melodic interval between consecutive pipe targets. */
   pipeDistanceSemitones: number;
+  /** Omitted for endless, procedurally generated free flight. */
+  courseNotes?: readonly CourseNote[];
+  /** 100 follows encoded rhythm; lower values spread gates farther apart. */
+  courseTempoPercent: number;
 }
 
 export function newGame(): GameState {
@@ -244,6 +260,7 @@ export function newGame(): GameState {
     gates: [],
     score: 0,
     distance: 0,
+    nextCourseIndex: 0,
   };
 }
 
@@ -256,6 +273,8 @@ export function gameConfig(
   smoothingMs: number,
   viewportSemitones = 12,
   pipeDistanceSemitones = GAME_PIPE_DISTANCE_SEMITONES,
+  courseNotes?: readonly CourseNote[],
+  courseTempoPercent = 100,
 ): GameConfig {
   return {
     width,
@@ -269,6 +288,8 @@ export function gameConfig(
     smoothingMs,
     spacing: GAME_GATE_SPACING,
     pipeDistanceSemitones,
+    courseNotes,
+    courseTempoPercent,
   };
 }
 
@@ -321,7 +342,14 @@ export function targetCueFor(gate: Pick<Gate, "gapY">, craftY: number, usableBot
 }
 
 /** A gate targets one exact MIDI semitone that leaves its visual opening on screen. */
-export function makeGate(x: number, cfg: GameConfig, rand01: number, previousTarget?: number): Gate {
+export function makeGate(
+  x: number,
+  cfg: GameConfig,
+  rand01: number,
+  previousTarget?: number,
+  courseNote?: CourseNote,
+  courseIndex?: number,
+): Gate {
   const candidates = Array.from({ length: cfg.range.high - cfg.range.low + 1 }, (_, i) => cfg.range.low + i).filter((m) => {
     const geometry = gateGeometry(m, cfg.toleranceCents, cfg.range, craftRadiusFor(m, cfg));
     return geometry.gapBottom >= GAME_GATE_EDGE_MARGIN && geometry.gapTop <= 1 - GAME_GATE_EDGE_MARGIN;
@@ -332,10 +360,19 @@ export function makeGate(x: number, cfg: GameConfig, rand01: number, previousTar
     const closestDistance = Math.min(...notes.map((note) => Math.abs(Math.abs(note - previousTarget) - requested)));
     notes = notes.filter((note) => Math.abs(Math.abs(note - previousTarget) - requested) === closestDistance);
   }
-  const targetMidi = notes[Math.min(notes.length - 1, Math.floor(clamp(rand01, 0, 0.999999) * notes.length))];
+  const targetMidi = courseNote?.midi ?? notes[Math.min(notes.length - 1, Math.floor(clamp(rand01, 0, 0.999999) * notes.length))];
   const craftRadius = craftRadiusFor(targetMidi, cfg);
   const geometry = gateGeometry(targetMidi, cfg.toleranceCents, cfg.range, craftRadius);
-  return { x, targetMidi, width: cfg.pipeWidth, craftRadius, ...geometry, passed: false };
+  return {
+    x,
+    targetMidi,
+    width: cfg.pipeWidth,
+    craftRadius,
+    ...geometry,
+    passed: false,
+    beats: courseNote?.beats ?? 1,
+    courseIndex,
+  };
 }
 
 /** True if the drawn craft circle visibly touches a solid part of the drawn pipe. */
@@ -374,7 +411,7 @@ export function stepGame(
   const craftRadius = craftRadiusFor(activeTarget, cfg);
   const envelopeRadius = envelopeRadiusFor(stabilityCents, cfg, activeTarget);
   let score = state.score;
-  let crashed = false;
+  let nextCourseIndex = state.nextCourseIndex;
   const gates: Gate[] = [];
   for (const g of state.gates) {
     const moved = { ...g, x: g.x - dx };
@@ -386,11 +423,19 @@ export function stepGame(
     gates.push(moved);
   }
   const last = gates[gates.length - 1];
-  const nextX = last ? last.x + cfg.spacing : cfg.width + GAME_FIRST_GATE_DELAY;
-  if (nextX < cfg.width + cfg.spacing) gates.push(makeGate(Math.max(nextX, cfg.width), cfg, rand(), last?.targetMidi));
-  crashed = gates.some((gate) => hitsGate(craftY, gate, envelopeRadius));
+  const rhythmScale = 100 / clamp(cfg.courseTempoPercent, 50, 150);
+  const nextX = last ? last.x + cfg.spacing * Math.max(0.25, last.beats ?? 1) * rhythmScale : cfg.width + GAME_FIRST_GATE_DELAY;
+  if (nextX < cfg.width + cfg.spacing) {
+    const courseNote = cfg.courseNotes?.[nextCourseIndex];
+    if (!cfg.courseNotes || courseNote) {
+      gates.push(makeGate(Math.max(nextX, cfg.width), cfg, rand(), last?.targetMidi, courseNote, cfg.courseNotes ? nextCourseIndex : undefined));
+      if (courseNote) nextCourseIndex += 1;
+    }
+  }
+  const crashed = gates.some((gate) => hitsGate(craftY, gate, envelopeRadius));
+  const completed = Boolean(cfg.courseNotes && nextCourseIndex >= cfg.courseNotes.length && score >= cfg.courseNotes.length);
   return {
-    phase: crashed ? "over" : "playing",
+    phase: crashed ? "over" : completed ? "won" : "playing",
     craftY,
     voiced,
     craftRadius,
@@ -398,6 +443,7 @@ export function stepGame(
     gates,
     score,
     distance: state.distance + dx,
+    nextCourseIndex,
   };
 }
 
@@ -411,6 +457,7 @@ export function togglePlay(state: GameState): GameState {
     case "paused":
       return { ...state, phase: "playing" };
     case "over":
+    case "won":
       return { ...newGame(), phase: "playing" };
   }
 }

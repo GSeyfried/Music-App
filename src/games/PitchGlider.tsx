@@ -5,8 +5,8 @@
 // component feeds it pitch each animation frame and draws on a canvas using
 // the app's theme tokens.
 
-import { useEffect, useRef, useState } from "react";
-import { useLive } from "../engine/EngineContext";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useEngineClient, useLive } from "../engine/EngineContext";
 import { Button, Stepper } from "../components/ui/controls";
 import { useUi } from "../components/UiContext";
 import { readCanvasTheme, themeVersion, type CanvasTheme } from "../lib/theme";
@@ -17,6 +17,9 @@ import { getAppSetting, setAppSetting, useAppSetting } from "../settings/appSett
 import { GAME_VIEWPORT_PAN_SMOOTHING_MS, settingById, type SettingDef } from "../settings/registry";
 import { NOTE_NAMES, noteColor } from "../settings/noteColors";
 import { SettingControl } from "../settings/SettingControl";
+import { playPreview, stopPreview, type PreviewNote } from "../audio/instruments";
+import type { ReferenceDetail, ReferenceSummary } from "../practice/types";
+import { BUNDLED_COURSES, courseFromReference, fitCourseToRange, rangeForCourse, type GliderCourse } from "./courses";
 import {
   CRAFT_RADIUS,
   CRAFT_X,
@@ -58,14 +61,19 @@ function Setting({ id }: { id: string }) {
 }
 
 export function PitchGlider() {
+  const client = useEngineClient();
   const live = useLive();
   const ui = useUi();
-  const range = useGameRange();
+  const baseRange = useGameRange();
   const rangeSource = useAppSetting("games.range");
   const difficulty = useAppSetting("games.difficulty");
   const viewportSemitones = useAppSetting("games.viewportSemitones");
+  const courseId = useAppSetting("games.courseId");
+  const courseTempoPercent = useAppSetting("games.courseTempoPercent");
   const noteColors = useAppSetting("notes.colorMap");
   const best = useAppSetting("games.bestScores");
+  const [references, setReferences] = useState<ReferenceSummary[]>([]);
+  const [referenceDetail, setReferenceDetail] = useState<ReferenceDetail | null>(null);
   const [phase, setPhase] = useState<GamePhase>("ready");
   const [lastScore, setLastScore] = useState(0);
   const [newBest, setNewBest] = useState(false);
@@ -78,9 +86,45 @@ export function PitchGlider() {
   const trail = useRef<number[]>([]);
   const lastNow = useRef<number | null>(null);
   const theme = useRef<{ version: number; colors: CanvasTheme } | null>(null);
-  const cameraMidi = useRef((range.low + range.high) / 2);
   const startPitchClassRef = useRef(startPitchClass);
   const voiceStart = useRef<VoiceStartState>(VOICE_START_IDLE);
+
+  useEffect(() => {
+    let active = true;
+    void client.call("practice_list_references").then((items) => active && setReferences(items)).catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [client]);
+
+  useEffect(() => {
+    setReferenceDetail(null);
+    if (!courseId.startsWith("reference:")) return;
+    const referenceId = courseId.slice("reference:".length);
+    let active = true;
+    void client.call("practice_get_reference", { referenceId }).then((detail) => active && setReferenceDetail(detail)).catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [client, courseId]);
+
+  const selectedCourse = useMemo<GliderCourse | null>(() => {
+    if (courseId === "free") return null;
+    const bundled = BUNDLED_COURSES.find((item) => item.id === courseId);
+    const referenceId = courseId.startsWith("reference:") ? courseId.slice("reference:".length) : null;
+    const raw = bundled ?? (referenceDetail?.summary.id === referenceId ? courseFromReference(referenceDetail) : null);
+    return raw ? fitCourseToRange(raw, baseRange) : null;
+  }, [baseRange.high, baseRange.low, courseId, referenceDetail]);
+  const range = useMemo(() => rangeForCourse(selectedCourse, baseRange), [baseRange, selectedCourse]);
+  const cameraMidi = useRef((range.low + range.high) / 2);
+
+  useEffect(() => {
+    game.current = newGame();
+    trail.current = [];
+    lastNow.current = null;
+    setPhase("ready");
+    stopPreview();
+  }, [courseId, selectedCourse?.notes]);
 
   const rangeRef = useRef(range);
   rangeRef.current = range;
@@ -92,7 +136,7 @@ export function PitchGlider() {
   };
 
   const toggle = () => {
-    const wasOver = game.current.phase === "over";
+    const wasOver = game.current.phase === "over" || game.current.phase === "won";
     game.current = togglePlay(game.current);
     if (wasOver) trail.current = [];
     voiceStart.current = VOICE_START_IDLE;
@@ -143,12 +187,14 @@ export function PitchGlider() {
       getAppSetting("games.pitchSmoothingMs"),
       getAppSetting("games.viewportSemitones"),
       getAppSetting("games.pipeDistanceSemitones"),
+      selectedCourse?.notes,
+      getAppSetting("games.courseTempoPercent"),
     );
     const midi = steeringPitch(live.lastPitch, now - live.pitchAt, getAppSetting("games.minClarity"), STALE_MS);
     const stabilityCents = midi === null ? null : live.lastPitch?.stabilityCents ?? null;
     const target = midi === null ? null : pitchToHeight(midi, r);
     const before = game.current;
-    if (before.phase === "ready" || before.phase === "over") {
+    if (before.phase === "ready" || before.phase === "over" || before.phase === "won") {
       voiceStart.current = stepVoiceStart(
         voiceStart.current,
         midi,
@@ -160,9 +206,9 @@ export function PitchGlider() {
     } else {
       voiceStart.current = VOICE_START_IDLE;
     }
-    if ((before.phase === "ready" || before.phase === "over") && voiceStart.current.ready) {
+    if ((before.phase === "ready" || before.phase === "over" || before.phase === "won") && voiceStart.current.ready) {
       game.current = togglePlay(before);
-      if (before.phase === "over") trail.current = [];
+      if (before.phase === "over" || before.phase === "won") trail.current = [];
       voiceStart.current = VOICE_START_IDLE;
       lastNow.current = null;
     } else if (before.phase === "ready" && target !== null) {
@@ -181,7 +227,7 @@ export function PitchGlider() {
     }
     if (g.phase !== before.phase) {
       setPhase(g.phase);
-      if (g.phase === "over") {
+      if (g.phase === "over" || g.phase === "won") {
         setLastScore(g.score);
         const d = getAppSetting("games.difficulty");
         const bests = getAppSetting("games.bestScores");
@@ -214,6 +260,18 @@ export function PitchGlider() {
     setAppSetting("games.rangeHighMidi", n.high);
   };
 
+  const previewCourse = () => {
+    if (!selectedCourse) return;
+    const secondsPerBeat = 60 / selectedCourse.bpm / (courseTempoPercent / 100);
+    let beat = 0;
+    const notes: PreviewNote[] = selectedCourse.notes.map((note) => {
+      const preview = { midi: note.midi, start: beat * secondsPerBeat, duration: Math.max(0.12, note.beats * secondsPerBeat * 0.86) };
+      beat += note.beats;
+      return preview;
+    });
+    playPreview(notes);
+  };
+
   return (
     <section className="card pitch-glider" aria-label="Pitch Glider">
       <div className="games-head">
@@ -224,6 +282,7 @@ export function PitchGlider() {
           </span>
           <span>
             Score <strong ref={scoreEl}>0</strong>
+            {selectedCourse && ` / ${selectedCourse.notes.length}`}
           </span>
           <span>
             Best <strong>{bestHere}</strong>
@@ -265,13 +324,39 @@ export function PitchGlider() {
                 </p>
               </>
             )}
-            <Button variant="solid" size="lg" icon={phase === "over" ? "restart" : "play"} shortcut={["Space"]} onPress={toggle}>
+            {phase === "won" && (
+              <>
+                <h3>Course complete</h3>
+                <p className="glider-final num"><strong>{selectedCourse?.title}</strong> · {lastScore} notes</p>
+                <p>You flew the complete melody. Replay it, speed it up, or choose another course.</p>
+              </>
+            )}
+            <Button variant="solid" size="lg" icon={phase === "over" || phase === "won" ? "restart" : "play"} shortcut={["Space"]} onPress={toggle}>
               {phase === "ready" ? "Start" : phase === "paused" ? "Resume" : "Play again"}
             </Button>
           </div>
         )}
       </div>
       <div className="glider-settings">
+        <label className="glider-course-control">
+          <span>Course</span>
+          <select value={courseId} onChange={(event) => setAppSetting("games.courseId", event.currentTarget.value)}>
+            <option value="free">Free flight</option>
+            <optgroup label="Scales">
+              {BUNDLED_COURSES.filter((course) => course.group === "Scales").map((course) => <option key={course.id} value={course.id}>{course.title}</option>)}
+            </optgroup>
+            <optgroup label="Public-domain melodies">
+              {BUNDLED_COURSES.filter((course) => course.group === "Melodies").map((course) => <option key={course.id} value={course.id}>{course.title}</option>)}
+            </optgroup>
+            {references.length > 0 && (
+              <optgroup label="My Practice references">
+                {references.map((reference) => <option key={reference.id} value={`reference:${reference.id}`}>{reference.name}</option>)}
+              </optgroup>
+            )}
+          </select>
+        </label>
+        {selectedCourse && <Button variant="ghost" size="sm" icon="play" onPress={previewCourse}>Hear course</Button>}
+        {selectedCourse && <Setting id="games.courseTempoPercent" />}
         <Setting id="games.difficulty" />
         <Setting id="games.speed" />
         <Setting id="games.pipeDistanceSemitones" />

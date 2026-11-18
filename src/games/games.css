@@ -318,3 +318,192 @@
   gap: var(--s-4);
   margin-top: var(--s-4);
 }
+
+.glider-course-control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+}
+
+.glider-course-control select {
+  min-width: 210px;
+  min-height: var(--hit);
+  padding: 0 var(--s-3);
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
+/* ---- GROOVE · Echo -------------------------------------------------------- */
+
+.groove-echo .games-head > div:first-child {
+  flex: 1;
+}
+
+.groove-echo .games-head .hint {
+  margin: var(--s-1) 0 0;
+}
+
+.groove-best {
+  color: var(--text-dim);
+}
+
+.groove-best strong {
+  margin-left: var(--s-1);
+  color: var(--text);
+  font-size: var(--fs-lg);
+}
+
+.groove-stage {
+  min-height: 300px;
+  display: grid;
+  place-items: center;
+  padding: var(--s-6);
+  overflow: hidden;
+  text-align: center;
+  background:
+    radial-gradient(circle at 50% 45%, color-mix(in srgb, var(--viz-onset) 18%, transparent), transparent 32%),
+    var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.groove-message,
+.groove-result {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-3);
+  max-width: 640px;
+}
+
+.groove-message h3,
+.groove-result h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+}
+
+.groove-message p,
+.groove-result p {
+  margin: 0;
+  color: var(--text-dim);
+}
+
+.groove-pulse {
+  width: 86px;
+  height: 86px;
+  border-radius: 50%;
+  background: var(--viz-onset);
+  box-shadow: 0 0 0 18px color-mix(in srgb, var(--viz-onset) 14%, transparent);
+  animation: groove-breathe 0.65s ease-in-out infinite alternate;
+}
+
+.groove-stage.is-play .groove-pulse {
+  background: var(--good);
+  box-shadow: 0 0 0 18px color-mix(in srgb, var(--good) 14%, transparent);
+}
+
+@keyframes groove-breathe {
+  from { transform: scale(0.92); opacity: 0.72; }
+  to { transform: scale(1.06); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .groove-pulse { animation: none; }
+}
+
+.groove-pads {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(150px, 1fr));
+  gap: var(--s-3);
+  margin-top: var(--s-3);
+}
+
+.groove-pad {
+  min-height: 108px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-3);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-lg);
+  font-weight: 800;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  touch-action: manipulation;
+}
+
+.groove-pad:not(:disabled):active {
+  transform: scale(0.985);
+  background: color-mix(in srgb, var(--viz-onset) 22%, var(--surface-2));
+}
+
+.groove-pad:disabled {
+  color: var(--text-faint);
+  opacity: 0.58;
+}
+
+.groove-pad kbd {
+  padding: 2px 7px;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+}
+
+.groove-mic-note {
+  margin: var(--s-3) 0 0;
+  text-align: center;
+}
+
+.groove-score {
+  font-family: var(--font-display);
+  font-size: 4.5rem;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--good);
+}
+
+.groove-timeline {
+  position: relative;
+  width: min(560px, 78vw);
+  height: 64px;
+  margin: var(--s-3) 0;
+}
+
+.groove-timeline-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  border-top: 2px solid var(--border-strong);
+}
+
+.groove-timeline-hit {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 30px;
+  margin: -15px 0 0 -7px;
+  border-radius: var(--r-pill);
+  background: var(--warn);
+  border: 2px solid var(--surface-2);
+}
+
+.groove-timeline-hit.is-low { transform: translateY(9px); }
+.groove-timeline-hit.is-high { transform: translateY(-9px); }
+.groove-timeline-hit.is-great { background: var(--good); }
+.groove-timeline-hit.is-missed { background: var(--bad); opacity: 0.55; }
+
+@media (max-width: 560px) {
+  .groove-stage { min-height: 260px; padding: var(--s-4); }
+  .groove-pad { min-height: 88px; font-size: var(--fs-md); }
+}

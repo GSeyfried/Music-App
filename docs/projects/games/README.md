@@ -1,11 +1,18 @@
-# Games (Pitch Glider, Range Finder)
+# Games (Pitch Glider, GROOVE Echo, Range Finder)
 
-Future game-family planning: [GROOVE](groove.md) (exploratory/PENDING; no
-implementation or settings decisions yet).
+Rhythm-game direction and the implemented first slice live in [GROOVE](groove.md).
 
 Status: Games tab built (merged 1d34530). Pitch Glider and the Range Finder
 were tested with the simulated engine only; the user is now playing them on
 real hardware.
+
+Pitch Glider now supports finite courses as well as free flight. Bundled
+courses include six scales and four complete public-domain melodies (Twinkle,
+Mary Had a Little Lamb, Ode to Joy, and Frère Jacques). Saved Practice
+references also become courses through their summarized note/timing data; raw
+audio never crosses the bridge. Courses move by whole octaves toward the saved
+voice range, retain their relative durations, can be previewed with the piano,
+and end with a distinct completion state.
 
 Pitch Glider now uses exact semitone targets and has no hidden pitch or
 stability verdict. Every pipe opening is drawn from that target's cents
@@ -54,13 +61,11 @@ fifth, or copy a short bongo rhythm. The recognizer and latency rules must be
 specific to voice, acoustic audio, MIDI, or touch input, but successful prompts
 should feed one shared start action. Exact prompts, scoring, accessibility, and
 whether octave matters remain PENDING.
-4. **Play scales and Practice references in the game.** Any scale or reference
-   becomes a course: one opening per note, spaced by the note's duration.
-   Add speed options (slower/faster), which stretch the spacing and timing.
-5. **Song library.** Bundle common public-domain melodies (e.g. Twinkle
-   Twinkle Little Star, Mary Had a Little Lamb, Ode to Joy, Frère Jacques),
-   grouped Easy, Medium and Hard. Copyrighted popular songs are not bundled,
-   even for personal use.
+4. **Play scales and Practice references in the game (implemented).** One
+   opening is generated per note and spacing follows note duration. Course
+   tempo ranges from 50–150%.
+5. **Public-domain song library (first set implemented).** Four melodies are
+   bundled. Difficulty grouping and a larger catalog remain PENDING.
 6. **Bring your own songs (research).** Import a melody from a MIDI or
    MusicXML file (MIDI import already exists). Getting a playable vocal line
    from a full mix (MP3, Spotify/Apple Music/YouTube) needs source separation

@@ -1,7 +1,26 @@
 # GROOVE rhythm mini-game family
 
-Status: Exploratory/PENDING. This is future planning only; no game contracts,
-implementation, tuning values, or settings are approved.
+Status: **Echo first slice implemented 2026-11-18.** Other family members remain
+exploratory/PENDING.
+
+## Implemented: Echo
+
+Echo plays a generated two-drum phrase after a four-click count-in, then gives
+another four-click count-in before a silent performance window. The player
+answers on two touch pads / F and J keys, or with acoustic drum attacks through
+the selected microphone. Acoustic mode deliberately scores onset timing only;
+it does not pretend to classify drum timbre.
+
+The performance view shows pulse state and the number of played hits, never the
+upcoming answer. After the phrase ends, results show matched, missed and extra
+hits, mean absolute timing error, drum-choice accuracy where applicable, a
+post-performance timeline, and a saved best score per difficulty. Pure scoring
+tests cover exact, early/late, missed, extra, wrong-lane, and microphone cases.
+
+PENDING real-hardware tuning: microphone event-delivery latency, onset
+thresholds for bongos versus hand claps, the 140 ms default matching window,
+phrase density, synthesized drum sound, and whether count-ins should vary by
+difficulty.
 
 GROOVE is a family of short timing exercises for voice, acoustic instruments
 (including bongos and piano), MIDI controllers, and touch. The shared design principle is that visuals reward
