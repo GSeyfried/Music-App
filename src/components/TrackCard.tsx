@@ -9,7 +9,7 @@ import { useEngineActions, useEngineState, useLive } from "../engine/EngineConte
 import type { LooperView } from "../engine/store";
 import { formatGain } from "../lib/format";
 import { ringProgress } from "../lib/loopProgress";
-import { mainAction, trackControls, trackStateLabel } from "../lib/looperControls";
+import { mainAction, trackControls, trackLoopSummary, trackStateLabel } from "../lib/looperControls";
 import { shortcutKeys } from "../lib/shortcuts";
 import { setAttr, setText, useFrame } from "../lib/useFrame";
 import { Icon } from "./ui/Icon";
@@ -27,12 +27,14 @@ const polar = (r: number, fraction: number) => {
   return { x: 50 + r * Math.cos(a), y: 50 + r * Math.sin(a) };
 };
 
-function RingTicks({ view }: { view: LooperView }) {
+function RingTicks({ view, track }: { view: LooperView; track: number }) {
   const show = useAppSetting("view.loopRingTicks");
   const tr = view.transport;
+  // Each track's ring shows its own loop (PER_TRACK_LOOPS.md).
+  const period = view.tracks[track]?.loopPeriod ?? null;
   const ticks = useMemo(
-    () => loopTicks(view.loopPeriodFrames, framesPerBeat(view.sampleRate || tr.sampleRate, tr.bpm), tr.timeSignature.numerator),
-    [view.loopPeriodFrames, view.sampleRate, tr.sampleRate, tr.bpm, tr.timeSignature.numerator],
+    () => loopTicks(period, framesPerBeat(view.sampleRate || tr.sampleRate, tr.bpm), tr.timeSignature.numerator),
+    [period, view.sampleRate, tr.sampleRate, tr.bpm, tr.timeSignature.numerator],
   );
   if (!show || ticks.length === 0) return null;
   return (
@@ -102,7 +104,7 @@ function LoopRing({ track, view }: { track: number; view: LooperView }) {
         {showLayers && summaries.length > 0 && <LayerRings summaries={summaries} />}
         {showLayers && emphasis && summaries.length > 0 && <path className="ring-layer-head" ref={layerHead} />}
         <circle className="ring-track" cx="50" cy="50" r={RING_R} />
-        <RingTicks view={view} />
+        <RingTicks view={view} track={track} />
         <circle
           className="ring-arc"
           ref={arc}
@@ -197,6 +199,12 @@ export function TrackCard({
       data-state={t.state}
       data-muted={t.muted || silencedBySolo}
       aria-label={`Track ${track + 1}`}
+      aria-current={selected ? "true" : undefined}
+      data-busy={t.busy || undefined}
+      // A click anywhere on the card selects it; the transport bar then edits its loop.
+      onClick={() => {
+        if (!selected) onSelect(track);
+      }}
       onContextMenu={(e) => {
         if (!onMenu) return;
         e.preventDefault();
@@ -227,7 +235,7 @@ export function TrackCard({
           {track < 8 && <Kbd keys={[String(track + 1)]} />}
         </button>
         <span className="chip" data-state={t.state}>
-          {trackStateLabel(t)}
+          {t.busy ? "Copying…" : trackStateLabel(t)}
         </span>
         {onMenu && (
           <button
@@ -264,6 +272,7 @@ export function TrackCard({
           {t.layers > 0 ? `${t.layers} layer${t.layers === 1 ? "" : "s"}` : "No loop yet"}
           {t.redoLayers > 0 && ` · ${t.redoLayers} to redo`}
           {silencedBySolo && " · silent (solo)"}
+          {t.loop.mode !== "song" && ` · ${trackLoopSummary(t.loop)}`}
         </div>
         {!main.enabled && main.reason && <div className="track-reason">{main.reason}</div>}
       </div>
@@ -369,6 +378,7 @@ function TrackMenu() {
         enabled: a.enabled,
         checked: a.checked,
         destructive: a.destructive,
+        reason: a.reason,
         shortcut: a.shortcut,
         separatorBefore: a.id === "track.details" || a.id === "track.clear",
       }))}

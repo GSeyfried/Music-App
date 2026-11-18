@@ -3,6 +3,7 @@
 // from the asserted fields plus the struct definitions (noted per fixture).
 
 import type { LooperState } from "../engine/protocol";
+import { DEFAULT_TRACK_LOOP } from "../models/domain";
 
 /** Verbatim: engine.rs `events_serialise_with_type_tag`. */
 export const ERROR_EVENT_JSON = `{"type":"error","payload":{"kind":"noInputDevice"}}`;
@@ -60,7 +61,24 @@ export const RUST_FIELDS = {
     "drift_dropped_frames",
     "input_cushion_frames",
   ],
-  TrackSnapshot: ["state", "layers", "muted", "solo", "playing", "gain", "redo_layers", "record_start", "record_end"],
+  TrackSnapshot: [
+    "state",
+    "layers",
+    "muted",
+    "solo",
+    "playing",
+    "gain",
+    "redo_layers",
+    "record_start",
+    "record_end",
+    // Per-track loops (PER_TRACK_LOOPS.md "Contract").
+    "loop",
+    "loop_period",
+    "loop_phase",
+    "busy",
+  ],
+  /** transport.rs `TrackLoop` (PER_TRACK_LOOPS.md "Contract"). */
+  TrackLoop: ["mode", "bars", "beats", "ratio", "count_in_bars", "overdub_start", "loop_fit"],
   EngineStatus: ["capturing", "monitoring", "capture", "output", "looper", "analysis"],
   LevelReading: ["rms", "peak", "rms_db", "peak_db", "frame", "dropped"],
   NoteEvent: ["start_frame", "end_frame", "note", "midi", "cents", "stability_cents", "clarity", "frames"],
@@ -113,6 +131,10 @@ export const LOOPER_STATE: LooperState = {
       redoLayers: 1,
       recordStart: null,
       recordEnd: null,
+      loop: { ...DEFAULT_TRACK_LOOP },
+      loopPeriod: 96_000,
+      loopPhase: 24_000,
+      busy: false,
     },
     {
       state: "empty",
@@ -124,6 +146,10 @@ export const LOOPER_STATE: LooperState = {
       redoLayers: 0,
       recordStart: null,
       recordEnd: null,
+      loop: { ...DEFAULT_TRACK_LOOP },
+      loopPeriod: 96_000,
+      loopPhase: 24_000,
+      busy: false,
     },
   ],
   maxTracks: 16,
@@ -147,3 +173,19 @@ export const HW_STATUS_EVENT_JSON = `{"type":"status","payload":{"capturing":tru
 
 /** hardware-io INTERFACE.md `calibration` event (CalibrationOutcome), built from the documented types. */
 export const CALIBRATION_EVENT_JSON = `{"type":"calibration","payload":{"result":{"latencyFrames":566,"latencyMs":11.79,"sampleRate":48000,"confidence":0.96,"detected":8,"repeats":8,"spreadFrames":2,"inverted":false},"error":null,"applied":true}}`;
+
+/**
+ * A looper event from an engine older than per-track loops: its tracks have
+ * no loop / loopPeriod / loopPhase / busy (normalizeLooperState fills them in).
+ */
+export const OLD_LOOPER_EVENT_JSON = JSON.stringify({
+  type: "looper",
+  payload: {
+    ...LOOPER_STATE,
+    tracks: LOOPER_STATE.tracks.map(({ loop: _l, loopPeriod: _p, loopPhase: _ph, busy: _b, ...rest }) => rest),
+  },
+});
+
+/** PER_TRACK_LOOPS.md contract: a Bars track (2 bars + 1 beat) as the engine serialises it. */
+export const SET_TRACK_LOOP_COMMAND_JSON = `{"type":"setTrackLoop","track":1,"settings":{"mode":"bars","bars":2,"beats":1,"ratio":1.0,"countInBars":1,"overdubStart":"nextBar","loopFit":"nearestBeat"}}`;
+export const DUPLICATE_TRACK_COMMAND_JSON = `{"type":"duplicateTrack","track":0}`;

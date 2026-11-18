@@ -16,7 +16,7 @@
 //   4. Errors / warnings / notices: extend the union and messages.ts (the
 //      `Record<Kind, ...>` tables fail the typecheck until text is added).
 
-import type { AudioDevice, TransportState } from "../models/domain";
+import { DEFAULT_TRACK_LOOP, type AudioDevice, type TrackLoop, type TrackLoopMode, type TransportState } from "../models/domain";
 import type { PracticeCommands, PracticeEvent, TransportMap } from "../practice/types";
 import type { ProjectCommands, ProjectEngineEvent } from "../project/types";
 
@@ -395,7 +395,21 @@ export interface TrackSnapshot {
   recordEnd: number | null;
   /** Signed playback shifts, one per active layer, in frames (absent on older engines). */
   layerOffsets?: number[];
+  // Per-track loops (PER_TRACK_LOOPS.md "Contract"). Older engines omit these;
+  // `normalizeLooperState` fills them in, so readers can rely on them.
+  /** How this track loops; older engines: DEFAULT_TRACK_LOOP (follow the song). */
+  loop: TrackLoop;
+  /** The track's own clock period in frames; older engines: the song loop period. */
+  loopPeriod: number | null;
+  /** Frames into the track's own cycle; older engines: the song loop phase. */
+  loopPhase: number;
+  /** True while the engine is still filling the track (DuplicateTrack copy). */
+  busy: boolean;
 }
+
+/** TrackSnapshot as it may arrive from an engine older than per-track loops. */
+export type WireTrackSnapshot = Omit<TrackSnapshot, "loop" | "loopPeriod" | "loopPhase" | "busy"> &
+  Partial<Pick<TrackSnapshot, "loop" | "loopPeriod" | "loopPhase" | "busy">>;
 
 export interface MusicalPosition {
   bar: number;
@@ -427,6 +441,50 @@ export interface LooperState {
   maxTracks?: number;
   /** Earlier name of `maxTracks` in the in-flight engine change; read as a fallback. */
   trackCapacity?: number;
+}
+
+/** LooperState as it may arrive from an engine older than per-track loops. */
+export type WireLooperState = Omit<LooperState, "tracks"> & { tracks: WireTrackSnapshot[] };
+
+const LOOP_MODES: readonly TrackLoopMode[] = ["song", "bars", "multiple", "free"];
+
+/** Fill in any field an older (or partial) engine left out, from DEFAULT_TRACK_LOOP. */
+export function normalizeTrackLoop(raw: unknown): TrackLoop {
+  if (!raw || typeof raw !== "object") return { ...DEFAULT_TRACK_LOOP };
+  const r = raw as Partial<TrackLoop>;
+  const num = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) ? v : d);
+  return {
+    mode: LOOP_MODES.includes(r.mode as TrackLoopMode) ? (r.mode as TrackLoopMode) : DEFAULT_TRACK_LOOP.mode,
+    bars: num(r.bars, DEFAULT_TRACK_LOOP.bars),
+    beats: num(r.beats, DEFAULT_TRACK_LOOP.beats),
+    ratio: num(r.ratio, DEFAULT_TRACK_LOOP.ratio),
+    countInBars: num(r.countInBars, DEFAULT_TRACK_LOOP.countInBars),
+    overdubStart: r.overdubStart ?? DEFAULT_TRACK_LOOP.overdubStart,
+    loopFit: r.loopFit ?? DEFAULT_TRACK_LOOP.loopFit,
+  };
+}
+
+/**
+ * Accept a looper snapshot from any engine version: tracks without the
+ * per-track loop fields follow the song (loop = default Song, loopPeriod =
+ * song loop period, loopPhase = song phase, busy = false). Returns the same
+ * object when nothing is missing.
+ */
+export function normalizeLooperState(s: WireLooperState): LooperState {
+  const complete = s.tracks.every(
+    (t) => t.loop !== undefined && t.loopPeriod !== undefined && t.loopPhase !== undefined && t.busy !== undefined,
+  );
+  if (complete) return s as LooperState;
+  return {
+    ...s,
+    tracks: s.tracks.map((t) => ({
+      ...t,
+      loop: t.loop === undefined ? { ...DEFAULT_TRACK_LOOP } : normalizeTrackLoop(t.loop),
+      loopPeriod: t.loopPeriod === undefined ? s.loopPeriodFrames : t.loopPeriod,
+      loopPhase: t.loopPhase ?? s.loopPhase,
+      busy: t.busy ?? false,
+    })),
+  };
 }
 
 /** Mirrors Rust `looper::LAYER_SUMMARY_BINS`; fixed wire-format resolution. */
@@ -519,6 +577,14 @@ export type LooperCommand =
   | { type: "addTrack" }
   /** Remove a track; later tracks move down one index. `trackBusy` while it records, `trackLimit` for the last one. */
   | { type: "removeTrack"; track: number }
+  /**
+   * Per-track loop settings. An empty track accepts anything; with content, a
+   * mode change is `trackNotEmpty` and a length change (bars, beats, ratio)
+   * is `transportLocked` unless stopped. Count-in, overdub start and fit change anytime.
+   */
+  | { type: "setTrackLoop"; track: number; settings: TrackLoop }
+  /** Add a copy right after `track` (same loop, gain, mute, offsets, layers); it reports `busy` while copying. */
+  | { type: "duplicateTrack"; track: number }
   | { type: "setInputLatency"; frames: number };
 
 // ---- Analysis -------------------------------------------------------------------
@@ -748,6 +814,9 @@ export function parseEngineEvent(raw: unknown): EngineEvent | null {
   const { type, payload } = raw as { type?: unknown; payload?: unknown };
   if (typeof type !== "string" || !(EVENT_TYPES as readonly string[]).includes(type)) return null;
   if (!payload || typeof payload !== "object") return null; // arrays (midiPorts) are objects too
+  if (type === "looper" && Array.isArray((payload as { tracks?: unknown }).tracks)) {
+    return { type: "looper", payload: normalizeLooperState(payload as WireLooperState) };
+  }
   return raw as EngineEvent;
 }
 

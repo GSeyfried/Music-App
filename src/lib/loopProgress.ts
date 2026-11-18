@@ -25,6 +25,9 @@ export function ringProgress(state: LooperState | null, track: number, msSinceSt
   const ahead = running ? (Math.min(MAX_EXTRAPOLATE_MS, Math.max(0, msSinceState)) / 1000) * sr : 0;
   const frame = state.frame + ahead;
   const framesPerBeat = (sr * 60) / state.transport.bpm;
+  // Each track runs on its own clock (PER_TRACK_LOOPS.md); older engines: the song clock.
+  const period = t.loopPeriod === undefined ? state.loopPeriodFrames : t.loopPeriod;
+  const trackPhase = t.loopPhase ?? state.loopPhase;
 
   if (t.state === "armed") {
     const remaining =
@@ -43,15 +46,14 @@ export function ringProgress(state: LooperState | null, track: number, msSinceSt
         caption: `${(elapsed / sr).toFixed(1)} s`,
       };
     }
-    if (state.loopPeriodFrames === null) {
+    if (period === null) {
       // Free first take: its length is not known until Stop.
       return { mode: "freeTake", fraction: (elapsed / sr) % 1, caption: `${(elapsed / sr).toFixed(1)} s` };
     }
   }
 
-  if (t.layers > 0 && state.loopPeriodFrames && state.loopPeriodFrames > 0) {
-    const period = state.loopPeriodFrames;
-    const phase = (((state.loopPhase + ahead) % period) + period) % period;
+  if (t.layers > 0 && period && period > 0) {
+    const phase = (((trackPhase + ahead) % period) + period) % period;
     const beat = Math.floor(phase / framesPerBeat) + 1;
     return { mode: "loop", fraction: phase / period, caption: state.run === "stopped" ? "" : String(beat) };
   }

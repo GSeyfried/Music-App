@@ -4,7 +4,7 @@
 
 import { useEngineActions, useEngineState } from "../engine/EngineContext";
 import { formatGain, formatSeconds } from "../lib/format";
-import { trackStateLabel } from "../lib/looperControls";
+import { trackLoopSummary, trackStateLabel } from "../lib/looperControls";
 import { trackActions } from "../lib/trackActions";
 import { useAppSetting } from "../settings/appSettings";
 import { Button, Sheet } from "./ui/controls";
@@ -34,7 +34,8 @@ export function TrackInspector() {
     ["Level", formatGain(t.gain)],
     ["Mute / solo", `${t.muted ? "Muted" : "Not muted"} · ${t.solo ? "Soloed" : "Not soloed"}`],
     ["Plays with transport", t.playing ? "Yes" : "No"],
-    ["Loop length", view.loopPeriodFrames ? formatSeconds(view.loopPeriodFrames, sr) : "Not set yet"],
+    ["Loops", trackLoopSummary(t.loop)],
+    ["Loop length", t.loopPeriod ? formatSeconds(t.loopPeriod, sr) : "Not set yet"],
   ];
   if (t.recordStart !== null) {
     rows.push(["Take", `from ${formatSeconds(t.recordStart, sr)}${t.recordEnd !== null ? ` to ${formatSeconds(t.recordEnd, sr)}` : " (open)"}`]);
@@ -114,6 +115,7 @@ export function TrackInspector() {
               variant={a.destructive ? "danger" : a.checked === undefined ? "outline" : "toggle"}
               pressed={a.checked}
               disabled={!a.enabled}
+              title={!a.enabled ? a.reason : undefined}
               shortcut={a.shortcut}
               onPress={() => a.command && sendLooper(a.command)}
             >
