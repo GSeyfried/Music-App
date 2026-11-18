@@ -129,3 +129,25 @@ export function scale(d0: number, d1: number, r0: number, r1: number): (v: numbe
   const k = d1 === d0 ? 0 : (r1 - r0) / (d1 - d0);
   return (v) => r0 + (v - d0) * k;
 }
+
+/** The target box under `ms`, or null in a gap. */
+export function boxAt(boxes: TargetBox[], ms: number): TargetBox | null {
+  for (const b of boxes) if (b.startMs <= ms && ms < b.endMs) return b;
+  return null;
+}
+
+/** `midi` moved by whole octaves to sit nearest `target`. */
+export function foldToOctave(midi: number, target: number): number {
+  return midi - 12 * Math.round((midi - target) / 12);
+}
+
+/**
+ * Live colour for a sung pitch against the box drawn under it: "good" within the
+ * pitch threshold, "close" within twice it, "off" beyond, "none" in a gap.
+ */
+export function liveTone(midi: number, box: TargetBox | null, thresholdCents: number, octaveInvariant: boolean): "good" | "close" | "off" | "none" {
+  if (!box) return "none";
+  const sung = octaveInvariant ? foldToOctave(midi, box.midi) : midi;
+  const c = Math.abs((sung - box.midi) * 100);
+  return c <= thresholdCents ? "good" : c <= thresholdCents * 2 ? "close" : "off";
+}
