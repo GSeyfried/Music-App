@@ -15,16 +15,18 @@ import { studioStopOnEnter } from "./practice/studioHandoff";
 import { getAppSetting } from "./settings/appSettings";
 import type { EngineClient } from "./engine/client";
 import { shortcutKeys } from "./lib/shortcuts";
+import { GamesWorkspace } from "./games/GamesWorkspace";
 import { PracticeLab } from "./workspaces/PracticeLab";
 import { Studio } from "./workspaces/Studio";
 import { ProjectProvider, useProject } from "./project/ProjectContext";
 import { ProjectPanel } from "./project/ProjectPanel";
 
-type WorkspaceId = "studio" | "practice";
+type WorkspaceId = "studio" | "practice" | "games";
 
 const WORKSPACES: { id: WorkspaceId; label: string }[] = [
   { id: "studio", label: "Studio" },
   { id: "practice", label: "Practice Lab" },
+  { id: "games", label: "Games" },
 ];
 
 function EngineBadge() {
@@ -54,7 +56,7 @@ function Shell() {
   const projectLabel = project?.unsavedChanges ? `${projectName} · Unsaved` : projectName;
   useLiveShortcuts();
   useThemeEffects();
-  useAnalysisWhenNeeded(workspace === "practice");
+  useAnalysisWhenNeeded(workspace === "practice" || workspace === "games");
   const { setOverlay } = ui;
   useEffect(() => onAppMenu((id) => id === "settings" && setOverlay("settings")), [setOverlay]);
   return (
@@ -111,7 +113,9 @@ function Shell() {
       <EngineModeBanner />
       <MicPermissionBanner />
       <Alerts />
-      <main>{workspace === "studio" ? <Studio /> : <PracticeLab />}</main>
+      <main>
+        {workspace === "studio" ? <Studio /> : workspace === "practice" ? <PracticeLab /> : <GamesWorkspace />}
+      </main>
       <Toasts />
       <SettingsSheet />
       <ShortcutSheet />

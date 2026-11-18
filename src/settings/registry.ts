@@ -20,6 +20,16 @@ export type Difficulty = "easy" | "medium" | "hard" | "custom";
 export type ThemeMode = "system" | "light" | "dark";
 export type AccuracyEncoding = "brightness" | "saturation" | "opacity";
 export type ScaleDirection = "up" | "upDown";
+export type GameDifficulty = "easy" | "medium" | "hard";
+export type GameRangeSource = "myRange" | "custom";
+export type GameSpeed = "slow" | "normal" | "fast";
+
+/** Pitch Glider gate opening per difficulty, as a fraction of the play-field height. */
+export const GAME_OPENINGS: Record<GameDifficulty, number> = { easy: 0.42, medium: 0.32, hard: 0.22 };
+/** Pitch Glider scroll speed per setting, in play-field heights per second. */
+export const GAME_SPEEDS: Record<GameSpeed, number> = { slow: 0.22, normal: 0.32, fast: 0.45 };
+/** Pitch Glider distance between gates, in play-field heights. */
+export const GAME_GATE_SPACING = 0.9;
 
 /** Values owned by the frontend ("app" source), with their types. */
 export interface AppSettings {
@@ -56,6 +66,25 @@ export interface AppSettings {
   "notation.view": "pianoRoll" | "staff" | "both";
   /** Grid steps per beat when turning sung timing into note values. */
   "notation.gridSubdivision": number;
+  /** Lowest comfortable sung note (MIDI), set by the Range Finder. */
+  "voice.rangeLowMidi": number;
+  /** Highest comfortable sung note (MIDI), set by the Range Finder. */
+  "voice.rangeHighMidi": number;
+  "voice.rangeFinder.minClarity": number;
+  "voice.rangeFinder.maxStabilityCents": number;
+  "voice.rangeFinder.holdMs": number;
+  "games.difficulty": GameDifficulty;
+  "games.range": GameRangeSource;
+  "games.rangeLowMidi": number;
+  "games.rangeHighMidi": number;
+  "games.speed": GameSpeed;
+  /** Pitch smoothing time constant for the craft, ms. */
+  "games.pitchSmoothingMs": number;
+  /** How fast the craft sinks with no confident pitch, play-field heights per second. */
+  "games.gravity": number;
+  "games.minClarity": number;
+  /** Best Pitch Glider score per difficulty. */
+  "games.bestScores": Record<GameDifficulty, number>;
 }
 
 export type AppSettingId = keyof AppSettings;
@@ -88,6 +117,20 @@ export const APP_DEFAULTS: AppSettings = {
   "notes.accuracyEncoding": "saturation",
   "notation.view": "pianoRoll",
   "notation.gridSubdivision": 4,
+  "voice.rangeLowMidi": 48,
+  "voice.rangeHighMidi": 72,
+  "voice.rangeFinder.minClarity": 0.85,
+  "voice.rangeFinder.maxStabilityCents": 30,
+  "voice.rangeFinder.holdMs": 800,
+  "games.difficulty": "medium",
+  "games.range": "myRange",
+  "games.rangeLowMidi": 48,
+  "games.rangeHighMidi": 72,
+  "games.speed": "normal",
+  "games.pitchSmoothingMs": 120,
+  "games.gravity": 0.25,
+  "games.minClarity": 0.8,
+  "games.bestScores": { easy: 0, medium: 0, hard: 0 },
 };
 
 interface Base {
@@ -174,7 +217,7 @@ export const SETTINGS: SettingDef[] = [
     kind: "bool",
     label: "Live pitch panel",
     description:
-      "Show the tuner and pitch curve beside the tracks in Studio. Pitch analysis only runs while something needs it (this panel, Practice Lab, or pitch-reactive colors).",
+      "Show the tuner and pitch curve beside the tracks in Studio. Pitch analysis only runs while something needs it (this panel, Practice Lab, Games, or pitch-reactive colors).",
     category: "Studio",
     tier: "daily",
     scope: "app",
@@ -301,6 +344,182 @@ export const SETTINGS: SettingDef[] = [
       "How finely sung timing is rounded for the staff: steps per beat. 4 rounds to sixteenth notes in 4/4; 2 to eighths (cleaner but less exact).",
     category: "Practice",
     tier: "advanced",
+    scope: "app",
+  },
+  // ---- Voice ---------------------------------------------------------------
+  {
+    id: "voice.rangeLowMidi",
+    source: "app",
+    kind: "number",
+    min: 21,
+    max: 107,
+    step: 1,
+    label: "Lowest note",
+    description: "The lowest note you can sing comfortably (MIDI number; 48 = C3). Set it with the Range Finder in Games.",
+    category: "Voice",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "voice.rangeHighMidi",
+    source: "app",
+    kind: "number",
+    min: 22,
+    max: 108,
+    step: 1,
+    label: "Highest note",
+    description: "The highest note you can sing comfortably (MIDI number; 72 = C5). Set it with the Range Finder in Games.",
+    category: "Voice",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "voice.rangeFinder.minClarity",
+    source: "app",
+    kind: "number",
+    min: 0.5,
+    max: 0.99,
+    step: 0.01,
+    label: "Range Finder clarity",
+    description: "How clear (periodic) your voice must be before the Range Finder counts a note.",
+    category: "Voice",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "voice.rangeFinder.maxStabilityCents",
+    source: "app",
+    kind: "number",
+    min: 5,
+    max: 80,
+    step: 5,
+    label: "Range Finder steadiness",
+    description: "How much your pitch may waver (cents) while the Range Finder counts a held note.",
+    category: "Voice",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "voice.rangeFinder.holdMs",
+    source: "app",
+    kind: "number",
+    min: 300,
+    max: 3000,
+    step: 100,
+    label: "Range Finder hold time",
+    description: "How long, in ms, you must hold a note for the Range Finder to capture it.",
+    category: "Voice",
+    tier: "internal",
+    scope: "app",
+  },
+  // ---- Games ---------------------------------------------------------------
+  {
+    id: "games.difficulty",
+    source: "app",
+    kind: "choice",
+    label: "Game difficulty",
+    description: "How tall the openings in Pitch Glider are: wide, medium or narrow. Narrow openings need a steadier voice.",
+    category: "Games",
+    tier: "daily",
+    scope: "app",
+    options: [
+      { value: "easy", label: "Easy" },
+      { value: "medium", label: "Medium" },
+      { value: "hard", label: "Hard" },
+    ],
+  },
+  {
+    id: "games.range",
+    source: "app",
+    kind: "choice",
+    label: "Game range",
+    description: "Which notes span the play field: your range from the Range Finder, or a custom range.",
+    category: "Games",
+    tier: "daily",
+    scope: "app",
+    options: [
+      { value: "myRange", label: "My range" },
+      { value: "custom", label: "Custom" },
+    ],
+  },
+  {
+    id: "games.rangeLowMidi",
+    source: "app",
+    kind: "number",
+    min: 21,
+    max: 107,
+    step: 1,
+    label: "Custom low note",
+    description: "Bottom of the play field when Game range is Custom (MIDI number).",
+    category: "Games",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "games.rangeHighMidi",
+    source: "app",
+    kind: "number",
+    min: 22,
+    max: 108,
+    step: 1,
+    label: "Custom high note",
+    description: "Top of the play field when Game range is Custom (MIDI number).",
+    category: "Games",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "games.speed",
+    source: "app",
+    kind: "choice",
+    label: "Game speed",
+    description: "How fast the gates scroll toward you.",
+    category: "Games",
+    tier: "daily",
+    scope: "app",
+    options: [
+      { value: "slow", label: "Slow" },
+      { value: "normal", label: "Normal" },
+      { value: "fast", label: "Fast" },
+    ],
+  },
+  {
+    id: "games.pitchSmoothingMs",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 500,
+    step: 10,
+    label: "Glider smoothing",
+    description: "How much the glider smooths your pitch, in ms. Higher is calmer but slower to respond.",
+    category: "Games",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "games.gravity",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 1,
+    step: 0.05,
+    label: "Glider sink rate",
+    description: "How fast the glider sinks while you're not singing a clear note (play-field heights per second).",
+    category: "Games",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "games.minClarity",
+    source: "app",
+    kind: "number",
+    min: 0.5,
+    max: 0.99,
+    step: 0.01,
+    label: "Glider clarity",
+    description: "How clear your voice must be for the glider to follow it.",
+    category: "Games",
+    tier: "internal",
     scope: "app",
   },
   {

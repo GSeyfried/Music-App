@@ -1,0 +1,301 @@
+/* Games workspace: launcher, Range Finder, Pitch Glider. Uses the app tokens
+   from src/styles.css so both themes work. */
+
+.games {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.games-launcher {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--s-3);
+}
+
+.games-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-1);
+  padding: var(--s-3) var(--s-4);
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  color: var(--text);
+  cursor: pointer;
+  min-height: var(--hit);
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+
+.games-tile:hover {
+  border-color: var(--border-strong);
+}
+
+.games-tile:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
+.games-tile.is-on {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.games-tile-title {
+  font-weight: 700;
+  font-size: var(--fs-md);
+}
+
+.games-tile-blurb {
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+}
+
+.games-head {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+
+.games-head .card-title {
+  margin: 0;
+  margin-right: auto;
+}
+
+.games-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+}
+
+/* ---- Range Finder ---------------------------------------------------------- */
+
+.range-finder .hint {
+  margin-bottom: var(--s-4);
+}
+
+.rf-steps {
+  display: flex;
+  gap: var(--s-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-xs);
+}
+
+.rf-steps li {
+  padding: 2px var(--s-2);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  color: var(--text-faint);
+}
+
+.rf-steps li.is-on {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.rf-steps li.is-done {
+  color: var(--text-dim);
+  border-color: var(--border-strong);
+}
+
+.rf-live {
+  display: flex;
+  align-items: center;
+  gap: var(--s-5);
+  flex-wrap: wrap;
+}
+
+.rf-live-note {
+  font-family: var(--font-display);
+  font-size: 3.5rem;
+  font-weight: 700;
+  line-height: 1;
+  min-width: 3ch;
+  color: var(--text);
+}
+
+.rf-hold {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  flex: 1;
+  min-width: 200px;
+}
+
+.rf-hold-text {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  min-height: 1.3em;
+}
+
+.rf-hold-bar {
+  height: 8px;
+}
+
+.rf-ladder {
+  position: relative;
+  height: 40px;
+  margin: var(--s-5) 0 var(--s-2);
+  border-radius: var(--r-sm);
+  background: var(--surface-3);
+}
+
+.rf-ladder-span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: var(--r-sm);
+  background: var(--viz-note);
+  border: 1px solid var(--accent);
+}
+
+.rf-ladder-c {
+  position: absolute;
+  top: 100%;
+  transform: translateX(-50%);
+  margin-top: 2px;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.rf-ladder-c::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 2px);
+  height: 40px;
+  border-left: 1px dashed var(--border-strong);
+}
+
+.rf-ladder-marker {
+  position: absolute;
+  top: -6px;
+  bottom: -6px;
+  width: 4px;
+  margin-left: -2px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.rf-ends {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-5);
+  margin-top: var(--s-5);
+}
+
+.rf-end {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.rf-end-label {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.rf-end-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.rf-end-note {
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  min-width: 3.2ch;
+  text-align: center;
+}
+
+.rf-end.is-empty .rf-end-note {
+  color: var(--text-faint);
+  text-align: left;
+}
+
+/* ---- Pitch Glider ---------------------------------------------------------- */
+
+.glider-hud {
+  display: flex;
+  gap: var(--s-4);
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+}
+
+.glider-hud strong {
+  color: var(--text);
+  font-size: var(--fs-md);
+  margin-left: var(--s-1);
+}
+
+.glider-stage {
+  position: relative;
+  border-radius: var(--r-md);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.glider-canvas {
+  display: block;
+  width: 100%;
+  height: clamp(280px, 52vh, 520px);
+}
+
+.glider-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-3);
+  padding: var(--s-5);
+  text-align: center;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  backdrop-filter: blur(2px);
+}
+
+.glider-overlay h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+}
+
+.glider-overlay p {
+  margin: 0;
+  max-width: 46ch;
+  color: var(--text-dim);
+}
+
+.glider-final strong {
+  color: var(--text);
+  font-size: var(--fs-lg);
+}
+
+.glider-best {
+  color: var(--good) !important;
+  font-weight: 700;
+}
+
+.glider-settings {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s-4);
+  margin-top: var(--s-4);
+}
