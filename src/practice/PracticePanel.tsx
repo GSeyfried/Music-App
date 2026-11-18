@@ -11,6 +11,7 @@ import { Button, ConfirmButton, Segmented, Stepper } from "../components/ui/cont
 import { noteLabel } from "../lib/tuner";
 import { setText, useFrame } from "../lib/useFrame";
 import { LiveOverlay, ReferenceCurve, ResultRoll } from "./canvas";
+import { displayOctaveShift } from "./geometry";
 import { usePractice, usePracticeStore } from "./PracticeContext";
 import {
   centsTone,
@@ -636,6 +637,8 @@ function ReferenceView({ ready }: { ready: boolean }) {
 const TONE_LABEL: Record<Tone, string> = { good: "Strength", info: "Note", work: "Work on" };
 
 function NoteTable({ result, detail }: { result: AttemptRecord; detail: ReferenceDetail }) {
+  // With "Ignore octave", show the expected note in the octave you sang.
+  const octaveShift = displayOctaveShift(result.report);
   const grid = result.report.timing.basis === "grid";
   return (
     <div className="pl-table-wrap">
@@ -659,7 +662,7 @@ function NoteTable({ result, detail }: { result: AttemptRecord; detail: Referenc
             return (
               <tr key={i} data-status={r.status} data-verdict={r.verdict}>
                 <td>{r.referenceIndex !== null ? r.referenceIndex + 1 : "·"}</td>
-                <td>{r.targetMidi !== null ? noteLabel(r.targetMidi) : "—"}</td>
+                <td>{r.targetMidi !== null ? noteLabel(r.targetMidi + octaveShift) : "—"}</td>
                 <td>{r.sungMidi !== null ? noteLabel(r.sungMidi) : "—"}</td>
                 <td data-tone={centsTone(r.pitchErrorCents, uncertain)}>
                   {r.status !== "matched" ? "—" : uncertain ? "unclear" : fmtCents(r.pitchErrorCents ?? 0)}

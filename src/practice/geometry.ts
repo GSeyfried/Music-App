@@ -30,10 +30,25 @@ function median(values: number[]): number | null {
  * a matched note is its sung onset minus its onset error (exactly what the
  * engine measured); missed notes use the median alignment of the matched ones.
  */
+/**
+ * With "Ignore octave" on, the octave (in semitones, a multiple of 12) to move
+ * the reference by so it is drawn where the singer actually sang: the median
+ * whole-octave difference of measured notes. 0 when octave counts.
+ */
+export function displayOctaveShift(report: AttemptReport): number {
+  if (!report.config?.octaveInvariant) return 0;
+  const octaves: number[] = [];
+  for (const r of report.notes) {
+    if (r.sungMidi !== null && r.targetMidi !== null) octaves.push(Math.round((r.sungMidi - r.targetMidi) / 12));
+  }
+  return 12 * Math.round(median(octaves) ?? 0);
+}
+
 export function layoutRoll(report: AttemptReport, reference: Take, sampleRate: number): RollLayout {
   const msPer = 1000 / (sampleRate || 48_000);
   const ratio = report.timing.tempoRatio || 1;
   const shift = report.transpositionSemitones;
+  const octaveShift = displayOctaveShift(report);
   const offsets: number[] = [];
   for (const r of report.notes) {
     if (r.status === "matched" && r.startFrame !== null && r.referenceStartFrame !== null && r.onsetErrorMs !== null) {
@@ -51,7 +66,7 @@ export function layoutRoll(report: AttemptReport, reference: Take, sampleRate: n
             ? row.startFrame * msPer - row.onsetErrorMs
             : origin + ratio * ref.startFrame * msPer;
         const dur = ratio * (ref.endFrame - ref.startFrame) * msPer;
-        expected = { startMs: start, endMs: start + dur, midi: row.targetMidi ?? ref.note + shift };
+        expected = { startMs: start, endMs: start + dur, midi: (row.targetMidi ?? ref.note + shift) + octaveShift };
       }
     }
     const sung =

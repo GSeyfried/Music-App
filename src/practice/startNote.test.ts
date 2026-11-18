@@ -45,3 +45,21 @@ describe("wrong-note wording", () => {
     expect(describeWrongNote(64, 67, true)).toBe("expected E4, sang G (3 semitones sharp)");
   });
 });
+
+import { displayOctaveShift } from "./geometry";
+
+describe("ignore octave display", () => {
+  const report = (octaveInvariant: boolean) =>
+    ({
+      config: { octaveInvariant },
+      notes: [
+        { sungMidi: 60.2, targetMidi: 48 },
+        { sungMidi: 62, targetMidi: 50 },
+        { sungMidi: null, targetMidi: 52 },
+      ],
+    }) as unknown as Parameters<typeof displayOctaveShift>[0];
+  it("moves the reference into the sung octave only when octave is ignored", () => {
+    expect(displayOctaveShift(report(true))).toBe(12);
+    expect(displayOctaveShift(report(false))).toBe(0);
+  });
+});
