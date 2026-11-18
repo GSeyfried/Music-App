@@ -20,7 +20,8 @@
   --text-faint: #646b82;
 
   /* Brand and semantic colour */
-  --accent: #6ee7d2;
+  --accent-base: #6ee7d2;
+  --accent: var(--accent-base);
   --accent-ink: #062b25;
   --record: #ff4d6a;
   --overdub: #ffb547;
@@ -84,6 +85,112 @@
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
+}
+
+/* ---- Light theme (theme.mode) --------------------------------------------
+   "system" follows the OS; data-theme on <html> forces light or dark.
+   The light tokens are repeated for the two selectors (no CSS mixin). */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+  color-scheme: light;
+  --bg: #f5f6fa;
+  --bg-raised: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #eef0f6;
+  --surface-3: #e0e4ee;
+  --border: #d6dbe6;
+  --border-strong: #bcc3d3;
+  --text: #141720;
+  --text-dim: #4f566b;
+  --text-faint: #858ca0;
+  --accent-base: #0c917c;
+  --accent-ink: #ffffff;
+  --record: #e11d48;
+  --overdub: #c96a00;
+  --play: #15803d;
+  --good: #15803d;
+  --caution: #a16207;
+  --bad: #e11d48;
+  --info: #1d6fd8;
+  --sim: #6d3fe0;
+  --midi: #b0209f;
+  --track-1: #e4572e;
+  --track-2: #1f7fd1;
+  --track-3: #13985f;
+  --track-4: #b58900;
+  --track-5: #7457e0;
+  --track-6: #d63f8c;
+  --track-7: #5f8f12;
+  --track-8: #d9741a;
+  --viz-bg: #ffffff;
+  --viz-grid: rgba(0, 0, 0, 0.045);
+  --viz-grid-strong: rgba(0, 0, 0, 0.14);
+  --viz-pitch: #0c917c;
+  --viz-pitch-dim: rgba(12, 145, 124, 0.35);
+  --viz-note: rgba(12, 145, 124, 0.14);
+  --viz-onset: #6d3fe0;
+  --shadow: 0 10px 30px rgba(20, 23, 32, 0.12);
+  --focus: 0 0 0 3px rgba(12, 145, 124, 0.45);
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f6fa;
+  --bg-raised: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #eef0f6;
+  --surface-3: #e0e4ee;
+  --border: #d6dbe6;
+  --border-strong: #bcc3d3;
+  --text: #141720;
+  --text-dim: #4f566b;
+  --text-faint: #858ca0;
+  --accent-base: #0c917c;
+  --accent-ink: #ffffff;
+  --record: #e11d48;
+  --overdub: #c96a00;
+  --play: #15803d;
+  --good: #15803d;
+  --caution: #a16207;
+  --bad: #e11d48;
+  --info: #1d6fd8;
+  --sim: #6d3fe0;
+  --midi: #b0209f;
+  --track-1: #e4572e;
+  --track-2: #1f7fd1;
+  --track-3: #13985f;
+  --track-4: #b58900;
+  --track-5: #7457e0;
+  --track-6: #d63f8c;
+  --track-7: #5f8f12;
+  --track-8: #d9741a;
+  --viz-bg: #ffffff;
+  --viz-grid: rgba(0, 0, 0, 0.045);
+  --viz-grid-strong: rgba(0, 0, 0, 0.14);
+  --viz-pitch: #0c917c;
+  --viz-pitch-dim: rgba(12, 145, 124, 0.35);
+  --viz-note: rgba(12, 145, 124, 0.14);
+  --viz-onset: #6d3fe0;
+  --shadow: 0 10px 30px rgba(20, 23, 32, 0.12);
+  --focus: 0 0 0 3px rgba(12, 145, 124, 0.45);
+}
+
+/* ---- Pitch-reactive tint (theme.pitchReactive) -----------------------------
+   Accents and the page background lean toward the sung note's color; text
+   tokens are never touched, so contrast is preserved. */
+:root[data-pitch-reactive] {
+  --accent: color-mix(
+    in oklab,
+    var(--accent-base) calc(100% - var(--pitch-tint-strength, 0%)),
+    var(--pitch-tint, var(--accent-base))
+  );
+}
+:root[data-pitch-reactive] body {
+  background: color-mix(
+    in oklab,
+    var(--bg) calc(100% - var(--pitch-tint-strength, 0%) / 4),
+    var(--pitch-tint, var(--bg))
+  );
 }
 
 /* ---- Base --------------------------------------------------------------- */

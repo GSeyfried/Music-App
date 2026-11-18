@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getAppSetting, resetAppSettings, setAppSetting } from "./appSettings";
-import { noteColor, noteQuality, pitchClass } from "./noteColors";
+import { DEFAULT_NOTE_COLORS, noteColor, noteQuality, pitchClass } from "./noteColors";
 import { APP_DEFAULTS, SETTINGS } from "./registry";
 import index from "../../docs/projects/settings/SETTINGS_INDEX.md?raw";
 
@@ -29,7 +29,9 @@ describe("note colors", () => {
     expect(pitchClass(69.4)).toBe(9);
     expect(noteQuality(0, 0)).toBe(1);
     expect(noteQuality(50, 0)).toBe(0);
-    expect(noteColor(["red"], 0, 1)).toContain("red 100%");
-    expect(noteColor(["red"], 0, 0, "opacity")).toContain("transparent");
+    expect(noteColor(["#ff0000"], 0, 1)).toBe("rgb(255, 0, 0)");
+    expect(noteColor(["#ff0000"], 0, 0, "opacity")).toBe("rgba(255, 0, 0, 0.35)");
+    expect(DEFAULT_NOTE_COLORS).toHaveLength(12);
+    expect(DEFAULT_NOTE_COLORS.every((c) => /^#[0-9a-f]{6}$/.test(c))).toBe(true);
   });
 });

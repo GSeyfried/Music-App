@@ -6,8 +6,10 @@
 import { useEffect, useRef } from "react";
 import { useEngineState, useLive } from "../engine/EngineContext";
 import type { LiveData } from "../engine/store";
-import { readCanvasTheme, type CanvasTheme } from "../lib/theme";
-import { accuracy, noteLabel } from "../lib/tuner";
+import { readCanvasTheme, themeVersion, type CanvasTheme } from "../lib/theme";
+import { noteLabel } from "../lib/tuner";
+import { getAppSetting } from "../settings/appSettings";
+import { noteColor, noteQuality } from "../settings/noteColors";
 import { fitCanvas, useFrame } from "../lib/useFrame";
 
 const GUTTER = 40;
@@ -74,8 +76,13 @@ function draw(
     const x1 = Math.max(GUTTER, xOf(note.startFrame));
     const x2 = xOf(note.endFrame);
     if (x2 <= GUTTER) continue;
-    const acc = accuracy(note.cents);
-    ctx.fillStyle = acc === "inTune" ? theme.inTune : acc === "close" ? theme.close : theme.off;
+    // Note color by name, shaded by accuracy/stability (notes.colorMap, notes.accuracyEncoding).
+    ctx.fillStyle = noteColor(
+      getAppSetting("notes.colorMap"),
+      note.note,
+      noteQuality(note.cents, note.stabilityCents),
+      getAppSetting("notes.accuracyEncoding"),
+    );
     ctx.globalAlpha = 0.22;
     const y = yOf(note.note + 0.5);
     ctx.fillRect(x1, y, x2 - x1, laneH);
@@ -157,6 +164,7 @@ export function PitchCurve({ windowSeconds = 6, span = 16, height = 220 }: { win
   const analysis = useEngineState((s) => s.status.analysis);
   const canvas = useRef<HTMLCanvasElement>(null);
   const theme = useRef<CanvasTheme | null>(null);
+  const themeSeen = useRef(-1);
   const view = useRef<View>({ center: 62, span });
 
   useEffect(() => {
@@ -168,7 +176,10 @@ export function PitchCurve({ windowSeconds = 6, span = 16, height = 220 }: { win
     if (!c) return;
     const ctx = c.getContext("2d");
     if (!ctx) return;
-    theme.current ??= readCanvasTheme(c);
+    if (theme.current === null || themeSeen.current !== themeVersion()) {
+      theme.current = readCanvasTheme(c);
+      themeSeen.current = themeVersion();
+    }
     const { width, height: h, dpr } = fitCanvas(c);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     updateView(view.current, live, 62);

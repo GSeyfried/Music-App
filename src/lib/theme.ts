@@ -50,3 +50,12 @@ export function readCanvasTheme(el: Element): CanvasTheme {
     onset: v("--viz-onset", FALLBACK.onset),
   };
 }
+
+// ---- Theme changes ----------------------------------------------------------
+// Bumped whenever the effective theme may have changed (theme.mode setting or
+// the system light/dark switch), so canvases re-read their tokens.
+let version = 0;
+export const themeVersion = () => version;
+export function bumpThemeVersion() {
+  version++;
+}

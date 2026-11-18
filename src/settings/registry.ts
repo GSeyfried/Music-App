@@ -10,6 +10,7 @@
 // scoring) are still listed in SETTINGS_INDEX.md and join here as they move.
 
 import type { TransportState } from "../models/domain";
+import { DEFAULT_NOTE_COLORS } from "./noteColors";
 
 /** day-to-day controls are shown in place; the rest live in the advanced pop-up or Preferences. */
 export type SettingTier = "daily" | "advanced" | "preferences" | "internal";
@@ -38,11 +39,6 @@ export interface AppSettings {
 
 export type AppSettingId = keyof AppSettings;
 
-/** Hue-wheel palette in chromatic order (C = red). PENDING: user-tuned default. */
-export const DEFAULT_NOTE_COLORS: string[] = Array.from(
-  { length: 12 },
-  (_, i) => `hsl(${Math.round((i * 360) / 12)} 75% 55%)`,
-);
 
 export const APP_DEFAULTS: AppSettings = {
   "practice.difficulty": "medium",

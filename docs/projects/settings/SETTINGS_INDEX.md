@@ -68,12 +68,12 @@ Scopes: app / project / track / session.
 
 | ID | Label | Description | Default | Scope | Connected element | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| `theme.mode` | Theme | Light, dark, or follow the system. | System | app | Whole app | proposed |
-| `theme.pitchReactive` | Pitch-reactive colors | Tint the app's accent colors with the note you're singing. | off | app | App accents/background | proposed |
-| `theme.pitchReactiveStrength` | Reactive color strength | How strongly pitch-reactive colors tint the app. | PENDING | app | App accents | proposed |
-| `notes.colorMap` | Note colors | The color for each of the 12 note names. | PENDING: default palette | app | Pitch curve, piano roll, staff, loop rings, tuner | proposed |
-| `notes.accuracyEncoding` | Accuracy shading | How accuracy and stability show on note colors: brightness, saturation or opacity. | PENDING | app | Same as note colors | proposed |
+| `theme.mode` | Theme | Light, dark, or follow the system. | System | app | Whole app | exists |
+| `theme.pitchReactive` | Pitch-reactive colors | Tint the app's accent colors with the note you're singing. | off | app | App accents/background | exists |
+| `theme.pitchReactiveStrength` | Reactive color strength | How strongly pitch-reactive colors tint the app. | 0.35 | app | App accents | exists |
+| `notes.colorMap` | Note colors | The color for each of the 12 note names. | Hue wheel, C = red (PENDING: tuned palette) | app | Pitch curve, piano roll, staff, loop rings, tuner | exists |
+| `notes.accuracyEncoding` | Accuracy shading | How accuracy and stability show on note colors: brightness, saturation or opacity. | Saturation | app | Same as note colors | exists |
 | `view.loopRingLayers` | Layer rings | Show each loop layer's loudness as its own ring around the track circle. | on | app | Track card ring | proposed |
-| `view.loopRingTicks` | Beat and bar ticks | Show beat and bar marks around the loop circle. | on | app | Track card ring | proposed |
-| `view.playheadEmphasis` | Playhead highlight | Brighten and enlarge the part of the loop being played. | on | app | Track card ring | proposed |
+| `view.loopRingTicks` | Beat and bar ticks | Show beat and bar marks around the loop circle. | on | app | Track card ring | exists |
+| `view.playheadEmphasis` | Playhead highlight | Brighten and enlarge the part of the loop being played. | on | app | Track card ring | exists |
 | `view.timingReadout` | Timing readout | After each take, show how far your hits landed from the beat. | on | app | Track card | proposed |
