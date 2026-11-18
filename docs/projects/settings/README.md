@@ -20,6 +20,24 @@ band. Visuals can be shown or hidden through a **View** menu/tab (on/off per
 visual) and configured on a settings page. The index's "Connected element"
 column records this link.
 
+## Where settings live (direction, 2026-11-17)
+
+Settings are split into three tiers by how often they are used:
+
+1. **Day-to-day, visible right away:** controls a performer changes during a
+   session (record, tempo, click, monitoring and similar).
+2. **Advanced quick pop-up:** extra options one click away, without leaving the
+   workspace.
+3. **Preferences (macOS menu bar › VoiceLoop › Settings…):** app-wide and
+   system-default options, mostly set once.
+   - Example: `transport.overdubStart` belongs here or in the advanced pop-up,
+     not in the transport bar where it sits today.
+
+Most Preferences values act as **defaults**. PENDING: whether tracks (or
+projects) can override some of them with their own options, for example a
+per-track overdub start or monitoring. Add a "Tier" column to the index once
+the tiers are settled.
+
 ## Proposed structure
 
 - One central registry: each setting is a typed entry with `id`, `label`,
