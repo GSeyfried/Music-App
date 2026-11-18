@@ -2,7 +2,10 @@
 // result (scores, piano roll, note table, feedback). Every action has a
 // visible touch control (docs/projects/ios/TOUCH_UI.md); Stop acts on press.
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { takeToStaff } from "../notation/fromTake";
+import { Staff } from "../notation/Staff";
+import { SettingControl } from "../settings/SettingControl";
 import { useEngineActions, useEngineState } from "../engine/EngineContext";
 import { Button, ConfirmButton, Segmented, Stepper } from "../components/ui/controls";
 import { noteLabel } from "../lib/tuner";
@@ -22,7 +25,7 @@ import {
   verdictLabel,
   type Tone,
 } from "./text";
-import type { AttemptRecord, AttemptSummary, CaptureOptions, ReferenceDetail, ReferenceSummary, ScaleKind, Scores, Trend } from "./types";
+import type { AttemptRecord, AttemptSummary, CaptureOptions, ReferenceDetail, ReferenceSummary, ScaleKind, Scores, Take, TakeGrid, Trend } from "./types";
 import { AdvancedOptions } from "../settings/AdvancedOptions";
 import { useAppSetting } from "../settings/appSettings";
 import { settingById, type Difficulty } from "../settings/registry";
@@ -567,6 +570,23 @@ function NoteTable({ result, detail }: { result: AttemptRecord; detail: Referenc
   );
 }
 
+/** Piano roll / staff / both (setting notation.view), shown above the result. */
+function NotationViewPicker() {
+  const def = settingById("notation.view");
+  return def ? <SettingControl def={def} /> : null;
+}
+
+function TakeStaff({ take, grid, label }: { take: Take; grid: TakeGrid | null; label: string }) {
+  const subdivision = useAppSetting("notation.gridSubdivision");
+  const staff = useMemo(() => takeToStaff(take, subdivision, grid), [take, subdivision, grid]);
+  return (
+    <div className="pl-staff">
+      <h3 className="pl-staff-label">{label}</h3>
+      <Staff notes={staff.notes} options={staff.options} label={`${label} in notation`} />
+    </div>
+  );
+}
+
 function ResultView({ ready }: { ready: boolean }) {
   const store = usePracticeStore();
   const result = usePractice((s) => s.result);
@@ -574,6 +594,7 @@ function ResultView({ ready }: { ready: boolean }) {
   const trend = usePractice((s) => s.resultTrend);
   const busy = usePractice((s) => s.busy);
   const phase = usePractice((s) => s.status?.phase ?? "idle");
+  const notationView = useAppSetting("notation.view");
   if (!result || !detail) return null;
   const rep = result.report;
   const name = namerFor(detail.take.notes);
@@ -622,7 +643,14 @@ function ResultView({ ready }: { ready: boolean }) {
 
       <section className="card" aria-label="Note by note">
         <h2 className="card-title">Note by note</h2>
-        <ResultRoll report={rep} reference={detail.take} />
+        <NotationViewPicker />
+        {notationView !== "staff" && <ResultRoll report={rep} reference={detail.take} />}
+        {notationView !== "pianoRoll" && (
+          <div className="pl-staves">
+            {result.take && <TakeStaff take={result.take} grid={detail.take.grid} label="Your take" />}
+            <TakeStaff take={detail.take} grid={detail.take.grid} label="Reference" />
+          </div>
+        )}
         <p className="legend">
           <span className="lg lg-target">Reference note</span>
           <span className="lg lg-good">Within 10¢</span>

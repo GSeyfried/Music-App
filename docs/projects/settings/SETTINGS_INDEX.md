@@ -67,7 +67,7 @@ Scopes: app / project / track / session.
 | `practice.scale.noteBeats` | Scale note length | How long each scale note lasts, in beats (1 = quarter notes). | 1 beat | app | Scale exercise card › Scale options | exists |
 | `practice.scale.defaultBpm` | Scale tempo without looper | Tempo for scale exercises when there is no looper tempo to use (audio output off). Otherwise the looper tempo is used. | 80 BPM | app | Scale exercise card › Scale options | exists |
 | `practice.scale.noteGate` | Scale note gate | How much of each note's beat the exercise holds the note; the rest is a short breath. Internal (not shown). | 0.9 | app | (none; affects the "notes short/long" feedback) | exists |
-| `notation.view` | Note display | Show takes as a piano roll, a staff, or both. | Piano roll | app | Practice result view | proposed |
+| `notation.view` | Note display | Show takes as a piano roll, a staff, or both. | Piano roll | app | Practice result view | exists |
 
 ## Visuals and theme (proposed; see [visualization](../visualization/README.md))
 

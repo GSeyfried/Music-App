@@ -445,3 +445,22 @@
 .pl-scale .pl-input {
   max-width: 20rem;
 }
+
+/* Staff notation (notation.view) */
+.pl-staves {
+  display: grid;
+  gap: var(--s-3);
+}
+.pl-staff-label {
+  margin: 0 0 var(--s-1);
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+}
+.staff {
+  margin: 0;
+  overflow-x: auto;
+  color: var(--text);
+  background: var(--viz-bg);
+  border-radius: var(--r-sm);
+  padding: var(--s-2);
+}
