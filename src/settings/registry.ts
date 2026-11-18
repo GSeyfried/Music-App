@@ -39,6 +39,8 @@ export interface AppSettings {
   "view.playheadEmphasis": boolean;
   "view.timingReadout": boolean;
   "view.livePitchPanel": boolean;
+  /** Hidden dashboard widgets, as "<workspace>:<widget id>". */
+  "widgets.hidden": string[];
   "theme.mode": ThemeMode;
   "theme.pitchReactive": boolean;
   "theme.pitchReactiveStrength": number;
@@ -66,6 +68,7 @@ export const APP_DEFAULTS: AppSettings = {
   "view.playheadEmphasis": true,
   "view.timingReadout": true,
   "view.livePitchPanel": false,
+  "widgets.hidden": [],
   "theme.mode": "system",
   "theme.pitchReactive": false,
   "theme.pitchReactiveStrength": 0.35,

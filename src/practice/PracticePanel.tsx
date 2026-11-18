@@ -27,6 +27,7 @@ import {
 } from "./text";
 import type { AttemptRecord, AttemptSummary, CaptureOptions, ReferenceDetail, ReferenceSummary, ScaleKind, Scores, Take, TakeGrid, Trend } from "./types";
 import { AdvancedOptions } from "../settings/AdvancedOptions";
+import { Widget } from "../components/ui/Widgets";
 import { useAppSetting } from "../settings/appSettings";
 import { settingById, type Difficulty } from "../settings/registry";
 import { SCALE_KINDS, SCALE_LABELS, TONIC_NAMES, scaleDefaults, scaleName, scaleNotes, scaleReference } from "./scales";
@@ -251,7 +252,7 @@ function RecordReferenceCard({ ready }: { ready: boolean }) {
   const [mode, setMode] = useState<Mode>("free");
   const [bars, setBars] = useState(2);
   return (
-    <section className="card" aria-label="Record a reference">
+    <Widget id="record-reference" label="Record a reference">
       <h2 className="card-title">Record a reference</h2>
       <p className="hint">Sing or play the phrase you want to learn. You'll then sing it back and see what to work on.</p>
       <label className="pl-field">
@@ -273,7 +274,7 @@ function RecordReferenceCard({ ready }: { ready: boolean }) {
         Record reference
       </Button>
       {mode === "free" && <p className="hint pl-small">Press Stop when you've finished the phrase.</p>}
-    </section>
+    </Widget>
   );
 }
 
@@ -305,7 +306,7 @@ function ScaleExerciseCard() {
     );
   };
   return (
-    <section className="card pl-scale" aria-label="Scale exercise">
+    <Widget id="scale-exercise" label="Scale exercise" className="pl-scale">
       <div className="pl-head">
         <h2 className="card-title">Scale exercise</h2>
         <span className="spacer" />
@@ -332,7 +333,7 @@ function ScaleExerciseCard() {
       <Button variant="solid" icon="plus" disabled={busy || phase !== "idle"} onPress={add}>
         Add {scaleName(tonic, kind)}
       </Button>
-    </section>
+    </Widget>
   );
 }
 
@@ -343,7 +344,7 @@ function Library({ ready }: { ready: boolean }) {
     <>
       <RecordReferenceCard ready={ready} />
       <ScaleExerciseCard />
-      <section className="card" aria-label="References">
+      <Widget id="references" label="References">
         <h2 className="card-title">Your references</h2>
         {refs.length === 0 ? (
           <p className="hint">No references yet. Record one above.</p>
@@ -367,7 +368,7 @@ function Library({ ready }: { ready: boolean }) {
             ))}
           </ul>
         )}
-      </section>
+      </Widget>
     </>
   );
 }
@@ -427,7 +428,7 @@ function History({ detail }: { detail: ReferenceDetail }) {
   const store = usePracticeStore();
   const attempts = detail.attempts;
   return (
-    <section className="card" aria-label="Attempt history">
+    <Widget id="history" label="Attempt history">
       <h2 className="card-title">History</h2>
       <TrendLine trend={detail.summary.trend} />
       <Sparkline attempts={attempts} />
@@ -454,7 +455,7 @@ function History({ detail }: { detail: ReferenceDetail }) {
           ))}
         </ul>
       )}
-    </section>
+    </Widget>
   );
 }
 
@@ -477,7 +478,7 @@ function ReferenceView({ ready }: { ready: boolean }) {
   const key = keyText(s);
   return (
     <>
-      <section className="card" aria-label={`Reference ${s.name}`}>
+      <Widget id="reference" label={`Reference ${s.name}`}>
         <div className="pl-head">
           <Button variant="ghost" size="sm" onPress={() => store.showLibrary()}>
             ‹ All references
@@ -493,9 +494,9 @@ function ReferenceView({ ready }: { ready: boolean }) {
           {s.take.uncertainNotes > 0 ? ` · ${s.take.uncertainNotes} unclear note${s.take.uncertainNotes > 1 ? "s" : ""}` : ""}
         </p>
         {phase === "idle" && <ReferenceCurve take={detail.take} label={`Pitch of ${s.name}: ${detail.take.notes.map((n) => noteLabel(n.note)).join(" ")}`} />}
-      </section>
+      </Widget>
       {phase === "idle" && (
-        <section className="card" aria-label="Attempt">
+        <Widget id="attempt" label="Attempt">
           <h2 className="card-title">Your turn</h2>
           <CaptureControls mode={effectiveMode} setMode={setMode} bars={bars} setBars={setBars} />
           <ToleranceToggles value={scoring} onChange={(patch) => void store.setScoring(patch)} />
@@ -516,7 +517,7 @@ function ReferenceView({ ready }: { ready: boolean }) {
                 : "Starts on the next bar; press Stop when done."
               : "Starts now; press Stop when you've finished."}
           </p>
-        </section>
+        </Widget>
       )}
       <History detail={detail} />
     </>
@@ -604,7 +605,7 @@ function ResultView({ ready }: { ready: boolean }) {
   const c = rep.counts;
   return (
     <>
-      <section className="card" aria-label={`Result of attempt ${result.number}`}>
+      <Widget id="result" label={`Result of attempt ${result.number}`}>
         <div className="pl-head">
           <Button variant="ghost" size="sm" onPress={() => store.showReference()}>
             ‹ {detail.summary.name}
@@ -624,9 +625,9 @@ function ResultView({ ready }: { ready: boolean }) {
           {rep.timing.medianAbsOnsetErrorMs !== null ? ` Typical timing error ${Math.round(rep.timing.medianAbsOnsetErrorMs)} ms.` : ""}
         </p>
         {trend && <TrendLine trend={trend} />}
-      </section>
+      </Widget>
 
-      <section className="card" aria-label="Feedback">
+      <Widget id="feedback" label="Feedback">
         <h2 className="card-title">What to work on</h2>
         {work.length === 0 ? <p className="hint">Nothing stood out. Try it faster, or with the click.</p> : null}
         <ul className="pl-feedback">
@@ -639,9 +640,9 @@ function ResultView({ ready }: { ready: boolean }) {
         </ul>
         <ToleranceToggles value={rep.config} disabled={busy || !result.take} onChange={(patch) => void store.rescore(patch)} />
         {!result.take && <p className="hint pl-small">This attempt is too old to re-score with different options.</p>}
-      </section>
+      </Widget>
 
-      <section className="card" aria-label="Note by note">
+      <Widget id="note-by-note" label="Note by note" wide>
         <h2 className="card-title">Note by note</h2>
         <NotationViewPicker />
         {notationView !== "staff" && <ResultRoll report={rep} reference={detail.take} />}
@@ -664,7 +665,7 @@ function ResultView({ ready }: { ready: boolean }) {
             <li key={`${l.code}-${i}`}>{phraseLimitation(l)}</li>
           ))}
         </ul>
-      </section>
+      </Widget>
     </>
   );
 }

@@ -9,20 +9,25 @@ import { Tuner } from "../components/Tuner";
 import { PracticeProvider } from "../practice/PracticeContext";
 import { PracticePanel } from "../practice/PracticePanel";
 import "../practice/practice.css";
+import { ViewMenu, Widget, WidgetsProvider } from "../components/ui/Widgets";
 
 export function PracticeLab() {
   const capturing = useEngineState((s) => s.status.capturing);
   return (
     <PracticeProvider>
-      <div className="practice">
+      <WidgetsProvider scope="practice">
+      <div className="practice dashboard">
+        <div className="dashboard-bar">
+          <ViewMenu />
+        </div>
         {!capturing && <StartCard purpose="Choose a microphone to record references and attempts." />}
         <PracticePanel />
         {capturing && (
           <>
-            <section className="card practice-tuner" aria-label="Tuner">
+            <Widget id="tuner" label="Tuner" className="practice-tuner">
               <Tuner size="large" />
-            </section>
-            <section className="card practice-curve" aria-label="Pitch curve">
+            </Widget>
+            <Widget id="pitch-curve" label="Live pitch" className="practice-curve" wide>
               <h2 className="card-title">Live pitch</h2>
               <PitchCurve windowSeconds={8} span={18} height={220} />
               <p className="legend">
@@ -32,10 +37,11 @@ export function PracticeLab() {
                 <span className="lg lg-off">Further off</span>
                 <span className="lg lg-onset">Attack</span>
               </p>
-            </section>
+            </Widget>
           </>
         )}
       </div>
+      </WidgetsProvider>
     </PracticeProvider>
   );
 }

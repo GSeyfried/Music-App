@@ -2313,3 +2313,56 @@ input[type="range"] {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ---- Widgets: enlarge / hide / View menu (src/components/ui/Widgets.tsx) ---- */
+.widget {
+  position: relative;
+  min-width: 0;
+}
+.widget[data-expanded] {
+  position: fixed;
+  z-index: 70;
+  inset: calc(max(4vh, 24px) + var(--safe-top)) max(4vw, 16px) max(4vh, 24px);
+  overflow: auto;
+  box-shadow: var(--shadow);
+}
+.widget-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 65;
+  background: rgba(4, 5, 9, 0.55);
+  backdrop-filter: blur(2px);
+}
+.widget-close {
+  position: absolute;
+  top: var(--s-2);
+  right: var(--s-2);
+  z-index: 1;
+}
+.view-menu {
+  position: relative;
+}
+.view-menu-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 40;
+  width: min(18rem, 90vw);
+  display: grid;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow);
+}
+.view-menu-all {
+  display: flex;
+  gap: var(--s-2);
+}
+.view-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 32px;
+}
