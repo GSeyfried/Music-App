@@ -22,7 +22,7 @@ use serde::Serialize;
 
 use voiceloop_analysis::{NoteEvent, Onset, PitchFrame};
 
-use crate::analysis::{AnalysisConfig, AnalysisOutput, AnalysisWorker};
+use crate::analysis::{AnalysisConfig, AnalysisOutput, AnalysisWorker, ChordEvent};
 use crate::capture::{CaptureInfo, InputCapture};
 use crate::devices;
 use crate::error::EngineError;
@@ -113,6 +113,8 @@ pub enum EngineEvent {
     Note(NoteEvent),
     /// An attack was detected in the input.
     Onset(Onset),
+    /// The live chord changed (or a ≤ 4 Hz refresh of it; see `analysis::ChordStream`).
+    Chord(ChordEvent),
     /// The set of audio devices changed (hot-plug).
     DevicesChanged(DevicesChanged),
     /// The MIDI input port list changed.
@@ -894,6 +896,7 @@ impl ControlLoop {
                 }
                 AnalysisOutput::Note(note) => (self.sink)(EngineEvent::Note(note)),
                 AnalysisOutput::Onset(onset) => (self.sink)(EngineEvent::Onset(onset)),
+                AnalysisOutput::Chord(chord) => (self.sink)(EngineEvent::Chord(chord)),
                 AnalysisOutput::Gap { .. } => {}
             }
         }

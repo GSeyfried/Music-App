@@ -18,6 +18,7 @@ import {
   type AudioDiagnostics,
   type AudioSettings,
   type CalibrationOutcome,
+  type ChordEvent,
   type DeviceList,
   type EngineError,
   type EngineEvent,
@@ -177,6 +178,11 @@ export interface EngineSnapshot {
   /** Practice Lab (src/practice): latest status and recent take events, newest last. */
   practiceStatus: PracticeStatus | null;
   practiceTakes: PracticeTakeEvent[];
+  /**
+   * Latest live chord (`chord` event; on change, refreshed at most ~4 Hz, so
+   * it is fine as snapshot state). null until one arrives or while analysis is off.
+   */
+  chord: ChordEvent | null;
 }
 
 export interface LiveData {
@@ -205,6 +211,10 @@ export interface LiveData {
   midiPortAt: Record<string, number>;
   /** Practice Lab: latest progress (high rate while capturing). */
   practiceProgress: PracticeProgress | null;
+  /** Same as snapshot.chord, for frame-callback readers. */
+  chord: ChordEvent | null;
+  /** performance.now() when `chord` arrived. */
+  chordAt: number;
 }
 
 function looperView(s: LooperState): LooperView {
@@ -246,6 +256,8 @@ export class EngineStore {
     midiDropped: 0,
     midiPortAt: {},
     practiceProgress: null,
+    chord: null,
+    chordAt: 0,
   };
 
   constructor(transportKind: TransportKind = "native") {
@@ -269,6 +281,7 @@ export class EngineStore {
       calibration: { running: false, outcome: null },
       practiceStatus: null,
       practiceTakes: [],
+      chord: null,
       infoToasts: [],
       micPermission: null,
       sessionInfo: null,
@@ -328,6 +341,11 @@ export class EngineStore {
         return;
       case "onset":
         live.onsets.push(event.payload);
+        return;
+      case "chord":
+        live.chord = event.payload;
+        live.chordAt = now;
+        this.set({ chord: event.payload });
         return;
       case "looper": {
         live.looper = event.payload;
@@ -430,7 +448,11 @@ export class EngineStore {
       patch.warnings = [];
       patch.analysisBehind = false;
     }
-    if (!status.analysis) live.lastPitch = null;
+    if (!status.analysis) {
+      live.lastPitch = null;
+      live.chord = null;
+      patch.chord = null;
+    }
     if (!status.looper) {
       live.looper = null;
       this.looperKey = "";

@@ -58,7 +58,7 @@ and low noise → silent; 3- and 4-note chords → correct notes.
   percussion are expected to be unreliable.
 - Allocates when the block length changes: analysis thread only.
 
-### Suggested wiring (later step)
+### Live wiring
 
 - Engine: run a `ChordAnalyzer` on the existing analysis thread over a
   sliding block (e.g. 8192 samples, hop ~2048 ≈ 20 frames/s at 44.1/48 kHz),
@@ -76,6 +76,10 @@ and low noise → silent; 3- and 4-note chords → correct notes.
     notes?: { midi: number; pitchClass: number; cents: number }[];
   };
   ```
+
+The live event is now bridged as an `engine://event` summary and shown by the
+shared `ChordReadout` in Studio's live-pitch panel and Practice Lab. Raw audio
+never crosses the Tauri bridge.
 
 - Offline: the same analyzer over a take or loop layer, producing a chord
   timeline (`[{startFrame, endFrame, chord}]`) for display and MIDI export.

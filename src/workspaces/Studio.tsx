@@ -7,6 +7,7 @@ import { PitchCurve } from "../components/PitchCurve";
 import { TrackGrid } from "../components/TrackCard";
 import { TransportBar } from "../components/TransportBar";
 import { Tuner } from "../components/Tuner";
+import { ChordReadout } from "../components/ChordReadout";
 import { Button } from "../components/ui/controls";
 import { setAppSetting, useAppSetting } from "../settings/appSettings";
 
@@ -40,6 +41,7 @@ export function Studio() {
           <aside className="studio-side card" aria-label="Live pitch">
             <h2 className="card-title">Live pitch</h2>
             <Tuner size="compact" />
+            <ChordReadout />
             <PitchCurve windowSeconds={5} span={14} height={180} />
           </aside>
         )}

@@ -525,6 +525,84 @@ export interface Onset {
   riseDb: number;
 }
 
+/** Mirrors voiceloop-analysis `theory::ChordQuality`. */
+export type ChordQuality =
+  | "major"
+  | "minor"
+  | "diminished"
+  | "augmented"
+  | "sus2"
+  | "sus4"
+  | "major7"
+  | "minor7"
+  | "dominant7"
+  | "halfDiminished7"
+  | "diminished7";
+
+export interface ChordLabel {
+  /** Root pitch class, 0 = C. */
+  root: number;
+  quality: ChordQuality;
+  /** Lowest sounding pitch class (differs from `root` for inversions). */
+  bass: number;
+  /** e.g. "Am", "G7", "C/E" (ASCII sharps: "F#m"). */
+  name: string;
+}
+
+/** A sounding note in a chord event. */
+export interface ChordNote {
+  midi: number;
+  pitchClass: number;
+  cents: number;
+}
+
+/**
+ * analysis.rs `ChordEvent`: the smoothed live chord. Sent when it changes, and
+ * at most ~4 Hz while it holds (only if the confidence or notes moved).
+ */
+export interface ChordEvent {
+  /** Input-clock frame just after the analysed block. */
+  frame: number;
+  /** null: silence, a single note, or an unknown shape. */
+  chord: ChordLabel | null;
+  /** 0..1; 0 when `chord` is null. */
+  confidence: number;
+  /** Runner-up chords in rank order (≤ 3). */
+  alternatives: { name: string; confidence: number }[];
+  /** Sounding notes, low to high (≤ 4). */
+  notes: ChordNote[];
+}
+
+/** analysis.rs `ChordStreamConfig` (block/hop in samples). */
+export interface ChordStreamConfig {
+  enabled?: boolean;
+  blockSize?: number;
+  hop?: number;
+  refreshSeconds?: number;
+  refreshMinChange?: number;
+  /** voiceloop-analysis `ChordConfig` (settings `analysis.chord.*`). */
+  detector?: {
+    tuningA4Hz?: number;
+    minHz?: number;
+    maxHz?: number;
+    minFftSize?: number;
+    peakFloorDb?: number;
+    significantLevel?: number;
+    harmonicWeight?: number;
+    maxHarmonic?: number;
+    harmonicToleranceCents?: number;
+    minRmsDb?: number;
+    minConfidence?: number;
+    bassRootBonus?: number;
+    alternatives?: number;
+    holdFrames?: number;
+    maxNotes?: number;
+    noteMinSalience?: number;
+    noteHarmonics?: number;
+    noteHarmonicDecay?: number;
+  };
+}
+
 /** Every field is optional; the engine fills in defaults (see INTERFACE.md). */
 export interface AnalysisConfig {
   enabled?: boolean;
@@ -552,6 +630,7 @@ export interface AnalysisConfig {
     lookbackSeconds?: number;
     minIntervalSeconds?: number;
   };
+  chords?: ChordStreamConfig;
 }
 
 // ---- Events ---------------------------------------------------------------------
@@ -567,6 +646,7 @@ export type EngineEvent =
   | { type: "pitch"; payload: PitchUpdate }
   | { type: "note"; payload: NoteEvent }
   | { type: "onset"; payload: Onset }
+  | { type: "chord"; payload: ChordEvent }
   | { type: "devicesChanged"; payload: DevicesChanged }
   | { type: "midiPorts"; payload: MidiPortInfo[] }
   | { type: "midi"; payload: MidiBatch }
@@ -591,6 +671,7 @@ export const EVENT_TYPES: readonly EngineEventType[] = [
   "pitch",
   "note",
   "onset",
+  "chord",
   "devicesChanged",
   "midiPorts",
   "midi",

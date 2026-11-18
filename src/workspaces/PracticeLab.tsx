@@ -6,6 +6,7 @@ import { useEngineState } from "../engine/EngineContext";
 import { StartCard } from "../components/InputControls";
 import { PitchCurve } from "../components/PitchCurve";
 import { Tuner } from "../components/Tuner";
+import { ChordReadout } from "../components/ChordReadout";
 import { PracticeProvider } from "../practice/PracticeContext";
 import { PracticePanel } from "../practice/PracticePanel";
 import "../practice/practice.css";
@@ -26,6 +27,9 @@ export function PracticeLab() {
           <>
             <Widget id="tuner" label="Tuner" className="practice-tuner">
               <Tuner size="large" />
+            </Widget>
+            <Widget id="chord" label="Live chord">
+              <ChordReadout />
             </Widget>
             <Widget id="pitch-curve" label="Live pitch" className="practice-curve" wide>
               <h2 className="card-title">Live pitch</h2>

@@ -724,6 +724,23 @@ input[type="range"] {
   margin-bottom: var(--s-3);
 }
 
+.chord-readout {
+  margin: var(--s-3) 0;
+}
+
+.chord-readout-name {
+  font-family: var(--font-display);
+  font-size: var(--fs-xxl);
+  line-height: 1.1;
+  min-height: 1.2em;
+}
+
+.chord-readout-meta {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  margin-top: var(--s-1);
+}
+
 .alerts {
   display: flex;
   flex-direction: column;

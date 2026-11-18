@@ -2,7 +2,8 @@
 //!
 //! ```text
 //!  input callback ──rtrb<f32> mono──▶ analysis thread ──mpsc──▶ control thread ──▶ EventSink
-//!                                      └ Analyzer: PitchTracker → NoteSegmenter, OnsetDetector
+//!                                      └ Analyzer: PitchTracker → NoteSegmenter, OnsetDetector,
+//!                                                  ChordStream (ChordAnalyzer → ChordSmoother)
 //! ```
 //!
 //! The DSP lives in `voiceloop-analysis`. This module only moves audio to it
@@ -22,8 +23,10 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use voiceloop_analysis::theory::{Chord, ChordQuality};
 use voiceloop_analysis::{
-    NoteConfig, NoteEvent, NoteSegmenter, Onset, OnsetConfig, OnsetDetector, PitchFrame, PitchTracker, TrackerConfig,
+    ChordAnalyzer, ChordConfig, ChordSmoother, NoteConfig, NoteEvent, NoteSegmenter, Onset, OnsetConfig,
+    OnsetDetector, PitchFrame, PitchTracker, TrackerConfig,
 };
 
 use crate::error::EngineError;
@@ -44,6 +47,7 @@ pub struct AnalysisConfig {
     pub tracker: TrackerConfig,
     pub notes: NoteConfig,
     pub onsets: OnsetConfig,
+    pub chords: ChordStreamConfig,
 }
 
 impl Default for AnalysisConfig {
@@ -53,16 +57,118 @@ impl Default for AnalysisConfig {
             tracker: TrackerConfig::default(),
             notes: NoteConfig::default(),
             onsets: OnsetConfig::default(),
+            chords: ChordStreamConfig::default(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Live chord recognition over a sliding block of the input (settings
+/// `analysis.chords.*`; the detector's thresholds are `analysis.chord.*`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChordStreamConfig {
+    pub enabled: bool,
+    /// Samples analysed per block (longer resolves lower notes, reacts slower).
+    pub block_size: usize,
+    /// Samples between the starts of consecutive blocks.
+    pub hop: usize,
+    /// While the chord is unchanged, an update is sent at most this often
+    /// (seconds), and only when the confidence or the sounding notes moved.
+    pub refresh_seconds: f32,
+    /// Confidence change that justifies an update of an unchanged chord.
+    pub refresh_min_change: f32,
+    /// Chord detector thresholds.
+    pub detector: ChordConfig,
+}
+
+impl Default for ChordStreamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            block_size: 8_192,
+            hop: 2_048,
+            refresh_seconds: 0.25,
+            refresh_min_change: 0.05,
+            detector: ChordConfig::default(),
+        }
+    }
+}
+
+impl ChordStreamConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !(1_024..=65_536).contains(&self.block_size) {
+            return Err("chords.blockSize must be in 1024..=65536");
+        }
+        if self.hop == 0 || self.hop > self.block_size {
+            return Err("chords.hop must be in 1..=blockSize");
+        }
+        if !(self.refresh_seconds.is_finite() && self.refresh_seconds >= 0.0) {
+            return Err("chords.refreshSeconds must be >= 0");
+        }
+        if !(self.refresh_min_change.is_finite() && self.refresh_min_change >= 0.0) {
+            return Err("chords.refreshMinChange must be >= 0");
+        }
+        self.detector.validate()
+    }
+}
+
+/// Most alternatives a [`ChordEvent`] carries.
+pub const CHORD_EVENT_ALTERNATIVES: usize = 3;
+/// Most sounding notes a [`ChordEvent`] carries.
+pub const CHORD_EVENT_NOTES: usize = 4;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChordLabel {
+    /// Root pitch class (0 = C).
+    pub root: u8,
+    pub quality: ChordQuality,
+    /// Lowest sounding pitch class (differs from `root` for inversions).
+    pub bass: u8,
+    /// Display name, e.g. `Am`, `G7`, `C/E`.
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChordAlternative {
+    pub name: String,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChordNote {
+    pub midi: i32,
+    pub pitch_class: u8,
+    pub cents: f32,
+}
+
+/// The smoothed chord. Sent when it changes, and at most every
+/// `refresh_seconds` while it holds (only if the confidence or notes moved).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChordEvent {
+    /// Input-clock frame just after the analysed block.
+    pub frame: u64,
+    /// `None` when nothing chord-like is sounding (silence, one note, an unknown shape).
+    pub chord: Option<ChordLabel>,
+    /// Template match of the chord in the latest block, 0..=1; 0 without a chord.
+    pub confidence: f32,
+    /// Runner-up chords in rank order (up to 3).
+    pub alternatives: Vec<ChordAlternative>,
+    /// Sounding notes, low to high (up to 4).
+    pub notes: Vec<ChordNote>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum AnalysisOutput {
     Pitch(PitchFrame),
     /// A note that has just ended.
     Note(NoteEvent),
     Onset(Onset),
+    /// The smoothed chord changed (or a low-rate refresh of it).
+    Chord(ChordEvent),
     /// The input callback dropped `frames` of input (the analysis ring was
     /// full) just before input-clock frame `at + frames`. Frame numbers stay
     /// on the true input clock (they jump over the gap), any note in progress
@@ -118,11 +224,145 @@ impl GapPlacer {
     }
 }
 
+/// What the last [`ChordEvent`] said, to decide whether the next is worth sending.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ChordSent {
+    chord: Option<Chord>,
+    confidence: f32,
+    frame: u64,
+    /// MIDI notes (`i32::MIN` = empty slot).
+    notes: [i32; CHORD_EVENT_NOTES],
+}
+
+const NOTHING_SENT: ChordSent = ChordSent { chord: None, confidence: 0.0, frame: 0, notes: [i32::MIN; CHORD_EVENT_NOTES] };
+
+/// Live chords: a sliding block over the input, a [`ChordAnalyzer`] every
+/// `hop` samples, a [`ChordSmoother`], and change-driven events.
+///
+/// The block ring and its linear copy are allocated once, here. The detector
+/// itself allocates small per-block vectors (peaks, candidates, names); that
+/// is fine on the analysis thread, which is not realtime.
+pub struct ChordStream {
+    config: ChordStreamConfig,
+    analyzer: ChordAnalyzer,
+    smoother: ChordSmoother,
+    refresh_frames: u64,
+    /// The last `block_size` samples, circular; `write` is the oldest.
+    ring: Vec<f32>,
+    write: usize,
+    filled: usize,
+    since_hop: usize,
+    /// The ring unrolled oldest-first for the analyzer.
+    block: Vec<f32>,
+    /// Input-clock frame of the next sample.
+    position: u64,
+    sent: ChordSent,
+}
+
+impl ChordStream {
+    pub fn new(config: ChordStreamConfig, sample_rate: u32) -> Result<Self, &'static str> {
+        config.validate()?;
+        let analyzer = ChordAnalyzer::new(config.detector, sample_rate)?;
+        Ok(Self {
+            config,
+            analyzer,
+            smoother: ChordSmoother::new(config.detector.hold_frames),
+            refresh_frames: (f64::from(config.refresh_seconds) * f64::from(sample_rate)).round() as u64,
+            ring: vec![0.0; config.block_size],
+            write: 0,
+            filled: 0,
+            since_hop: 0,
+            block: vec![0.0; config.block_size],
+            position: 0,
+            sent: NOTHING_SENT,
+        })
+    }
+
+    pub fn push(&mut self, mut samples: &[f32], mut emit: impl FnMut(ChordEvent)) {
+        let size = self.config.block_size;
+        while !samples.is_empty() {
+            // Up to the next hop boundary and the end of the ring.
+            let n = samples.len().min(self.config.hop - self.since_hop).min(size - self.write);
+            self.ring[self.write..self.write + n].copy_from_slice(&samples[..n]);
+            samples = &samples[n..];
+            self.write = (self.write + n) % size;
+            self.filled = (self.filled + n).min(size);
+            self.since_hop += n;
+            self.position += n as u64;
+            if self.since_hop == self.config.hop {
+                self.since_hop = 0;
+                if self.filled == size {
+                    self.analyze_block(&mut emit);
+                }
+            }
+        }
+    }
+
+    fn analyze_block(&mut self, emit: &mut impl FnMut(ChordEvent)) {
+        let (newer, older) = self.ring.split_at(self.write);
+        self.block[..older.len()].copy_from_slice(older);
+        self.block[older.len()..].copy_from_slice(newer);
+        let result = self.analyzer.analyze(&self.block);
+        let estimate = &result.chord;
+        let observed = estimate.best.as_ref().map(|c| c.chord);
+        let held = self.smoother.push(observed);
+        let key = |c: Option<Chord>| c.map(|c| (c.root, c.quality));
+        let confidence = if held.is_some() { estimate.confidence } else { 0.0 };
+        let mut notes = [i32::MIN; CHORD_EVENT_NOTES];
+        for (slot, n) in notes.iter_mut().zip(&result.notes) {
+            *slot = n.midi;
+        }
+        let changed = held != self.sent.chord;
+        // Refresh only from a block that agrees with the held chord, never
+        // more often than `refresh_seconds`, and only if something moved.
+        let refresh = key(observed) == key(held)
+            && self.position.saturating_sub(self.sent.frame) >= self.refresh_frames
+            && ((confidence - self.sent.confidence).abs() >= self.config.refresh_min_change || notes != self.sent.notes);
+        if !(changed || refresh) {
+            return;
+        }
+        self.sent = ChordSent { chord: held, confidence, frame: self.position, notes };
+        emit(ChordEvent {
+            frame: self.position,
+            chord: held.map(|c| ChordLabel { root: c.root, quality: c.quality, bass: c.bass, name: c.name() }),
+            confidence,
+            alternatives: estimate
+                .alternatives
+                .iter()
+                .take(CHORD_EVENT_ALTERNATIVES)
+                .map(|a| ChordAlternative { name: a.name.clone(), confidence: a.confidence })
+                .collect(),
+            notes: result
+                .notes
+                .iter()
+                .take(CHORD_EVENT_NOTES)
+                .map(|n| ChordNote { midi: n.midi, pitch_class: n.pitch_class, cents: n.cents })
+                .collect(),
+        });
+    }
+
+    /// Restart at input frame `frame` with an empty block. Anything on display
+    /// is withdrawn (an event with no chord and no notes): its audio is gone.
+    pub fn reset(&mut self, frame: u64, mut emit: impl FnMut(ChordEvent)) {
+        if self.sent.chord.is_some() || self.sent.notes != NOTHING_SENT.notes {
+            emit(ChordEvent { frame, chord: None, confidence: 0.0, alternatives: Vec::new(), notes: Vec::new() });
+        }
+        self.sent = NOTHING_SENT;
+        self.smoother = ChordSmoother::new(self.config.detector.hold_frames);
+        self.write = 0;
+        self.filled = 0;
+        self.since_hop = 0;
+        self.position = frame;
+    }
+}
+
 /// The analysis chain for one mono stream. Pure: no threads, no I/O.
 pub struct Analyzer {
     tracker: PitchTracker,
     segmenter: NoteSegmenter,
     onsets: OnsetDetector,
+    /// `None` when `chords.enabled` is false.
+    chords: Option<ChordStream>,
 }
 
 impl Analyzer {
@@ -131,7 +371,14 @@ impl Analyzer {
         let tracker = PitchTracker::new(config.tracker, sample_rate).map_err(invalid)?;
         let segmenter = NoteSegmenter::new(config.notes, sample_rate, tracker.hop_frames());
         let onsets = OnsetDetector::new(config.onsets, sample_rate).map_err(invalid)?;
-        Ok(Self { tracker, segmenter, onsets })
+        // Validated even when disabled, so a bad value is reported when it is set.
+        config.chords.validate().map_err(invalid)?;
+        let chords = if config.chords.enabled {
+            Some(ChordStream::new(config.chords, sample_rate).map_err(invalid)?)
+        } else {
+            None
+        };
+        Ok(Self { tracker, segmenter, onsets, chords })
     }
 
     /// Analyse the next samples. Outputs are emitted in time order per kind.
@@ -142,13 +389,20 @@ impl Analyzer {
             segmenter.push(&frame, |note| emit(AnalysisOutput::Note(note)));
             emit(AnalysisOutput::Pitch(frame));
         });
+        if let Some(chords) = self.chords.as_mut() {
+            chords.push(samples, |c| emit(AnalysisOutput::Chord(c)));
+        }
     }
 
-    /// Restart all clocks at `frame`, closing any note in progress.
+    /// Restart all clocks at `frame`, closing any note in progress and
+    /// withdrawing any chord on display.
     pub fn reset(&mut self, frame: u64, mut emit: impl FnMut(AnalysisOutput)) {
         self.segmenter.flush(|note| emit(AnalysisOutput::Note(note)));
         self.tracker.reset(frame);
         self.onsets.reset(frame);
+        if let Some(chords) = self.chords.as_mut() {
+            chords.reset(frame, |c| emit(AnalysisOutput::Chord(c)));
+        }
     }
 }
 
@@ -319,6 +573,144 @@ mod tests {
             }
         });
         assert_eq!(first, Some(1_000_480));
+    }
+
+    /// Sawtooth-like partials, as in the chord core's tests.
+    const CHORD_PARTIALS: [f32; 6] = [0.25, 0.125, 0.083, 0.062, 0.05, 0.042];
+
+    fn chord_tone(midis: &[f32], frames: usize) -> Vec<f32> {
+        let tuning = voiceloop_analysis::Tuning::default();
+        let mut out = vec![0.0f32; frames];
+        for &m in midis {
+            let tone = signal::harmonic(f64::from(tuning.midi_to_hz(m)), SR, frames, &CHORD_PARTIALS);
+            for (o, s) in out.iter_mut().zip(tone) {
+                *o += s;
+            }
+        }
+        out
+    }
+
+    fn chord_events(analyzer: &mut Analyzer, audio: &[f32]) -> Vec<ChordEvent> {
+        let mut events = Vec::new();
+        // Deliver it as the input callback would: small blocks.
+        for block in audio.chunks(480) {
+            analyzer.process(block, |o| {
+                if let AnalysisOutput::Chord(c) = o {
+                    events.push(c);
+                }
+            });
+        }
+        events
+    }
+
+    fn name(e: &ChordEvent) -> Option<&str> {
+        e.chord.as_ref().map(|c| c.name.as_str())
+    }
+
+    #[test]
+    fn chords_are_reported_on_change_with_notes_and_alternatives() {
+        let mut analyzer = Analyzer::new(&AnalysisConfig::default(), SR).unwrap();
+        // One second each of C major (C4 E4 G4), then A minor (A3 C4 E4), then silence.
+        let audio = signal::concat(&[
+            &chord_tone(&[60.0, 64.0, 67.0], SR as usize),
+            &chord_tone(&[57.0, 60.0, 64.0], SR as usize),
+            &signal::silence(SR as usize),
+        ]);
+        let events = chord_events(&mut analyzer, &audio);
+        let names: Vec<_> = events.iter().map(name).collect();
+        let changes: Vec<_> =
+            names.iter().enumerate().filter(|&(i, n)| i == 0 || names[i - 1] != *n).map(|(_, n)| *n).collect();
+        assert_eq!(changes, vec![Some("C"), Some("Am"), None], "{names:?}");
+
+        let c = &events[0];
+        let label = c.chord.as_ref().unwrap();
+        assert_eq!((label.root, label.quality, label.bass), (0, ChordQuality::Major, 0));
+        assert!(c.confidence > 0.85, "{}", c.confidence);
+        assert!(!c.alternatives.is_empty() && c.alternatives.len() <= CHORD_EVENT_ALTERNATIVES);
+        assert_eq!(c.notes.iter().map(|n| n.midi).collect::<Vec<_>>(), vec![60, 64, 67]);
+        assert_eq!(c.notes.iter().map(|n| n.pitch_class).collect::<Vec<_>>(), vec![0, 4, 7]);
+        // Frame = input-clock frame just after the block: a hop multiple, at least one block in.
+        let cfg = ChordStreamConfig::default();
+        assert_eq!(c.frame % cfg.hop as u64, 0);
+        assert!(c.frame >= cfg.block_size as u64);
+        // Withdrawal of the chord carries no notes.
+        let last = events.last().unwrap();
+        assert!(last.chord.is_none() && last.notes.is_empty() && last.confidence == 0.0, "{last:?}");
+    }
+
+    #[test]
+    fn steady_chord_does_not_spam_events() {
+        let mut analyzer = Analyzer::new(&AnalysisConfig::default(), SR).unwrap();
+        let seconds = 4.0;
+        let frames = (seconds * SR as f32) as usize;
+        let events = chord_events(&mut analyzer, &chord_tone(&[55.0, 59.0, 62.0, 65.0], frames));
+        assert_eq!(name(&events[0]), Some("G7"));
+        assert!(events.iter().all(|e| name(e) == Some("G7")), "{events:?}");
+        // A steady synthetic chord is announced once; with noise it may refresh, but never above 4 Hz.
+        assert_eq!(events.len(), 1, "{events:?}");
+
+        let mut analyzer = Analyzer::new(&AnalysisConfig::default(), SR).unwrap();
+        let noisy = signal::mix(&chord_tone(&[55.0, 59.0, 62.0, 65.0], frames), &signal::noise(3, frames, 0.05));
+        let events = chord_events(&mut analyzer, &noisy);
+        assert!(events.len() as f32 <= 1.0 + seconds * 4.0, "{} events", events.len());
+        for pair in events.windows(2) {
+            if pair[0].chord == pair[1].chord {
+                assert!(pair[1].frame - pair[0].frame >= (0.25 * SR as f32) as u64, "refresh too fast");
+            }
+        }
+    }
+
+    #[test]
+    fn chords_can_be_disabled_and_reset_withdraws_the_chord() {
+        let off = AnalysisConfig {
+            chords: ChordStreamConfig { enabled: false, ..ChordStreamConfig::default() },
+            ..AnalysisConfig::default()
+        };
+        let mut analyzer = Analyzer::new(&off, SR).unwrap();
+        assert!(chord_events(&mut analyzer, &chord_tone(&[60.0, 64.0, 67.0], SR as usize)).is_empty());
+
+        let mut analyzer = Analyzer::new(&AnalysisConfig::default(), SR).unwrap();
+        assert_eq!(chord_events(&mut analyzer, &chord_tone(&[60.0, 64.0, 67.0], SR as usize)).len(), 1);
+        let mut withdrawn = Vec::new();
+        analyzer.reset(500_000, |o| {
+            if let AnalysisOutput::Chord(c) = o {
+                withdrawn.push(c);
+            }
+        });
+        assert!(
+            matches!(withdrawn.as_slice(), [ChordEvent { frame: 500_000, chord: None, .. }]),
+            "{withdrawn:?}"
+        );
+        // After a reset the block refills from the new clock before anything is reported.
+        let events = chord_events(&mut analyzer, &chord_tone(&[60.0, 64.0, 67.0], SR as usize));
+        assert!(events[0].frame >= 500_000 + 8_192, "{}", events[0].frame);
+
+        let mut bad = AnalysisConfig::default();
+        bad.chords.hop = 0;
+        assert!(matches!(Analyzer::new(&bad, SR), Err(EngineError::Invalid(_))));
+        bad.chords = ChordStreamConfig { enabled: false, block_size: 100, ..ChordStreamConfig::default() };
+        assert!(matches!(Analyzer::new(&bad, SR), Err(EngineError::Invalid(_))), "checked even when disabled");
+    }
+
+    #[test]
+    fn chord_events_serialise_as_documented() {
+        let event = ChordEvent {
+            frame: 8_192,
+            chord: Some(ChordLabel { root: 0, quality: ChordQuality::Major, bass: 4, name: "C/E".into() }),
+            confidence: 0.9,
+            alternatives: vec![ChordAlternative { name: "Em".into(), confidence: 0.5 }],
+            notes: vec![ChordNote { midi: 52, pitch_class: 4, cents: -3.0 }],
+        };
+        let json = serde_json::to_value(crate::engine::EngineEvent::Chord(event)).unwrap();
+        assert_eq!(json["type"], "chord");
+        let p = &json["payload"];
+        assert_eq!(p["chord"], serde_json::json!({"root": 0, "quality": "major", "bass": 4, "name": "C/E"}));
+        assert_eq!(p["notes"][0], serde_json::json!({"midi": 52, "pitchClass": 4, "cents": -3.0}));
+        assert_eq!(p["alternatives"][0]["name"], "Em");
+        let config: AnalysisConfig =
+            serde_json::from_str(r#"{"chords":{"blockSize":4096,"detector":{"minConfidence":0.7}}}"#).unwrap();
+        assert_eq!((config.chords.block_size, config.chords.hop), (4_096, 2_048));
+        assert_eq!(config.chords.detector.min_confidence, 0.7);
     }
 
     #[test]

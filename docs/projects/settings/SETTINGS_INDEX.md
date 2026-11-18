@@ -44,7 +44,7 @@ Scopes: app / project / track / session.
 | `tuner.range` | Pitch range | The range of notes the detector listens for: Voice 65–1400 Hz, Low 40–700 Hz, High 100–2000 Hz. | Voice | app (PENDING: confirm) | Tuner; pitch curve | exists |
 | `analysis.enabled` | Pitch analysis | Turn live pitch detection on or off. | PENDING: confirm | app | Tuner; diagnostics "Analysis" | exists |
 
-## Chord analysis (exists: voiceloop-analysis, not yet wired to the UI)
+## Chord analysis (wired to live analysis and UI readout)
 
 Fields of `ChordConfig` in `crates/voiceloop-analysis/src/chord.rs`. See
 [polyphonic-analysis](../polyphonic-analysis/README.md). Most are advanced
@@ -52,7 +52,7 @@ tuning; only the first few are likely user-facing.
 
 | ID | Label | Description | Default | Scope | Connected element | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| `analysis.chord.minConfidence` | Chord confidence | How closely the sound must match a chord before a name is shown (0–1). Higher shows fewer, surer chords. | 0.8 | app | (none yet) | exists |
+| `analysis.chord.minConfidence` | Chord confidence | How closely the sound must match a chord before a name is shown (0–1). Higher shows fewer, surer chords. | 0.8 | app | Live chord readout | wired |
 | `analysis.chord.holdFrames` | Chord hold | How many analysis frames in a row a new chord must win before the display changes. Higher is steadier but slower. | 3 | app | (none yet) | exists |
 | `analysis.chord.tuningA4Hz` | Chord reference A4 | Pitch of A4 used to map frequencies to note names. Should follow `tuner.referenceA4`. | 440 Hz | app | (none yet) | exists |
 | `analysis.chord.minRmsDb` | Chord silence level | Below this level (dBFS) no chord is reported. | -50 dB | app | (none yet) | exists |

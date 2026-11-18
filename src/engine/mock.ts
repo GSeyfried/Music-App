@@ -15,6 +15,9 @@ import type {
   AudioConfig,
   AudioSettings,
   CalibrationOutcome,
+  ChordEvent,
+  ChordLabel,
+  ChordNote,
   DeviceInfo,
   DeviceList,
   EngineWarning,
@@ -167,6 +170,30 @@ const MELODY: Step[] = [
 ];
 const MELODY_SECONDS = MELODY.reduce((s, x) => s + x.seconds, 0);
 
+/**
+ * Simulated backing chords (as if a guitar played under the voice): name,
+ * root, quality, MIDI voicing, seconds. Null = nothing chord-like sounding.
+ */
+type ChordStep = { label: ChordLabel | null; midis: number[]; seconds: number };
+const CHORDS: ChordStep[] = [
+  { label: { root: 9, quality: "minor", bass: 9, name: "Am" }, midis: [57, 60, 64], seconds: 2.2 },
+  { label: { root: 5, quality: "major", bass: 5, name: "F" }, midis: [53, 57, 60], seconds: 2.0 },
+  { label: { root: 0, quality: "major", bass: 4, name: "C/E" }, midis: [52, 55, 60], seconds: 1.6 },
+  { label: { root: 7, quality: "dominant7", bass: 7, name: "G7" }, midis: [55, 59, 62, 65], seconds: 2.2 },
+  { label: null, midis: [], seconds: 0.8 },
+];
+const CHORDS_SECONDS = CHORDS.reduce((s, x) => s + x.seconds, 0);
+const ALTERNATIVES: Record<string, string[]> = {
+  Am: ["C", "Am7", "F"],
+  F: ["Dm", "Am", "Fmaj7"],
+  "C/E": ["Em", "Am", "C"],
+  G7: ["Bdim", "G", "Dm"],
+};
+/** Mirrors the engine defaults (analysis.chords.*): 8192-sample block, 2048 hop, ≤ 4 Hz refresh. */
+const CHORD_BLOCK = 8192;
+const CHORD_HOP = 2048;
+const CHORD_REFRESH_SECONDS = 0.25;
+
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
@@ -271,6 +298,10 @@ export class MockEngine implements EngineTransport {
   private noteFrames: { frame: number; midi: number; clarity: number }[] = [];
   private noteIndex = -1;
   private noteDetune = 0;
+  // Simulated chord stream.
+  private chordsEnabled = true;
+  private nextChordHop = CHORD_BLOCK;
+  private chordSent: { name: string | null; frame: number } | null = null;
 
   // Looper.
   private run: LooperState["run"] = "stopped";
@@ -818,6 +849,8 @@ export class MockEngine implements EngineTransport {
     this.recentMidi = [];
     this.noteFrames = [];
     this.noteIndex = -1;
+    this.nextChordHop = CHORD_BLOCK;
+    this.chordSent = null;
     this.resetLooper();
     this.diagnosticsAccum = 0;
     this.ensureTimer();
@@ -853,6 +886,16 @@ export class MockEngine implements EngineTransport {
       throw { kind: "invalid", message: "minHz must be positive and below maxHz" } satisfies EngineError;
     }
     if (tuning !== undefined) this.tuning = tuning;
+    const ch = config?.chords;
+    if (ch?.hop !== undefined && !(Number.isInteger(ch.hop) && ch.hop >= 1 && ch.hop <= (ch.blockSize ?? CHORD_BLOCK))) {
+      throw { kind: "invalid", message: "chords.hop must be in 1..=blockSize" } satisfies EngineError;
+    }
+    const chordsEnabled = ch?.enabled ?? true;
+    if (!chordsEnabled && this.chordsEnabled && this.chordSent?.name) {
+      this.emit({ type: "chord", payload: { frame: this.inputFrame, chord: null, confidence: 0, alternatives: [], notes: [] } });
+    }
+    this.chordsEnabled = chordsEnabled;
+    if (!chordsEnabled) this.chordSent = null;
     const enabled = config?.enabled ?? true;
     if (enabled !== this.analysisEnabled) {
       this.analysisEnabled = enabled;
@@ -1382,6 +1425,36 @@ export class MockEngine implements EngineTransport {
     return { rms, peak, rmsDb: toDb(rms), peakDb: toDb(peak), channels, frame: this.inputFrame, dropped: 0 };
   }
 
+  /** One simulated chord block ending at `frame`: emitted on change, refreshed at most 4 Hz. */
+  private chordAt(frame: number): ChordEvent | null {
+    let t = (frame / this.sampleRate) % CHORDS_SECONDS;
+    let step = CHORDS[0];
+    for (const c of CHORDS) {
+      if (t < c.seconds) {
+        step = c;
+        break;
+      }
+      t -= c.seconds;
+    }
+    // The detector needs most of a block of the new chord before it switches (smoothing).
+    if (t < (CHORD_BLOCK * 0.6) / this.sampleRate) return null;
+    const name = step.label?.name ?? null;
+    const sent = this.chordSent;
+    const refresh = sent && sent.name === name && name !== null && frame - sent.frame >= CHORD_REFRESH_SECONDS * this.sampleRate;
+    if (sent && sent.name === name && !refresh) return null;
+    if (!sent && name === null) return null;
+    this.chordSent = { name, frame };
+    const notes: ChordNote[] = step.midis.map((m) => ({ midi: m, pitchClass: m % 12, cents: (this.rand() - 0.5) * 12 }));
+    const confidence = step.label ? 0.86 + this.rand() * 0.1 : 0;
+    return {
+      frame,
+      chord: step.label,
+      confidence,
+      alternatives: (name ? ALTERNATIVES[name] ?? [] : []).map((n, i) => ({ name: n, confidence: Math.max(0, confidence - 0.12 - i * 0.07) })),
+      notes,
+    };
+  }
+
   /** Advance the simulation by `seconds` and emit what the engine would at ~30 Hz. */
   tick(seconds: number): void {
     this.hostSeconds += seconds;
@@ -1406,6 +1479,13 @@ export class MockEngine implements EngineTransport {
       }
       if (out.length > 0) {
         this.emit({ type: "pitch", payload: { frames: out, sampleRate: this.sampleRate, droppedInputFrames: 0 } });
+      }
+      // After a pause in analysis, skip ahead instead of replaying the backlog.
+      if (this.nextChordHop < this.inputFrame - CHORD_BLOCK) this.nextChordHop = this.inputFrame - (this.inputFrame % CHORD_HOP);
+      while (this.chordsEnabled && this.nextChordHop <= this.inputFrame) {
+        const chord = this.chordAt(this.nextChordHop);
+        if (chord) this.emit({ type: "chord", payload: chord });
+        this.nextChordHop += CHORD_HOP;
       }
     }
 
