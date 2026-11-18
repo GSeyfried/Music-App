@@ -38,7 +38,7 @@ function AppControl({ def }: { def: Extract<SettingDef, { source: "app" }> }) {
           min={def.min}
           max={def.max}
           step={def.step}
-          format={(v) => v.toFixed(2)}
+          format={(v) => (def.step >= 1 ? String(v) : v.toFixed(2))}
           onChange={set}
         />
       );

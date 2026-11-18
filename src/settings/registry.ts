@@ -18,11 +18,21 @@ export type SettingScope = "app" | "project" | "track" | "session";
 export type Difficulty = "easy" | "medium" | "hard" | "custom";
 export type ThemeMode = "system" | "light" | "dark";
 export type AccuracyEncoding = "brightness" | "saturation" | "opacity";
+export type ScaleDirection = "up" | "upDown";
 
 /** Values owned by the frontend ("app" source), with their types. */
 export interface AppSettings {
   "practice.difficulty": Difficulty;
   "practice.stopStudioOnEnter": boolean;
+  /** Octave of the tonic for generated scale exercises (4 = middle C's octave). */
+  "practice.scale.octave": number;
+  "practice.scale.direction": ScaleDirection;
+  /** Length of each scale note, in beats. */
+  "practice.scale.noteBeats": number;
+  /** Tempo for scale exercises when the looper has no transport (BPM). */
+  "practice.scale.defaultBpm": number;
+  /** Fraction of each note's slot that sounds (the rest is a breath gap). */
+  "practice.scale.noteGate": number;
   "view.loopRingLayers": boolean;
   "view.loopRingTicks": boolean;
   "view.playheadEmphasis": boolean;
@@ -47,6 +57,11 @@ export const DEFAULT_NOTE_COLORS: string[] = Array.from(
 export const APP_DEFAULTS: AppSettings = {
   "practice.difficulty": "medium",
   "practice.stopStudioOnEnter": true,
+  "practice.scale.octave": 4,
+  "practice.scale.direction": "upDown",
+  "practice.scale.noteBeats": 1,
+  "practice.scale.defaultBpm": 80,
+  "practice.scale.noteGate": 0.9,
   "view.loopRingLayers": true,
   "view.loopRingTicks": true,
   "view.playheadEmphasis": true,
@@ -163,6 +178,73 @@ export const SETTINGS: SettingDef[] = [
     description: "Stop loop playback when you open Practice Lab.",
     category: "Practice",
     tier: "preferences",
+    scope: "app",
+  },
+  // ---- Practice scales -----------------------------------------------------
+  {
+    id: "practice.scale.octave",
+    source: "app",
+    kind: "number",
+    min: 2,
+    max: 6,
+    step: 1,
+    label: "Scale octave",
+    description: "Which octave scale exercises start in. 4 starts on middle C's octave.",
+    category: "Practice scales",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "practice.scale.direction",
+    source: "app",
+    kind: "choice",
+    label: "Scale direction",
+    description: "Sing scale exercises up only, or up and back down.",
+    category: "Practice scales",
+    tier: "advanced",
+    scope: "app",
+    options: [
+      { value: "upDown", label: "Up and down" },
+      { value: "up", label: "Up only" },
+    ],
+  },
+  {
+    id: "practice.scale.noteBeats",
+    source: "app",
+    kind: "number",
+    min: 0.5,
+    max: 4,
+    step: 0.5,
+    label: "Scale note length",
+    description: "How long each scale note lasts, in beats (1 = quarter notes).",
+    category: "Practice scales",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "practice.scale.defaultBpm",
+    source: "app",
+    kind: "number",
+    min: 40,
+    max: 240,
+    step: 1,
+    label: "Scale tempo without looper",
+    description: "Tempo for scale exercises when there is no looper tempo to use (audio output off).",
+    category: "Practice scales",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "practice.scale.noteGate",
+    source: "app",
+    kind: "number",
+    min: 0.5,
+    max: 1,
+    step: 0.05,
+    label: "Scale note gate",
+    description: "How much of each note's beat the exercise holds the note; the rest is a short breath.",
+    category: "Practice scales",
+    tier: "internal",
     scope: "app",
   },
   {

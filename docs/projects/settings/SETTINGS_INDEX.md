@@ -48,7 +48,7 @@ Scopes: app / project / track / session.
 
 | ID | Label | Description | Default | Scope | Connected element | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| `practice.difficulty` | Difficulty | Easy, Medium or Hard. Sets the pitch and timing tolerances below; editing any one of them switches to Custom. | Medium | app | Practice header; tolerance band on the overlay (proposed) | proposed |
+| `practice.difficulty` | Difficulty | Easy, Medium or Hard. Sets the pitch and timing tolerances below; editing any one of them switches to Custom. | Medium | app | Practice Lab Difficulty control (presets in `src/practice/difficulty.ts`); tolerance band on the overlay (proposed) | exists |
 | `practice.wrongNoteCents` | Wrong-note threshold | How far off a note can be, in cents, before it counts as a different note. | 50 | app | Practice overlay | exists |
 | `practice.notePitchThresholdCents` | In-tune threshold | How close, in cents, a note must be to count as in tune. | 25 | app | Results; overlay colors | exists |
 | `practice.noteTimingThresholdMs` | Timing threshold | How early or late, in ms, a note can be and still count as on time. | 60 | app | Results | exists |
@@ -61,7 +61,12 @@ Scopes: app / project / track / session.
 | `practice.maxTakeSeconds` | Maximum take length | Longest reference or attempt recording. | 60 s | app | Record button | exists |
 | `practice.preRollMs` | Pre-roll | Audio kept from just before you press record. | 250 ms | app | (none) | exists |
 | `practice.latencyOverrideMs` | Latency override | Overrides the measured latency for practice scoring only. | None | app | (none) | exists |
-| `practice.stopStudioOnEnter` | Stop Studio in Practice | Stop loop playback when you open Practice Lab. | on | app | Workspace tabs | proposed |
+| `practice.stopStudioOnEnter` | Stop Studio in Practice | Stop loop playback when you open Practice Lab. | on | app | Workspace tabs (sends the transport Stop; a Studio take in progress is finished and kept) | exists |
+| `practice.scale.octave` | Scale octave | Which octave scale exercises start in. 4 starts on middle C's octave. | 4 | app | Scale exercise card › Scale options | exists |
+| `practice.scale.direction` | Scale direction | Sing scale exercises up only, or up and back down. | Up and down | app | Scale exercise card › Scale options | exists |
+| `practice.scale.noteBeats` | Scale note length | How long each scale note lasts, in beats (1 = quarter notes). | 1 beat | app | Scale exercise card › Scale options | exists |
+| `practice.scale.defaultBpm` | Scale tempo without looper | Tempo for scale exercises when there is no looper tempo to use (audio output off). Otherwise the looper tempo is used. | 80 BPM | app | Scale exercise card › Scale options | exists |
+| `practice.scale.noteGate` | Scale note gate | How much of each note's beat the exercise holds the note; the rest is a short breath. Internal (not shown). | 0.9 | app | (none; affects the "notes short/long" feedback) | exists |
 | `notation.view` | Note display | Show takes as a piano roll, a staff, or both. | Piano roll | app | Practice result view | proposed |
 
 ## Visuals and theme (proposed; see [visualization](../visualization/README.md))

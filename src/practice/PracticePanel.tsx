@@ -22,7 +22,11 @@ import {
   verdictLabel,
   type Tone,
 } from "./text";
-import type { AttemptRecord, AttemptSummary, CaptureOptions, ReferenceDetail, ReferenceSummary, Scores, Trend } from "./types";
+import type { AttemptRecord, AttemptSummary, CaptureOptions, ReferenceDetail, ReferenceSummary, ScaleKind, Scores, Trend } from "./types";
+import { AdvancedOptions } from "../settings/AdvancedOptions";
+import { useAppSetting } from "../settings/appSettings";
+import { settingById, type Difficulty } from "../settings/registry";
+import { SCALE_KINDS, SCALE_LABELS, TONIC_NAMES, scaleDefaults, scaleName, scaleNotes, scaleReference } from "./scales";
 
 type Mode = "free" | "click";
 
@@ -151,6 +155,34 @@ function captureOptions(mode: Mode, bars: number | null, name?: string): Capture
   return mode === "click" ? { useTransport: true, bars, name: name || null } : { useTransport: false, name: name || null };
 }
 
+// ---- difficulty ---------------------------------------------------------------------------
+
+const DIFFICULTY_DEF = settingById("practice.difficulty");
+
+/** Easy / Medium / Hard (registry `practice.difficulty`); Custom shows only after a hand edit. */
+function DifficultyControl() {
+  const store = usePracticeStore();
+  const value = useAppSetting("practice.difficulty");
+  const busy = usePractice((s) => s.busy);
+  const phase = usePractice((s) => s.status?.phase ?? "idle");
+  if (!DIFFICULTY_DEF || DIFFICULTY_DEF.kind !== "choice") return null;
+  const options = DIFFICULTY_DEF.options
+    .filter((o) => o.value !== "custom" || value === "custom")
+    .map((o) => ({ value: o.value as Difficulty, label: o.label }));
+  return (
+    <div className="pl-difficulty">
+      <Segmented<Difficulty>
+        label={DIFFICULTY_DEF.label}
+        help={DIFFICULTY_DEF.description}
+        value={value}
+        options={options}
+        disabled={busy || phase !== "idle"}
+        onChange={(d) => void store.applyDifficulty(d)}
+      />
+    </div>
+  );
+}
+
 // ---- take banner (arming / capturing / finishing) ----------------------------------------
 
 function TakeBanner({ reference }: { reference: ReferenceDetail | null }) {
@@ -242,12 +274,72 @@ function RecordReferenceCard({ ready }: { ready: boolean }) {
   );
 }
 
+function ScaleExerciseCard() {
+  const store = usePracticeStore();
+  const busy = usePractice((s) => s.busy);
+  const phase = usePractice((s) => s.status?.phase ?? "idle");
+  const transport = useEngineState((s) => s.looper?.transport);
+  const [tonic, setTonic] = useState(0);
+  const [kind, setKind] = useState<ScaleKind>("major");
+  // Re-read on change so the summary below follows the advanced pop-up.
+  const octave = useAppSetting("practice.scale.octave");
+  const direction = useAppSetting("practice.scale.direction");
+  const noteBeats = useAppSetting("practice.scale.noteBeats");
+  const fallbackBpm = useAppSetting("practice.scale.defaultBpm");
+  const bpm = transport ? Math.round(transport.bpm) : fallbackBpm;
+  const count = scaleNotes(tonic, kind, octave, direction).length;
+  const add = () => {
+    const d = scaleDefaults();
+    void store.addReference(
+      scaleReference({
+        ...d,
+        tonic,
+        kind,
+        bpm,
+        beatsPerBar: transport?.timeSignature.numerator ?? 4,
+        beatUnit: transport?.timeSignature.denominator ?? 4,
+      }),
+    );
+  };
+  return (
+    <section className="card pl-scale" aria-label="Scale exercise">
+      <div className="pl-head">
+        <h2 className="card-title">Scale exercise</h2>
+        <span className="spacer" />
+        <AdvancedOptions categories={["Practice scales"]} label="Scale options" />
+      </div>
+      <p className="hint">Pick a key and scale. It's added to your references, ready to sing.</p>
+      <div className="pl-scale-tonic">
+        <Segmented<number> label="Key" value={tonic} options={TONIC_NAMES.map((n, i) => ({ value: i, label: n }))} onChange={setTonic} />
+      </div>
+      <label className="pl-field">
+        <span className="stepper-label">Scale</span>
+        <select className="pl-input" value={kind} onChange={(e) => setKind(e.currentTarget.value as ScaleKind)}>
+          {SCALE_KINDS.map((k) => (
+            <option key={k} value={k}>
+              {SCALE_LABELS[k]}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="hint pl-small">
+        {count} notes from {noteLabel(scaleNotes(tonic, kind, octave, "up")[0])}, {direction === "up" ? "up" : "up and down"},{" "}
+        {noteBeats === 1 ? "one beat" : `${noteBeats} beats`} each at {bpm} BPM.
+      </p>
+      <Button variant="solid" icon="plus" disabled={busy || phase !== "idle"} onPress={add}>
+        Add {scaleName(tonic, kind)}
+      </Button>
+    </section>
+  );
+}
+
 function Library({ ready }: { ready: boolean }) {
   const refs = usePractice((s) => s.references);
   const store = usePracticeStore();
   return (
     <>
       <RecordReferenceCard ready={ready} />
+      <ScaleExerciseCard />
       <section className="card" aria-label="References">
         <h2 className="card-title">Your references</h2>
         {refs.length === 0 ? (
@@ -567,6 +659,7 @@ export function PracticePanel() {
   return (
     <div className="pl">
       <TakeBanner reference={detail} />
+      <DifficultyControl />
       {message && (
         <p className="hint pl-message" role="status">
           Last take: {message}.
