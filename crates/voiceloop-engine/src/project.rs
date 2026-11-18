@@ -38,7 +38,7 @@ use crate::engine::EngineEvent;
 use crate::error::EngineError;
 use crate::looper::io::LooperPlayback;
 use crate::looper::transfer::{
-    Captured, Exporter, Importer, LayerSlot, ParkedLooper, Poll, RestorePlan, TrackPlan, TransferError,
+    Captured, Exporter, Importer, LayerSlot, ParkedLooper, Poll, RestorePlan, TrackClock, TrackPlan, TransferError,
 };
 use crate::looper::{soft_limit, MAX_TRACKS};
 use crate::practice::PracticeLibrary;
@@ -451,6 +451,13 @@ fn doc_from_captured(base: &ProjectDoc, cap: Captured, config: Option<&AudioConf
     (doc, audio)
 }
 
+/// Each captured track's loop settings and clock. Not saved in project files
+/// yet (PER_TRACK_LOOPS.md slice 4); carried in memory so an audio restart or
+/// an in-place reload keeps them.
+fn clocks_of(cap: &Captured) -> Vec<TrackClock> {
+    cap.tracks.iter().map(|t| t.plan.clock).collect()
+}
+
 /// Audio and looper plan for loading `doc` into a looper at `rate`.
 struct Loadable {
     plan: RestorePlan,
@@ -459,15 +466,33 @@ struct Loadable {
 
 /// Resample layers to `rate` if the project was saved at another rate.
 /// Returns the scaled loop period. Runs on a worker thread.
+#[cfg(test)]
 fn convert_rate(doc: &ProjectDoc, audio: &mut [TrackAudio], rate: u32) -> Option<f64> {
+    convert_rate_with_clocks(doc, audio, &mut [], rate)
+}
+
+/// [`convert_rate`] that also scales each track's own loop clock and sizes
+/// that track's layers to it.
+fn convert_rate_with_clocks(
+    doc: &ProjectDoc,
+    audio: &mut [TrackAudio],
+    clocks: &mut [TrackClock],
+    rate: u32,
+) -> Option<f64> {
     let from = doc.sample_rate;
     let period = doc.loop_.as_ref().map(|l| l.period_frames);
     if from == rate || rate == 0 {
         return period;
     }
-    let scaled = period.map(|p| p * rate as f64 / from as f64);
-    let target = scaled.map_or(0, |p| p.ceil() as usize);
-    for t in audio.iter_mut() {
+    let ratio = rate as f64 / from as f64;
+    let scaled = period.map(|p| p * ratio);
+    for c in clocks.iter_mut() {
+        c.period = c.period.map(|p| p * ratio);
+        c.base = c.base.map(|p| p * ratio);
+    }
+    for (i, t) in audio.iter_mut().enumerate() {
+        let own = clocks.get(i).and_then(|c| c.period);
+        let target = own.or(scaled).map_or(0, |p| p.ceil() as usize);
         for set in [&mut t.layers, &mut t.redo] {
             for layer in set.iter_mut() {
                 let mut v = resample::resample(layer, from, rate);
@@ -479,7 +504,13 @@ fn convert_rate(doc: &ProjectDoc, audio: &mut [TrackAudio], rate: u32) -> Option
     scaled
 }
 
-fn loadable(doc: &ProjectDoc, audio: &[TrackAudio], period: Option<f64>, rate: u32) -> Result<Loadable, FileError> {
+fn loadable(
+    doc: &ProjectDoc,
+    audio: &[TrackAudio],
+    clocks: &[TrackClock],
+    period: Option<f64>,
+    rate: u32,
+) -> Result<Loadable, FileError> {
     let mut tracks = [TrackPlan::EMPTY; MAX_TRACKS];
     let mut layers = Vec::new();
     for (t, d) in doc.tracks.iter().enumerate() {
@@ -511,6 +542,8 @@ fn loadable(doc: &ProjectDoc, audio: &[TrackAudio], period: Option<f64>, rate: u
                 }
                 values
             },
+            // Plans without loop info (project files today) mean Song tracks.
+            clock: clocks.get(t).copied().unwrap_or_default(),
         };
         for (i, l) in a.layers.iter().enumerate() {
             layers.push((t as u8, LayerSlot::Active(i as u8), l.to_vec()));
@@ -577,6 +610,8 @@ enum Work {
     Opened {
         opened: Opened,
         audio: Vec<TrackAudio>,
+        /// Per-track loop clocks (parked content only; empty for files).
+        clocks: Vec<TrackClock>,
         rate: u32,
         parked: bool,
         resampled_from: Option<u32>,
@@ -690,6 +725,8 @@ struct PendingLoad {
     auto: bool,
     /// Rate the audio was at before any conversion (reported to the UI).
     resampled_from: Option<u32>,
+    /// Per-track loop settings and clocks (empty: every track follows the song).
+    clocks: Vec<TrackClock>,
 }
 
 pub struct ProjectGlue {
@@ -795,6 +832,17 @@ impl ProjectGlue {
                 self.doc.tracks.remove(track as usize);
                 self.dirty = true;
             }
+            C::DuplicateTrack { track }
+                if (track as usize) < self.doc.tracks.len() && self.doc.tracks.len() < MAX_TRACKS =>
+            {
+                let t = track as usize;
+                let mut copy = self.doc.tracks[t].clone();
+                copy.id = TrackDoc::new(t + 1).id;
+                copy.name = format!("{} copy", copy.name);
+                copy.solo = false;
+                self.doc.tracks.insert(t + 1, copy);
+                self.dirty = true;
+            }
             _ => {}
         }
     }
@@ -823,7 +871,9 @@ impl ProjectGlue {
         if !p.has_content() {
             return; // nothing to keep; a project waiting to load stays pending
         }
-        let (doc, audio) = doc_from_captured(&self.doc, p.into_captured(), Some(config));
+        let cap = p.into_captured();
+        let clocks = clocks_of(&cap);
+        let (doc, audio) = doc_from_captured(&self.doc, cap, Some(config));
         self.doc = doc.clone();
         self.pending = Some(PendingLoad {
             doc,
@@ -833,6 +883,7 @@ impl ProjectGlue {
             parked: true,
             auto: true,
             resampled_from: None,
+            clocks,
         });
         if self.dirty {
             self.autosave_due = true;
@@ -942,7 +993,8 @@ impl ProjectGlue {
                 doc.transport = self.doc.transport.clone();
                 self.pending = None;
                 if looper {
-                    let empty = loadable(&doc, &[], None, rate.unwrap_or(doc.sample_rate)).map_err(to_engine)?;
+                    let empty =
+                        loadable(&doc, &[], &[], None, rate.unwrap_or(doc.sample_rate)).map_err(to_engine)?;
                     let importer = Importer::new(empty.plan, empty.layers);
                     Some(self.start(OpKind::New, Stage::Import(importer, AfterImport::Created { doc: Box::new(doc) })))
                 } else {
@@ -984,7 +1036,7 @@ impl ProjectGlue {
                         }
                     };
                     let rate = target.unwrap_or(opened.doc.sample_rate);
-                    let mut work = converted(opened, audio, rate, false, progress);
+                    let mut work = converted(opened, audio, Vec::new(), rate, false, progress);
                     if let Work::Opened { practice: p, .. } = &mut work {
                         *p = practice;
                     }
@@ -1240,7 +1292,7 @@ impl ProjectGlue {
         let rx = spawn_worker(move |progress| {
             let parked = p.parked;
             let opened = Opened { path: p.path.unwrap_or_default(), doc: p.doc, warnings: p.warnings };
-            Ok(converted(opened, p.audio, rate, parked, progress))
+            Ok(converted(opened, p.audio, p.clocks, rate, parked, progress))
         });
         self.start(kind, Stage::Work(rx, AfterWork::Opened));
     }
@@ -1394,6 +1446,7 @@ impl ProjectGlue {
                     }
                 };
                 let (layer, report) = fit_layer(samples, period, fit)?;
+                let clocks = clocks_of(&cap);
                 let (mut doc, mut audio) = doc_from_captured(&self.doc, cap, Some(config));
                 if audio[t].layers.len() >= inv.max_layers {
                     return Err(file_error("doesNotFit", "the track has no free layer"));
@@ -1401,7 +1454,7 @@ impl ProjectGlue {
                 audio[t].layers.push(Arc::from(layer));
                 audio[t].redo.clear(); // a new layer discards redo history, as recording does
                 doc.loop_ = Some(LoopDoc { period_frames: period, extra: Default::default() });
-                let load = loadable(&doc, &audio, Some(period), inv.transport.sample_rate)?;
+                let load = loadable(&doc, &audio, &clocks, Some(period), inv.transport.sample_rate)?;
                 let importer = Importer::new(load.plan, load.layers);
                 Ok(Next::Continue(Stage::Import(importer, AfterImport::LayerAdded { track, report, resampled_from })))
             }
@@ -1426,7 +1479,7 @@ impl ProjectGlue {
             }
             (
                 AfterWork::Opened,
-                Work::Opened { opened, audio, rate: loaded_rate, parked, resampled_from, practice },
+                Work::Opened { opened, audio, clocks, rate: loaded_rate, parked, resampled_from, practice },
             ) => {
                 let Opened { path, doc, warnings } = opened;
                 if !parked {
@@ -1442,11 +1495,12 @@ impl ProjectGlue {
                     parked,
                     auto: true,
                     resampled_from,
+                    clocks,
                 };
                 match rate {
                     Some(r) if r == loaded_rate => {
                         let period = pending.doc.loop_.as_ref().map(|l| l.period_frames);
-                        let load = loadable(&pending.doc, &pending.audio, period, r)?;
+                        let load = loadable(&pending.doc, &pending.audio, &pending.clocks, period, r)?;
                         let importer = Importer::new(load.plan, load.layers);
                         Ok(Next::Continue(Stage::Import(importer, AfterImport::Opened { pending: Box::new(pending) })))
                     }
@@ -1508,20 +1562,29 @@ impl ProjectGlue {
 fn converted(
     opened: Opened,
     mut audio: Vec<TrackAudio>,
+    mut clocks: Vec<TrackClock>,
     rate: u32,
     parked: bool,
     progress: &mut dyn FnMut(f32),
 ) -> Work {
     let Opened { path, mut doc, warnings } = opened;
     let from = doc.sample_rate;
-    let period = convert_rate(&doc, &mut audio, rate);
+    let period = convert_rate_with_clocks(&doc, &mut audio, &mut clocks, rate);
     if let (Some(p), Some(l)) = (period, doc.loop_.as_mut()) {
         l.period_frames = p;
     }
     doc.sample_rate = rate;
     progress(1.0);
     let resampled_from = (from != rate).then_some(from);
-    Work::Opened { opened: Opened { path, doc, warnings }, audio, rate, parked, resampled_from, practice: None }
+    Work::Opened {
+        opened: Opened { path, doc, warnings },
+        audio,
+        clocks,
+        rate,
+        parked,
+        resampled_from,
+        practice: None,
+    }
 }
 
 /// Unity-gain stems in `<dir>/Audio/` and a `.rpp` that mixes them with the

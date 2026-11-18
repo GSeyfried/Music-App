@@ -36,7 +36,7 @@ use rtrb::{Consumer, Producer};
 use super::pool::{LayerBuf, LayerRecycler};
 use super::processor::{LooperHandles, RejectReason, RunState};
 use super::{MAX_LAYERS_PER_TRACK, MAX_TRACKS};
-use crate::transport::TransportState;
+use crate::transport::{TrackLoop, TrackLoopMode, TransportState};
 
 /// Capacity of the job and result rings. The control side keeps at most this
 /// many jobs outstanding, so the audio side can always return them.
@@ -56,7 +56,31 @@ pub enum LayerSlot {
     Redo(u8),
 }
 
-/// Mixer state and layer counts of one track.
+/// One track's loop settings and its own clock. Every clock restarts at
+/// phase 0 when the transport stops, and plans are only taken or restored
+/// while stopped, so the period (with origin 0) is the whole clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackClock {
+    pub track_loop: TrackLoop,
+    /// The track's own loop period in frames. `None` for a Song track (it
+    /// follows the song loop) or a track that has no loop yet.
+    pub period: Option<f64>,
+    /// Multiple mode: the base loop period the ratio refers to.
+    pub base: Option<f64>,
+}
+
+impl TrackClock {
+    /// A track that follows the song loop (what plans without loop info mean).
+    pub const SONG: Self = Self { track_loop: TrackLoop::DEFAULT, period: None, base: None };
+}
+
+impl Default for TrackClock {
+    fn default() -> Self {
+        Self::SONG
+    }
+}
+
+/// Mixer state, layer counts and loop clock of one track.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TrackPlan {
     pub layers: u8,
@@ -67,6 +91,7 @@ pub struct TrackPlan {
     pub playing: bool,
     pub layer_offsets: [i64; MAX_LAYERS_PER_TRACK],
     pub redo_offsets: [i64; MAX_LAYERS_PER_TRACK],
+    pub clock: TrackClock,
 }
 
 impl TrackPlan {
@@ -79,6 +104,7 @@ impl TrackPlan {
         playing: true,
         layer_offsets: [0; MAX_LAYERS_PER_TRACK],
         redo_offsets: [0; MAX_LAYERS_PER_TRACK],
+        clock: TrackClock::SONG,
     };
 }
 
@@ -102,9 +128,18 @@ pub struct Inventory {
 }
 
 impl Inventory {
-    /// Frames of each layer that can hold audio: `ceil(period)`.
+    /// Frames of each song-loop layer that can hold audio: `ceil(period)`.
     pub fn content_frames(&self) -> usize {
         self.period.map_or(0, |p| (p.ceil().max(0.0) as usize).min(self.max_frames))
+    }
+
+    /// Frames of each layer of a track with this plan: the song loop's for a
+    /// Song track, otherwise `ceil` of the track's own period.
+    pub fn track_frames(&self, plan: &TrackPlan) -> usize {
+        match plan.clock.track_loop.mode {
+            TrackLoopMode::Song => self.content_frames(),
+            _ => plan.clock.period.map_or(0, |p| (p.ceil().max(0.0) as usize).min(self.max_frames)),
+        }
     }
 }
 
@@ -262,8 +297,8 @@ impl Exporter {
     }
 
     fn plan_reads(&mut self, inv: Inventory) {
-        let frames = inv.content_frames();
         for (t, &plan) in inv.tracks.iter().enumerate().take(inv.track_count as usize) {
+            let frames = inv.track_frames(&plan);
             let mut track = CapturedTrack { plan, layers: Vec::new(), redo: Vec::new() };
             for (count, redo) in [(plan.layers, false), (plan.redo, true)] {
                 for i in 0..count {
@@ -398,7 +433,8 @@ impl Importer {
                 )));
             }
         }
-        if let Some(p) = self.plan.period {
+        let track_periods = self.plan.tracks.iter().map(|tp| tp.clock.period);
+        for p in std::iter::once(self.plan.period).chain(track_periods).flatten() {
             if !(p.is_finite() && p >= 1.0) || p.ceil() as usize > inv.max_frames {
                 return Err(TransferError::DoesNotFit(format!(
                     "the loop is {p:.0} frames but the looper holds at most {} (raise maxLoopSeconds)",
@@ -547,14 +583,16 @@ impl ParkedLooper {
             track_capacity: self.track_capacity.min(MAX_TRACKS) as u8,
             tracks: tracks_plan,
         };
-        let frames = inventory.content_frames();
-        let cut = |bufs: Vec<LayerBuf>| -> Vec<Vec<f32>> {
+        let cut = |bufs: Vec<LayerBuf>, frames: usize| -> Vec<Vec<f32>> {
             bufs.into_iter().map(|b| b.get(..frames).unwrap_or(&b[..]).to_vec()).collect()
         };
         let tracks = self
             .tracks
             .into_iter()
-            .map(|t| CapturedTrack { plan: t.plan, layers: cut(t.layers), redo: cut(t.redo) })
+            .map(|t| {
+                let frames = inventory.track_frames(&t.plan);
+                CapturedTrack { plan: t.plan, layers: cut(t.layers, frames), redo: cut(t.redo, frames) }
+            })
             .collect();
         Captured { inventory, tracks }
     }

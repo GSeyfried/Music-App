@@ -716,6 +716,9 @@ impl ControlLoop {
                 return Ok(());
             }
         }
+        if let LooperCommand::SetTrackLoop { settings, .. } = command {
+            settings.validate().map_err(|e| EngineError::Invalid(e.to_string()))?;
+        }
         if let LooperCommand::SetTransport { transport } = command {
             transport.validate().map_err(|e| EngineError::Invalid(e.to_string()))?;
             if self.playback.is_none() {
