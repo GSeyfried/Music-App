@@ -20,12 +20,17 @@ export type Difficulty = "superEasy" | "easy" | "medium" | "hard" | "custom";
 export type ThemeMode = "system" | "light" | "dark";
 export type AccuracyEncoding = "brightness" | "saturation" | "opacity";
 export type ScaleDirection = "up" | "upDown";
-export type GameDifficulty = "easy" | "medium" | "hard";
+/** Pitch Glider uses the same named progression as Practice (never Custom). */
+export type GameDifficulty = "superEasy" | "easy" | "medium" | "hard";
 export type GameRangeSource = "myRange" | "custom";
 export type GameSpeed = "slow" | "normal" | "fast";
 
-/** Pitch Glider gate opening per difficulty, as a fraction of the play-field height. */
-export const GAME_OPENINGS: Record<GameDifficulty, number> = { easy: 0.42, medium: 0.32, hard: 0.22 };
+/**
+ * Pitch Glider cannot use a narrower target window than this. It keeps the
+ * Hard opening at exactly ±25 cents while the other levels inherit Practice's
+ * pitch tolerance. This is converted to a height from the active voice range.
+ */
+export const GAME_MIN_OPENING_TOLERANCE_CENTS = 25;
 /** Pitch Glider scroll speed per setting, in play-field heights per second. */
 export const GAME_SPEEDS: Record<GameSpeed, number> = { slow: 0.22, normal: 0.32, fast: 0.45 };
 /** Pitch Glider distance between gates, in play-field heights. */
@@ -152,7 +157,7 @@ export const APP_DEFAULTS: AppSettings = {
   "games.pitchSmoothingMs": 120,
   "games.gravity": 0.25,
   "games.minClarity": 0.8,
-  "games.bestScores": { easy: 0, medium: 0, hard: 0 },
+  "games.bestScores": { superEasy: 0, easy: 0, medium: 0, hard: 0 },
 };
 
 interface Base {
@@ -558,11 +563,12 @@ export const SETTINGS: SettingDef[] = [
     source: "app",
     kind: "choice",
     label: "Game difficulty",
-    description: "How tall the openings in Pitch Glider are: wide, medium or narrow. Narrow openings need a steadier voice.",
+    description: "Matches Practice: Super Easy, Easy, Medium or Hard. Openings are derived from the pitch tolerance across your selected range.",
     category: "Games",
     tier: "daily",
     scope: "app",
     options: [
+      { value: "superEasy", label: "Super Easy" },
       { value: "easy", label: "Easy" },
       { value: "medium", label: "Medium" },
       { value: "hard", label: "Hard" },

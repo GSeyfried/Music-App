@@ -6,7 +6,8 @@
 // `width` units wide (the canvas aspect ratio), so collisions use one scale.
 
 import type { PitchFrame } from "../engine/protocol";
-import { GAME_GATE_SPACING, GAME_OPENINGS, GAME_SPEEDS, type GameDifficulty, type GameSpeed } from "../settings/registry";
+import { DIFFICULTY_PRESETS } from "../practice/difficulty";
+import { GAME_GATE_SPACING, GAME_MIN_OPENING_TOLERANCE_CENTS, GAME_SPEEDS, type GameDifficulty, type GameSpeed } from "../settings/registry";
 
 export const MIN_MIDI = 21;
 export const MAX_MIDI = 108;
@@ -114,8 +115,26 @@ const GAP_MARGIN = 0.06;
 /** The first gate appears this far beyond the right edge. */
 const FIRST_GATE_DELAY = 0.6;
 
-export function openingFor(difficulty: GameDifficulty): number {
-  return GAME_OPENINGS[difficulty];
+/**
+ * Half of an opening in cents. Games share Practice's pitch thresholds, but
+ * never make a physical opening smaller than ±25¢; Hard is therefore exactly
+ * that window even though Practice scoring may be stricter.
+ */
+export function openingToleranceCentsFor(difficulty: GameDifficulty): number {
+  return Math.max(DIFFICULTY_PRESETS[difficulty].notePitchThresholdCents, GAME_MIN_OPENING_TOLERANCE_CENTS);
+}
+
+/**
+ * Physical gate height for a cents window across the active MIDI range.
+ * Include the craft's diameter so the craft centre gets the requested pitch
+ * tolerance; otherwise a ±25¢ Hard opening is smaller than the craft across a
+ * typical two-octave range and cannot be flown through.
+ */
+export function openingFor(difficulty: GameDifficulty, range: MidiRange): number {
+  const spanSemitones = range.high - range.low;
+  if (spanSemitones <= 0) return 1;
+  const pitchWindow = (2 * openingToleranceCentsFor(difficulty)) / (100 * spanSemitones);
+  return clamp(2 * CRAFT_RADIUS + pitchWindow, 0, 1);
 }
 
 export function speedFor(speed: GameSpeed): number {
@@ -162,11 +181,12 @@ export function newGame(): GameState {
 export function gameConfig(
   width: number,
   difficulty: GameDifficulty,
+  range: MidiRange,
   speed: GameSpeed,
   gravity: number,
   smoothingMs: number,
 ): GameConfig {
-  return { width, opening: openingFor(difficulty), speed: speedFor(speed), gravity, smoothingMs, spacing: GAME_GATE_SPACING };
+  return { width, opening: openingFor(difficulty, range), speed: speedFor(speed), gravity, smoothingMs, spacing: GAME_GATE_SPACING };
 }
 
 /** A gate with its opening centred at `rand01` across the allowed band. */

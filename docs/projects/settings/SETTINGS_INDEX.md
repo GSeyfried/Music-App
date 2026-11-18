@@ -100,7 +100,8 @@ tuning; only the first few are likely user-facing.
 | `voice.rangeFinder.minClarity` | Range Finder clarity | How clear your voice must be before the Range Finder counts a note. Internal. | 0.85 | app | Range Finder capture | exists |
 | `voice.rangeFinder.maxStabilityCents` | Range Finder steadiness | How much your pitch may waver (std dev, cents) while a held note is counted. Internal. | 30 ¢ | app | Range Finder capture | exists |
 | `voice.rangeFinder.holdMs` | Range Finder hold time | How long a note must be held on the same semitone to be captured. Internal. | 800 ms | app | Range Finder progress ring | exists |
-| `games.difficulty` | Game difficulty | Pitch Glider opening height: Easy/Medium/Hard = 0.42/0.32/0.22 of the play field (`GAME_OPENINGS` in the registry). | Medium | app | Games › Pitch Glider controls | exists |
+| `games.difficulty` | Game difficulty | Super Easy, Easy, Medium or Hard matches Practice. The opening is derived from that level's pitch tolerance and the selected note range. | Medium | app | Games › Pitch Glider controls | exists |
+| `games.openingToleranceCents` | Glider opening tolerance | Internal lower bound for the Pitch Glider target window. The game uses Practice's pitch tolerance but never narrows an opening below ±25¢, so Hard is exactly ±25¢. | 25 ¢ | app | Pitch Glider wall opening | exists (constant `GAME_MIN_OPENING_TOLERANCE_CENTS`, not shown) |
 | `games.range` | Game range | Which notes span the play field: My range (`voice.range*`) or Custom (`games.range*Midi`). | My range | app | Games › Pitch Glider controls | exists |
 | `games.rangeLowMidi` | Custom low note | Bottom of the play field when Game range is Custom. | 48 (C3) | app | Pitch Glider custom range nudges | exists |
 | `games.rangeHighMidi` | Custom high note | Top of the play field when Game range is Custom. | 72 (C5) | app | Pitch Glider custom range nudges | exists |

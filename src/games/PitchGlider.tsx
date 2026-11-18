@@ -15,6 +15,7 @@ import { fitCanvas, setText, useFrame } from "../lib/useFrame";
 import { AdvancedOptions } from "../settings/AdvancedOptions";
 import { getAppSetting, setAppSetting, useAppSetting } from "../settings/appSettings";
 import { settingById, type SettingDef } from "../settings/registry";
+import { noteColor } from "../settings/noteColors";
 import { SettingControl } from "../settings/SettingControl";
 import {
   CRAFT_RADIUS,
@@ -57,6 +58,7 @@ export function PitchGlider() {
   const range = useGameRange();
   const rangeSource = useAppSetting("games.range");
   const difficulty = useAppSetting("games.difficulty");
+  const noteColors = useAppSetting("notes.colorMap");
   const best = useAppSetting("games.bestScores");
   const [phase, setPhase] = useState<GamePhase>("ready");
   const [lastScore, setLastScore] = useState(0);
@@ -117,6 +119,7 @@ export function PitchGlider() {
     const cfg = gameConfig(
       width / height,
       getAppSetting("games.difficulty"),
+      r,
       getAppSetting("games.speed"),
       getAppSetting("games.gravity"),
       getAppSetting("games.pitchSmoothingMs"),
@@ -154,7 +157,7 @@ export function PitchGlider() {
     }
     const ctx = el.getContext("2d");
     if (!ctx) return;
-    draw(ctx, theme.current.colors, g, trail.current, r, cfg.speed, width, height, dpr);
+    draw(ctx, theme.current.colors, g, trail.current, r, midi, noteColors, cfg.speed, width, height, dpr);
   });
 
   const bestHere = best[difficulty] ?? 0;
@@ -252,6 +255,8 @@ function draw(
   g: GameState,
   trail: number[],
   range: MidiRange,
+  sungMidi: number | null,
+  noteColors: readonly string[],
   speed: number,
   width: number,
   height: number,
@@ -301,7 +306,8 @@ function draw(
     const w = X(GATE_WIDTH);
     const top = Y(gate.gapY + gate.gapSize / 2);
     const bottom = Y(gate.gapY - gate.gapSize / 2);
-    ctx.fillStyle = gate.passed ? c.note : c.pitchDim;
+    const targetColor = noteColor(noteColors, heightToPitch(gate.gapY, range));
+    ctx.fillStyle = targetColor;
     roundRect(ctx, x, -8, w, top + 8, 6);
     roundRect(ctx, x, bottom, w, H - bottom + 8, 6);
     // Hatching on the walls
@@ -319,9 +325,11 @@ function draw(
       ctx.stroke();
     }
     ctx.restore();
-    ctx.fillStyle = gate.passed ? c.inTune : c.onset;
+    ctx.fillStyle = targetColor;
+    ctx.globalAlpha = gate.passed ? 0.9 : 1;
     ctx.fillRect(x - 3, top - 4, w + 6, 4);
     ctx.fillRect(x - 3, bottom, w + 6, 4);
+    ctx.globalAlpha = 1;
     if (!gate.passed) {
       ctx.fillStyle = c.textDim;
       ctx.textAlign = "center";
@@ -333,7 +341,7 @@ function draw(
   // Trail: recent heights, scrolling left at the game speed (about 60 frames/s).
   if (trail.length > 1) {
     const dx = (speed / 60) * H;
-    ctx.strokeStyle = c.pitch;
+    ctx.strokeStyle = sungMidi === null ? c.pitch : noteColor(noteColors, sungMidi);
     ctx.lineWidth = 2.5;
     ctx.lineJoin = "round";
     ctx.globalAlpha = 0.55;
@@ -352,7 +360,7 @@ function draw(
   const cx = X(CRAFT_X);
   const cy = Y(g.craftY);
   const r = X(CRAFT_RADIUS);
-  ctx.fillStyle = g.phase === "over" ? c.off : g.voiced ? c.pitch : c.textDim;
+  ctx.fillStyle = g.phase === "over" ? c.off : g.voiced && sungMidi !== null ? noteColor(noteColors, sungMidi) : c.textDim;
   ctx.beginPath();
   ctx.moveTo(cx + r * 1.5, cy);
   ctx.lineTo(cx - r * 1.1, cy - r * 1.05);

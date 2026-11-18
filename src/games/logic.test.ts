@@ -14,6 +14,7 @@ import {
   normalizeRange,
   nudgeRange,
   openingFor,
+  openingToleranceCentsFor,
   pitchToHeight,
   heightToPitch,
   smoothToward,
@@ -111,12 +112,30 @@ describe("pitch to height", () => {
 });
 
 describe("pitch glider", () => {
-  it("gives harder difficulties narrower openings", () => {
-    expect(openingFor("easy")).toBeGreaterThan(openingFor("medium"));
-    expect(openingFor("medium")).toBeGreaterThan(openingFor("hard"));
-    const g = makeGate(1, openingFor("hard"), 1);
+  const range = { low: 48, high: 72 };
+
+  it("uses all Practice difficulty levels and derives openings from cents", () => {
+    expect(openingToleranceCentsFor("superEasy")).toBeGreaterThan(openingToleranceCentsFor("easy"));
+    expect(openingToleranceCentsFor("easy")).toBeGreaterThan(openingToleranceCentsFor("medium"));
+    expect(openingToleranceCentsFor("medium")).toBe(openingToleranceCentsFor("hard"));
+    // The physical gap includes the craft diameter, leaving its centre 25¢
+    // of pitch clearance up and down: 50 / (24 semitones × 100¢).
+    expect(openingToleranceCentsFor("hard")).toBe(25);
+    expect(openingFor("hard", range) - 2 * CRAFT_RADIUS).toBeCloseTo(50 / 2400);
+    // The same cents window occupies less screen space in a wider voice range.
+    expect(openingFor("hard", { low: 36, high: 84 }) - 2 * CRAFT_RADIUS).toBeCloseTo(50 / 4800);
+    const g = makeGate(1, openingFor("hard", range), 1);
     expect(g.gapY + g.gapSize / 2).toBeLessThanOrEqual(1);
     expect(makeGate(1, 0.3, 0).gapY - 0.15).toBeGreaterThanOrEqual(0);
+  });
+
+  it("leaves the craft centre exactly the selected cents tolerance", () => {
+    const gapSize = openingFor("hard", range);
+    const gate = { x: CRAFT_X - GATE_WIDTH / 2, gapY: 0.5, gapSize, passed: false };
+    const clearance = gapSize / 2 - CRAFT_RADIUS;
+    expect(clearance * (range.high - range.low) * 100).toBeCloseTo(25);
+    expect(hitsGate(0.5 + clearance - 0.0001, gate)).toBe(false);
+    expect(hitsGate(0.5 + clearance + 0.0001, gate)).toBe(true);
   });
 
   it("collides with the gate's solid parts only", () => {
@@ -129,7 +148,7 @@ describe("pitch glider", () => {
     expect(hasPassed(gate)).toBe(false);
   });
 
-  const conf = gameConfig(2, "easy", "normal", 0.25, 100);
+  const conf = gameConfig(2, "easy", { low: 48, high: 72 }, "normal", 0.25, 100);
   const playing = (over: Partial<GameState> = {}): GameState => ({ ...newGame(), phase: "playing", ...over });
 
   it("scores a gate once when the craft passes through", () => {
