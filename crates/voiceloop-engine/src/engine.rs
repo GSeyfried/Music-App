@@ -448,6 +448,8 @@ struct ControlLoop {
     mic_waiting: MicWaiting,
     /// The input failed to open; do not retry before this.
     mic_retry_at: Option<Instant>,
+    /// The current run of failed opens was reported (retries stay quiet until one succeeds).
+    mic_error_reported: bool,
     /// Keep the mic for a forwarded record command until the looper reports it.
     record_grace_until: Option<Instant>,
     /// A Practice take was refused because the mic was closed: hold it open meanwhile.
@@ -489,6 +491,7 @@ impl ControlLoop {
             mic: MicDemand::default(),
             mic_waiting: MicWaiting::default(),
             mic_retry_at: None,
+            mic_error_reported: false,
             record_grace_until: None,
             practice_grace_until: None,
             last_input: None,
@@ -761,7 +764,9 @@ impl ControlLoop {
             }
             Command::SetInputNeeds(needs, reply) => {
                 self.mic.set_needs(&needs);
-                self.mic_retry_at = None; // a new request may try again at once
+                // A new request may try again at once, and report a failure again.
+                self.mic_retry_at = None;
+                self.mic_error_reported = false;
                 self.update_mic();
                 let _ = reply.send(Ok(self.status()));
             }
@@ -836,7 +841,9 @@ impl ControlLoop {
                 MicAction::Open if self.mic_retry_at.is_none_or(|t| now >= t) => {
                     if let Err(e) = self.open_mic() {
                         self.mic_retry_at = Some(now + mic::RETRY_AFTER);
-                        (self.sink)(EngineEvent::Error(e));
+                        if !std::mem::replace(&mut self.mic_error_reported, true) {
+                            (self.sink)(EngineEvent::Error(e));
+                        }
                     }
                 }
                 MicAction::Close => self.close_mic(),
@@ -900,6 +907,7 @@ impl ControlLoop {
         self.silence_warned = false;
         self.hw.capture_opened();
         self.mic_retry_at = None;
+        self.mic_error_reported = false;
         for warning in warnings {
             (self.sink)(EngineEvent::Warning(warning));
         }

@@ -93,6 +93,13 @@ remain counted diagnostics. The input and output negotiate a shared nominal
 rate; incompatible configurations fail or adjust explicitly rather than
 silently changing musical timing.
 
+The output stream starts on its own; the input stream opens only while
+something needs the microphone (recording, monitoring, calibration, Practice,
+live pitch; `mic.rs`) and is attached to and detached from the running output
+through `looper/input_link.rs` without stopping playback. While detached the
+looper hears silence with no discontinuity; each attach restarts the bridge
+under a new clock-mapping epoch (docs/projects/hardware-io/README.md).
+
 ### Looper timing
 
 - `t` = transport frame, advanced by exactly 1 per output frame while running.

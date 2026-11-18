@@ -24,6 +24,24 @@ Every command rejects with an `EngineError` (`{ kind, message? }`).
 | `startup_warnings` | none | `{ kind, message }[]` | Warnings raised while loading the settings file at app start (`settingsProblem`, `deviceFallback` for saved MIDI ports). **Call once after subscribing to `engine://event`**: they were emitted before the webview listened. Not cleared by reading. |
 | `start_latency_calibration` | `{ apply: boolean }` | `null` | Loopback calibration (output → cable/speaker → input). Needs audio running with the looper output, transport **stopped**, monitoring **off** (else `invalid`); one at a time (`busy`). Plays 8 short chirps at −12 dBFS (~2 s). Result arrives as a `calibration` event ~2.5 s later. With `apply: true` a successful result is sent as `setInputLatency` (and saved). |
 | `looper_command` | `{ command: { type: "setInputLatency", frames } }` | `null` | **Changed:** now accepted while audio is stopped; the value is remembered, re-applied on every start, and saved. |
+| `set_input_needs` | `{ needs: { reasons: InputReason[], holdMs?: number } }` | `EngineStatus` | **Mic only when needed.** Replaces the UI's reasons for the microphone (`alwaysOn`, `pitch`, `practice`, `game`, `meter`; `record`/`monitor`/`calibration` are engine-owned and ignored here). `holdMs` (0..600 000, omitted = unchanged, default 10 000): keep the mic open this long after the last reason ends. Kept across audio stop/start. Also emits `status`. |
+
+**Mic only when needed.** `start_audio` / `start_input` open the **output only**
+(looper, metronome, preview); the input device is queried for the shared rate
+but not opened, so the system mic indicator stays off. The microphone opens
+while any reason exists (UI reasons from `set_input_needs`, plus the engine's
+own: a track armed/recording/overdubbing, monitoring on, a calibration, an
+active Practice take) and closes `holdMs` after the last one ends. Loops keep
+playing across open/close. `record` / `overdub` sent while the mic is closed
+or still starting are accepted and **wait** until input flows (status
+`input.waiting`), then go to the looper; `stopRecording` on that track, `stop`,
+`restart`, `clear`, `clearAll` or `removeTrack` cancel them; after 5 s without input they are
+dropped with an `error` (`permissionOrUnavailable`). `start_latency_calibration`
+waits the same way (a failure arrives as a `calibration` event).
+`practice_start_*` while the mic is not on yet is refused with `busy`
+("the microphone is starting") and opens it; Practice Lab normally holds the
+`practice` reason so the mic is already on. `status.capturing` now means
+"audio is running"; `status.capture` is set only while the mic is open.
 
 PENDING (not implemented yet): `session_inputs`, `select_session_input(uid?)` and `set_session_input_channels(n?)` for iOS input selection and input channel count. See README PENDING for the planned design. Do not call them yet.
 
@@ -38,6 +56,16 @@ Audio is **not** started automatically (microphone permission prompt).
 ## Types
 
 ```ts
+// Mic only when needed (mic.rs)
+type InputReason = "alwaysOn" | "pitch" | "practice" | "game" | "meter" | "record" | "monitor" | "calibration";
+interface InputStatus {          // EngineStatus.input
+  mic: "off" | "opening" | "on"; // opening: open, input not reaching the looper yet
+  reasons: InputReason[];        // all current reasons (UI and engine), sorted
+  holdMs: number;
+  closingInMs: number | null;    // nothing needs the mic: closes in this many ms
+  waiting: number;               // record/overdub/calibration requests waiting for input
+}
+
 export type DeviceDirection = "input" | "output";
 
 export interface ConfigRange {
