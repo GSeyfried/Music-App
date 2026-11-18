@@ -15,6 +15,7 @@ import { displayOctaveShift } from "./geometry";
 import { usePractice, usePracticeStore } from "./PracticeContext";
 import {
   centsTone,
+  pitchLegend,
   cents as fmtCents,
   ms as fmtMs,
   msTone,
@@ -195,6 +196,7 @@ function DifficultyControl() {
 
 function TakeBanner({ reference }: { reference: ReferenceDetail | null }) {
   const status = usePractice((s) => s.status);
+  const legend = pitchLegend(usePractice((s) => s.config.scoring));
   const store = usePracticeStore();
   const elapsedRef = useRef<HTMLSpanElement>(null);
   const posRef = useRef<HTMLSpanElement>(null);
@@ -231,9 +233,9 @@ function TakeBanner({ reference }: { reference: ReferenceDetail | null }) {
       {status.kind === "attempt" && (
         <p className="legend">
           <span className="lg lg-target">Expected note</span>
-          <span className="lg lg-good">Within 10¢</span>
-          <span className="lg lg-close">Within 25¢</span>
-          <span className="lg lg-off">Further off</span>
+          <span className="lg lg-good">{legend.good}</span>
+          <span className="lg lg-close">{legend.close}</span>
+          <span className="lg lg-off">{legend.off}</span>
         </p>
       )}
       {status.useTransport && (
@@ -719,7 +721,7 @@ function NoteTable({ result, detail }: { result: AttemptRecord; detail: Referenc
                 <td>{r.referenceIndex !== null ? r.referenceIndex + 1 : "·"}</td>
                 <td>{r.targetMidi !== null ? noteLabel(r.targetMidi + octaveShift) : "—"}</td>
                 <td>{r.sungMidi !== null ? noteLabel(r.sungMidi) : "—"}</td>
-                <td data-tone={centsTone(r.pitchErrorCents, uncertain)}>
+                <td data-tone={centsTone(r.pitchErrorCents, uncertain, result.report.config)}>
                   {r.status !== "matched" ? "—" : uncertain ? "unclear" : fmtCents(r.pitchErrorCents ?? 0)}
                 </td>
                 <td data-tone={msTone(r.onsetErrorMs)}>{r.onsetErrorMs !== null ? fmtMs(r.onsetErrorMs) : "—"}</td>
@@ -819,9 +821,9 @@ function ResultView({ ready }: { ready: boolean }) {
         )}
         <p className="legend">
           <span className="lg lg-target">Reference note</span>
-          <span className="lg lg-good">Within 10¢</span>
-          <span className="lg lg-close">Within 25¢</span>
-          <span className="lg lg-off">Further off</span>
+          <span className="lg lg-good">{pitchLegend(rep.config).good}</span>
+          <span className="lg lg-close">{pitchLegend(rep.config).close}</span>
+          <span className="lg lg-off">{pitchLegend(rep.config).off}</span>
           <span className="lg lg-unclear">Pitch unclear</span>
         </p>
         <NoteTable result={result} detail={detail} />

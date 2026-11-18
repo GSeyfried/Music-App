@@ -126,3 +126,38 @@ stops after the scale's length) are recorded and scored by the existing engine.
 
 Not feasible: reading scores from PDFs or images (OMR). The main open-source
 engine, Audiveris, is AGPL.
+
+## Live colours vs. the end-of-take report (2026-11-18)
+
+**Pitch: unified.** The live line, the results roll, the note table and both
+legends use one set of bands (`pitchBands` in `src/practice/text.ts`), taken
+from the difficulty's scoring values:
+
+- green: within `notePitchThresholdCents`
+- yellow: up to `wrongNoteCents`
+- red: beyond that, which is exactly what the engine scores as "Wrong note"
+
+Before this, the report used a fixed 10¢ / 25¢ scale, and the live line used
+the threshold and twice the threshold. A note could be green live, yellow in
+the report, and still count as right. The legends now show the current values
+(Medium: "Within 25¢ / Within 50¢ / Wrong note"). The tuner's pitch-curve
+legend (±5¢ / ±15¢ from the nearest semitone) is a separate thing and is
+unchanged.
+
+**Timing: deliberately different.**
+
+- **Live:** the reference is placed once, from the engine's first alignment
+  (the first sung note, or the bar grid with the click), and then stays put.
+- **Report:** `melody::compare` fits your overall offset (and tempo, with
+  Ignore tempo) across all the notes.
+
+So a take that drifts late can show boxes sliding away from the line while you
+sing, yet the report can still score the notes on time against your own
+average. That is the more useful score, so the live view is not forced onto
+it. With the click (both takes on the bar grid) the two agree.
+
+PENDING:
+- With **Ignore key** on, the report allows a transposition, but the live
+  colours still compare against the untransposed reference.
+- Should the live view re-fit its placement after a few notes (a single
+  correction rather than continuous movement)?

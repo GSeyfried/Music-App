@@ -8,7 +8,7 @@ import { EngineStore } from "../engine/store";
 import { layoutRoll, targetsFrom } from "./geometry";
 import { keyText } from "./PracticePanel";
 import { PracticeStore } from "./practiceStore";
-import { centsTone, intervalName, namerFor, phraseFeedback, phraseLimitation, trendText, verdictLabel } from "./text";
+import { centsTone, intervalName, pitchLegend, namerFor, phraseFeedback, phraseLimitation, trendText, verdictLabel } from "./text";
 import type { AttemptReport, Feedback, Limitation, NoteResult, PracticeStatus, PracticeTakeEvent, ReferenceSummary, Take } from "./types";
 
 // ---- fixtures (JSON shapes from docs/projects/practice-lab/INTERFACE.md and the Rust JSON tests) ----
@@ -123,7 +123,14 @@ describe("feedback phrasing", () => {
     expect(verdictLabel({ status: "matched", verdict: "late", uncertain: "lowClarity" })).toBe("Late · pitch unclear");
     expect(centsTone(80, true)).toBe("unknown");
     expect(centsTone(-8, false)).toBe("good");
-    expect(centsTone(20, false)).toBe("close");
+    expect(centsTone(20, false)).toBe("good");
+    expect(centsTone(40, false)).toBe("close");
+    expect(centsTone(60, false)).toBe("off");
+    // Bands follow the difficulty: Hard is 12¢ / 35¢.
+    const hard = { notePitchThresholdCents: 12, wrongNoteCents: 35 };
+    expect(centsTone(20, false, hard)).toBe("close");
+    expect(centsTone(40, false, hard)).toBe("off");
+    expect(pitchLegend(hard)).toEqual({ good: "Within 12¢", close: "Within 35¢", off: "Wrong note" });
   });
 
   it("has text for every feedback and limitation code", () => {

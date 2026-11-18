@@ -1,5 +1,6 @@
 // Layout maths for the results piano roll and the live attempt overlay. Pure.
 
+import { pitchBands, type PitchBandConfig } from "./text";
 import type { AttemptReport, ExpectedNote, NoteResult, Take } from "./types";
 
 export interface RollNote {
@@ -142,12 +143,14 @@ export function foldToOctave(midi: number, target: number): number {
 }
 
 /**
- * Live colour for a sung pitch against the box drawn under it: "good" within the
- * pitch threshold, "close" within twice it, "off" beyond, "none" in a gap.
+ * Live colour for a sung pitch against the box drawn under it, on the same
+ * bands as the results (`pitchBands`): "good" within the note pitch threshold,
+ * "close" up to the wrong-note limit, "off" beyond, "none" in a gap.
  */
-export function liveTone(midi: number, box: TargetBox | null, thresholdCents: number, octaveInvariant: boolean): "good" | "close" | "off" | "none" {
+export function liveTone(midi: number, box: TargetBox | null, cfg: PitchBandConfig, octaveInvariant: boolean): "good" | "close" | "off" | "none" {
   if (!box) return "none";
   const sung = octaveInvariant ? foldToOctave(midi, box.midi) : midi;
   const c = Math.abs((sung - box.midi) * 100);
-  return c <= thresholdCents ? "good" : c <= thresholdCents * 2 ? "close" : "off";
+  const b = pitchBands(cfg);
+  return c <= b.good ? "good" : c <= b.close ? "close" : "off";
 }

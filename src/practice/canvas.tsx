@@ -167,7 +167,7 @@ export function ResultRoll({ report, reference, height = 260 }: { report: Attemp
       if (n.sung) {
         const s = n.sung;
         const uncertain = n.row.uncertain !== null;
-        const tone = n.row.status === "extra" ? "unknown" : centsTone(n.row.pitchErrorCents, uncertain);
+        const tone = n.row.status === "extra" ? "unknown" : centsTone(n.row.pitchErrorCents, uncertain, report.config);
         ctx.fillStyle = n.row.status === "extra" ? theme.onset : toneColour(theme, tone);
         ctx.globalAlpha = uncertain ? 0.3 : 0.75;
         const bx = x(s.startMs);
@@ -297,7 +297,7 @@ export function LiveOverlay({ reference, windowMs = 8000, height = 240 }: { refe
       }
       const p = shown(s.midi, s.elapsedMs);
       if (prev && s.elapsedMs - prev.t <= 80) {
-        const tone = s.clarity < 0.8 || waiting ? "none" : liveTone(s.midi, p.b, scoring.notePitchThresholdCents, scoring.octaveInvariant);
+        const tone = s.clarity < 0.8 || waiting ? "none" : liveTone(s.midi, p.b, scoring, scoring.octaveInvariant);
         ctx.strokeStyle = tone === "none" ? th.pitch : toneColour(th, tone);
         ctx.globalAlpha = s.clarity < 0.8 || p.clamped ? 0.4 : 1;
         ctx.beginPath();

@@ -97,20 +97,22 @@ describe("fit to my range", () => {
 
 import { boxAt, foldToOctave, liveTone } from "./geometry";
 
+const BANDS = { notePitchThresholdCents: 25, wrongNoteCents: 50 };
+
 describe("live colouring", () => {
   const boxes = [
     { referenceIndex: 0, startMs: 0, endMs: 500, midi: 60 },
     { referenceIndex: 1, startMs: 600, endMs: 1000, midi: 62 },
   ];
   it("colours against the box drawn under the point, never in a gap", () => {
-    expect(liveTone(60.05, boxAt(boxes, 100), 25, false)).toBe("good");
-    expect(liveTone(60.4, boxAt(boxes, 100), 25, false)).toBe("close");
-    expect(liveTone(61, boxAt(boxes, 100), 25, false)).toBe("off");
-    expect(liveTone(60, boxAt(boxes, 550), 25, false)).toBe("none");
+    expect(liveTone(60.05, boxAt(boxes, 100), BANDS, false)).toBe("good");
+    expect(liveTone(60.4, boxAt(boxes, 100), BANDS, false)).toBe("close");
+    expect(liveTone(61, boxAt(boxes, 100), BANDS, false)).toBe("off");
+    expect(liveTone(60, boxAt(boxes, 550), BANDS, false)).toBe("none");
   });
   it("folds octaves only when octaves are ignored", () => {
-    expect(liveTone(74, boxAt(boxes, 700), 25, false)).toBe("off");
-    expect(liveTone(74, boxAt(boxes, 700), 25, true)).toBe("good");
+    expect(liveTone(74, boxAt(boxes, 700), BANDS, false)).toBe("off");
+    expect(liveTone(74, boxAt(boxes, 700), BANDS, true)).toBe("good");
     expect(foldToOctave(50, 62)).toBe(62);
   });
 });

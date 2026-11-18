@@ -7,7 +7,7 @@
 //   - Cents and milliseconds are whole numbers (measurement noise is a few units).
 
 import { noteLabel } from "../lib/tuner";
-import type { Feedback, Limitation, NoteResult, Trend, Verdict } from "./types";
+import { DEFAULT_SCORING, type Feedback, type Limitation, type NoteResult, type ScoringConfig, type Trend, type Verdict } from "./types";
 
 /** Name of a reference note by index, e.g. "E4". */
 export type NoteNamer = (referenceIndex: number) => string;
@@ -250,11 +250,31 @@ export function verdictLabel(row: Pick<NoteResult, "verdict" | "uncertain" | "st
   return row.uncertain ? (v === "correct" ? "Pitch unclear" : `${base} · pitch unclear`) : base;
 }
 
+/** The scoring tolerances that set the pitch colours (from the difficulty). */
+export type PitchBandConfig = Pick<ScoringConfig, "notePitchThresholdCents" | "wrongNoteCents">;
+
+/**
+ * Pitch colour bands shared by the live line, the results roll, the note table
+ * and their legends: green within the note pitch threshold, yellow up to the
+ * engine's wrong-note limit, red beyond it (exactly the notes scored "Wrong note").
+ */
+export function pitchBands(cfg: PitchBandConfig): { good: number; close: number } {
+  const good = Math.max(0, cfg.notePitchThresholdCents);
+  return { good, close: Math.max(good, cfg.wrongNoteCents) };
+}
+
 /** Colour class for a pitch error in cents (null = not measured). */
-export function centsTone(c: number | null, uncertain: boolean): "good" | "close" | "off" | "unknown" {
+export function centsTone(c: number | null, uncertain: boolean, cfg: PitchBandConfig = DEFAULT_SCORING): "good" | "close" | "off" | "unknown" {
   if (c === null || uncertain) return "unknown";
   const a = Math.abs(Math.round(c));
-  return a <= 10 ? "good" : a <= 25 ? "close" : "off";
+  const b = pitchBands(cfg);
+  return a <= b.good ? "good" : a <= b.close ? "close" : "off";
+}
+
+/** Legend labels for the three pitch colours. */
+export function pitchLegend(cfg: PitchBandConfig): { good: string; close: string; off: string } {
+  const b = pitchBands(cfg);
+  return { good: `Within ${Math.round(b.good)}¢`, close: `Within ${Math.round(b.close)}¢`, off: "Wrong note" };
 }
 
 export function msTone(v: number | null): "good" | "close" | "off" | "unknown" {
