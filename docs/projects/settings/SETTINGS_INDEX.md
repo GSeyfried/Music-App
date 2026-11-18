@@ -21,6 +21,10 @@ Scopes: app / project / track / session.
 | `audio.monitor` | Monitoring | Whether, and how loudly, you hear your input live. | (see `MonitorConfig`) | app | Settings › Monitoring | exists |
 | `audio.inputLatencyFrames` | Latency compensation | Shifts recordings to line up with what you heard. Set by calibration. | None | app | Settings › Latency & calibration | exists |
 | `midi.inputs` | MIDI inputs | MIDI devices to open at startup. | None | app | Settings › MIDI input | exists |
+| `audio.micMode` | Microphone | Only when needed: the microphone opens for recording, the tuner, live pitch, Practice Lab and games, and closes again afterwards, so the system mic indicator stays off while you only listen. Always on: it stays open while audio runs. | Only when needed | app | Preferences › Audio input; top-bar mic indicator (`MicIndicator`); `src/engine/micNeeds.ts` | wired |
+| `audio.micIdleCloseSeconds` | Close the mic after | Seconds the microphone stays open after the last thing that needed it ends (ready again at once). 0 closes it immediately. Sent to the engine as `holdMs` (`set_input_needs`); engine default `mic::DEFAULT_HOLD_MS`. | 10 s | app | Preferences › Audio input (advanced) | wired |
+| (engine) `mic::START_TIMEOUT` | Mic start timeout | A record, overdub or calibration waiting for the microphone is cancelled (with an error) if input is not flowing after this long. Not user-facing. | 5 s | app | `crates/voiceloop-engine/src/mic.rs` | internal |
+| (engine) `mic::RETRY_AFTER` | Mic retry delay | After the microphone failed to open, wait this long before trying again. Not user-facing. | 3 s | app | `crates/voiceloop-engine/src/mic.rs` | internal |
 
 ## Transport and metronome (exists: `transport.rs`)
 

@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { useEngineActions, useEngineState } from "../engine/EngineContext";
+import { describeMic } from "../engine/micNeeds";
 import { deviceLabel } from "../lib/hardware";
 import { Icon } from "./ui/Icon";
 import { Button } from "./ui/controls";
@@ -138,6 +139,19 @@ export function StartCard({ purpose }: { purpose: string }) {
   );
 }
 
+/** Microphone state ("mic only when needed"): off, starting, or on, with why. */
+export function MicIndicator() {
+  const capturing = useEngineState((s) => s.status.capturing);
+  const input = useEngineState((s) => s.status.input);
+  const mic = describeMic(input, capturing);
+  return (
+    <span className="mic-indicator" data-state={mic.state} role="status" title={mic.detail} aria-label={`${mic.label}. ${mic.detail}`}>
+      <Icon name="mic" size={14} />
+      <span>{mic.label}</span>
+    </span>
+  );
+}
+
 /** Compact cluster for the top bar. */
 export function InputCluster() {
   const status = useEngineState((s) => s.status);
@@ -155,6 +169,7 @@ export function InputCluster() {
           <span className="input-name" title={name}>
             {name}
           </span>
+          <MicIndicator />
           <LevelMeter compact />
         </div>
       )}
