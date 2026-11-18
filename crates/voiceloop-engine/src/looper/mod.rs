@@ -98,9 +98,12 @@ impl Default for LooperConfig {
             max_tracks: 2,
             track_capacity: MAX_TRACKS,
             max_loop_seconds: 30.0,
-            pool_layers: 8,
-            max_layers_per_track: 6,
-            memory_limit_bytes: 256 * 1024 * 1024,
+            // 32 × 30 s mono f32 ≈ 184 MB at 48 kHz (≈ 368 MB at 96 kHz). Buffers
+            // are sized to `max_loop_seconds`, not the actual loop: see
+            // docs/projects/looper-01/README.md "Layer memory" (PENDING).
+            pool_layers: 32,
+            max_layers_per_track: 16,
+            memory_limit_bytes: 512 * 1024 * 1024,
             fade_frames: 64,
             gain_smoothing_frames: 256,
             capture_tail_ms: 100,

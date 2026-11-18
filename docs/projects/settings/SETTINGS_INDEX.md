@@ -106,3 +106,12 @@ tuning; only the first few are likely user-facing.
 | `view.playheadEmphasis` | Playhead highlight | Brighten and enlarge the part of the loop being played. | on | app | Track card ring | exists |
 | `view.timingReadout` | Timing readout | After each take, show how far your hits landed from the beat. | on | app | Track card | proposed |
 | `notation.gridSubdivision` | Notation grid | How finely sung timing is rounded for the staff: steps per beat. 4 rounds to sixteenth notes in 4/4; 2 to eighths (cleaner but less exact). | 4 | app | Staff view | exists |
+
+## Looper limits (exists: `LooperConfig`, engine; set via `set_looper_config`, applied at next audio start)
+
+| ID | Label | Description | Default | Scope | Connected element | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `looper.poolLayers` | Layer memory | How many loop layers all tracks can hold together. Each layer reserves memory for the longest loop. | 32 | app | "Loop memory" in diagnostics; layer-limit notice | exists (not in UI) |
+| `looper.maxLayersPerTrack` | Layers per track | The most layers (base take plus overdubs) one track can hold. | 16 | app | Track layer count | exists (not in UI) |
+| `looper.maxLoopSeconds` | Longest loop | The longest loop you can record. Longer loops use more memory per layer. | 30 s | app | (none) | exists (not in UI) |
+| `looper.memoryLimitBytes` | Memory guard | Refuses layer settings that would reserve more than this. | 512 MB | app | Start-audio error | exists (not in UI) |

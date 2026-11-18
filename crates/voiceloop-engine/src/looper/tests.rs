@@ -225,7 +225,9 @@ fn undo_trims_by_layer_count_and_redo_reemits_identical_summary() {
 fn config_enforces_memory_and_count_limits() {
     let ok = LooperConfig::default();
     assert_eq!(ok.max_loop_frames(48_000).unwrap(), 30 * 48_000);
-    assert_eq!(ok.memory_bytes(48_000), 30 * 48_000 * 8 * 4);
+    assert_eq!(ok.memory_bytes(48_000), 30 * 48_000 * 32 * 4);
+    // The default pool also fits at 96 kHz.
+    assert!(ok.max_loop_frames(96_000).is_ok());
 
     let tiny_limit = LooperConfig { memory_limit_bytes: 1024, ..ok };
     assert!(matches!(tiny_limit.max_loop_frames(48_000), Err(EngineError::ResourceLimit(_))));

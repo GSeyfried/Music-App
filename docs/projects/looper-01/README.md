@@ -79,3 +79,26 @@ Record results here:
 - No redo, no per-track loop multiples, no persistence to disk yet.
 - Metronome-mode Record waits for the next loop boundary (D-014).
 - Free first take: transport/loop start at the moment Record is pressed (no pre-roll).
+
+## Layer memory (2026-11-17)
+
+Every layer is a buffer from one pool shared by all tracks, allocated and zeroed
+when audio starts. Each buffer holds `max_loop_seconds` (30 s) of mono f32
+whatever the loop's real length: about 5.8 MB at 48 kHz. The default pool was 8
+buffers, so a session ran out at 8 layers in total ("Loop memory was full").
+
+Now: `pool_layers` 32, `max_layers_per_track` 16, `memory_limit_bytes` 512 MB
+(32 layers ≈ 184 MB at 48 kHz, ≈ 368 MB at 96 kHz). The memory limit is a guard
+against bad configurations, not a measure of the machine (this Mac has 8 GB).
+The realtime ceiling is `MAX_POOL_LAYERS` = 64 layers summed per sample.
+
+PENDING (the real fix):
+- Size layers to the actual loop. After the first take sets the loop length,
+  later layers only need that many frames. An 8 s loop at 48 kHz is ~1.5 MB per
+  layer, so 64 layers would be ~100 MB. Needs a frame arena (carve
+  loop-length slices from one preallocated block) instead of fixed buffers.
+- Bounce/flatten: merge old overdubs into one layer to free buffers (loses
+  per-layer undo for them).
+- Spill to disk for very long sessions; compression is not needed in RAM.
+- Scale the memory limit from installed memory (desktop vs. iOS Pocket, which
+  has far less).
