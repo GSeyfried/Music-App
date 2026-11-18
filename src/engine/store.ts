@@ -14,6 +14,7 @@ import type { PracticeProgress, PracticeStatus, PracticeTakeEvent } from "../pra
 import type { TransportKind } from "./client";
 import {
   IDLE_STATUS,
+  normalizeLooperState,
   type AnalysisConfig,
   type AudioDiagnostics,
   type AudioSettings,
@@ -224,7 +225,8 @@ function looperView(s: LooperState): LooperView {
   return {
     run: s.run,
     transport: { ...s.transport, position: 0 },
-    tracks: s.tracks,
+    // loopPhase moves every tick; the live phase is in `live.looper`.
+    tracks: s.tracks.map((t) => (t.loopPhase === 0 ? t : { ...t, loopPhase: 0 })),
     loopPeriodFrames: s.loopPeriodFrames,
     latencyFrames: s.latencyFrames,
     sampleRate: s.sampleRate,
@@ -352,12 +354,13 @@ export class EngineStore {
         this.set({ chord: event.payload });
         return;
       case "looper": {
-        live.looper = event.payload;
+        const state = normalizeLooperState(event.payload);
+        live.looper = state;
         live.looperAt = now;
-        const view = looperView(event.payload);
+        const view = looperView(state);
         const key = JSON.stringify(view);
-        const layerSummaries = this.trimLayerSummaries(event.payload.tracks);
-        const layerTimings = this.trimLayerTimings(event.payload.tracks);
+        const layerSummaries = this.trimLayerSummaries(state.tracks);
+        const layerTimings = this.trimLayerTimings(state.tracks);
         if (key !== this.looperKey || layerSummaries !== this.snapshot.layerSummaries || layerTimings !== this.snapshot.layerTimings) {
           this.looperKey = key;
           this.set({ looper: view, layerSummaries, layerTimings });

@@ -6,7 +6,14 @@
 // The looper rules are a simplified re-statement of
 // crates/voiceloop-engine/src/looper/processor.rs (not a port of its DSP).
 
-import { defaultTransport, type AudioDevice, type TransportState } from "../models/domain";
+import {
+  DEFAULT_TRACK_LOOP,
+  LOOP_RATIOS,
+  defaultTransport,
+  type AudioDevice,
+  type TrackLoop,
+  type TransportState,
+} from "../models/domain";
 import { DEFAULT_AUDIO_CONFIG, LAYER_SUMMARY_BINS } from "./protocol";
 import { MockPractice } from "../practice/mockPractice";
 import type { OpKind, OpResult, ProjectInfo, ProjectRequest } from "../project/types";
@@ -131,6 +138,8 @@ export const MOCK_TRACK_CAPACITY = 16;
 const MAX_LAYERS_PER_TRACK = 6;
 const MAX_LOOP_SECONDS = 30;
 const TICK_MS = 33;
+/** DuplicateTrack copy speed in loop frames per audio frame (the engine copies CHUNK_FRAMES per callback). */
+const COPY_SPEED = 16;
 const HOP_SECONDS = 0.01;
 /** Pitch frames lag the input by the analysis window + hop (about 45 ms). */
 const ANALYSIS_LATENCY_SECONDS = 0.045;
@@ -151,6 +160,11 @@ interface MockTrack {
   playing: boolean;
   gain: number;
   rec: Recording | null;
+  loop: TrackLoop;
+  /** Own clock for Bars / Multiple / Free tracks; song tracks use the shared song clock. */
+  clock: { period: number; origin: number } | null;
+  /** DuplicateTrack: frames still to copy; the track reports `busy` until zero. */
+  copyFramesLeft: number;
 }
 
 /** [MIDI note or null for a rest, seconds]. Null with "noise" = unpitched breath. */
@@ -236,6 +250,18 @@ export function validateTransport(t: TransportState): string | null {
   return null;
 }
 
+/** Mirrors the engine's SetTrackLoop validation (invalid settings fail the call itself). */
+export function validateTrackLoop(l: TrackLoop): string | null {
+  if (!["song", "bars", "multiple", "free"].includes(l.mode)) return "unknown loop mode";
+  if (!(LOOP_RATIOS as readonly number[]).includes(l.ratio)) return `ratio must be one of ${LOOP_RATIOS.join(", ")}`;
+  if (!(Number.isInteger(l.bars) && Number.isInteger(l.beats) && l.bars >= 0 && l.beats >= 0)) {
+    return "bars and beats must be whole numbers";
+  }
+  if (l.bars + l.beats < 1 || l.bars > 256 || l.beats > 64) return "loop length must be at least one beat and at most 256 bars";
+  if (!(Number.isInteger(l.countInBars) && l.countInBars >= 0 && l.countInBars <= 8)) return "count-in must be 0-8 bars";
+  return null;
+}
+
 export function musicalPosition(t: TransportState, frame: number): MusicalPosition {
   const subsPerBeat = Math.max(1, t.metronome.subdivision);
   const perBar = t.timeSignature.numerator;
@@ -311,6 +337,8 @@ export class MockEngine implements EngineTransport {
   private origin = 0;
   private countInLeft = 0;
   private period: number | null = null;
+  /** Multiple mode: the base loop the first Multiple take set. */
+  private base: { period: number; origin: number } | null = null;
   private transport: TransportState;
   private tracks: MockTrack[];
   private free = POOL_LAYERS;
@@ -925,15 +953,36 @@ export class MockEngine implements EngineTransport {
       const problem = validateTransport(merged);
       if (problem) throw { kind: "invalid", message: problem } satisfies EngineError;
     }
+    if (cmd.type === "setTrackLoop") {
+      const problem = validateTrackLoop(cmd.settings);
+      if (problem) throw { kind: "invalid", message: problem } satisfies EngineError;
+    }
     const rejected = this.apply(cmd);
     if (rejected) this.notice({ kind: "rejected", reason: rejected });
     this.emit({ type: "looper", payload: this.looperState() });
   }
 
   // ---- Looper state machine ------------------------------------------------------
+  //
+  // Per-track loops (PER_TRACK_LOOPS.md): a "song" track follows the shared
+  // song clock (`period` / `origin`), exactly as before. Bars, Multiple and
+  // Free tracks keep their own clock; Multiple tracks share `base`.
 
-  private emptyTrack(): MockTrack {
-    return { layers: 0, redo: 0, offsets: [], redoOffsets: [], muted: false, solo: false, playing: true, gain: 1, rec: null };
+  private emptyTrack(loop: TrackLoop = DEFAULT_TRACK_LOOP): MockTrack {
+    return {
+      layers: 0,
+      redo: 0,
+      offsets: [],
+      redoOffsets: [],
+      muted: false,
+      solo: false,
+      playing: true,
+      gain: 1,
+      rec: null,
+      loop: { ...loop },
+      clock: null,
+      copyFramesLeft: 0,
+    };
   }
 
   private resetLooper(): void {
@@ -942,7 +991,8 @@ export class MockEngine implements EngineTransport {
     this.origin = 0;
     this.countInLeft = 0;
     this.free = POOL_LAYERS;
-    this.tracks = this.tracks.map(() => this.emptyTrack());
+    this.tracks = this.tracks.map((tr) => this.emptyTrack(tr.loop));
+    this.base = null;
     this.period = this.transport.mode === "synced" ? this.syncedPeriod(this.transport) : null;
   }
 
@@ -972,15 +1022,65 @@ export class MockEngine implements EngineTransport {
   private syncedPeriod(t: TransportState): number {
     return (t.loopLength.bars * t.timeSignature.numerator + t.loopLength.beats) * this.framesPerBeat(t);
   }
+  private barsPeriod(loop: TrackLoop): number {
+    return Math.round((loop.bars * this.transport.timeSignature.numerator + loop.beats) * this.framesPerBeat());
+  }
+  private isSong(tr: MockTrack): boolean {
+    return tr.loop.mode === "song";
+  }
   private hasContent(): boolean {
     return this.tracks.some((tr) => tr.layers > 0);
   }
   private anyRecording(): boolean {
     return this.tracks.some((tr) => tr.rec);
   }
+  /** Song-clock tracks only: they decide whether the shared Free-mode period exists. */
+  private songHasContent(): boolean {
+    return this.tracks.some((tr) => this.isSong(tr) && (tr.layers > 0 || tr.rec));
+  }
   private nextBarAtOrAfter(frame: number): number {
     const step = this.framesPerBar();
-    return Math.round(Math.ceil(frame / step - 1e-9) * step);
+    return Math.round(Math.ceil(frame / step - 1e-9) * step) + 0; // + 0: never -0
+  }
+  private nextCycleAtOrAfter(frame: number, origin: number, period: number): number {
+    return origin + Math.round(Math.ceil((frame - origin) / period - 1e-9) * period) + 0;
+  }
+  private tooLong(period: number): boolean {
+    return period > MAX_LOOP_SECONDS * this.sampleRate;
+  }
+
+  /** The track's own clock period (song tracks: the song loop). */
+  private trackPeriod(tr: MockTrack): number | null {
+    switch (tr.loop.mode) {
+      case "song":
+        return this.period;
+      case "bars":
+        return tr.clock?.period ?? this.barsPeriod(tr.loop);
+      case "multiple":
+        return tr.clock?.period ?? (this.base ? Math.round(this.base.period * tr.loop.ratio) : null);
+      case "free":
+        return tr.clock?.period ?? null;
+    }
+  }
+  private trackOrigin(tr: MockTrack): number {
+    if (this.isSong(tr)) return this.origin;
+    return tr.clock?.origin ?? (tr.loop.mode === "multiple" ? (this.base?.origin ?? 0) : 0);
+  }
+
+  /** Start the transport for a recording on a non-song track, with that track's count-in. */
+  private startFor(tr: MockTrack): void {
+    if (this.run === "paused") {
+      this.run = "running";
+      return;
+    }
+    if (this.run !== "stopped") return;
+    const countIn = Math.round(tr.loop.countInBars * this.framesPerBar());
+    if (countIn > 0) {
+      this.run = "countIn";
+      this.countInLeft = countIn;
+    } else {
+      this.run = "running";
+    }
   }
 
   private apply(cmd: LooperCommand): RejectReason | null {
@@ -1038,14 +1138,14 @@ export class MockEngine implements EngineTransport {
         tr.gain = Number.isFinite(cmd.gain) ? Math.min(2, Math.max(0, cmd.gain)) : 1;
         return null;
       case "undo":
-        if (tr.rec) return "trackBusy";
+        if (tr.rec || tr.copyFramesLeft > 0) return "trackBusy";
         if (tr.layers < 2) return "nothingToUndo";
         tr.layers -= 1;
         tr.redo += 1; // the buffer stays reserved for Redo, so `free` does not change
         tr.redoOffsets.push(tr.offsets.pop() ?? 0);
         return null;
       case "redo":
-        if (tr.rec) return "trackBusy";
+        if (tr.rec || tr.copyFramesLeft > 0) return "trackBusy";
         if (tr.layers >= MAX_LAYERS_PER_TRACK) return "layerLimit";
         if (tr.redo === 0) return "nothingToRedo";
         tr.redo -= 1;
@@ -1055,15 +1155,16 @@ export class MockEngine implements EngineTransport {
         return null;
       case "nudgeLayer": {
         if (cmd.layer < 0 || cmd.layer >= tr.layers) return "trackEmpty";
-        const half = Math.floor((this.period ?? 0) / 2);
+        const half = Math.floor((this.trackPeriod(tr) ?? 0) / 2);
         tr.offsets[cmd.layer] = Math.max(-half, Math.min(half, (tr.offsets[cmd.layer] ?? 0) + Math.round(cmd.frames)));
         return null;
       }
       case "clear":
+        if (tr.copyFramesLeft > 0) return "trackBusy";
         this.clear(cmd.track);
         return null;
       case "removeTrack":
-        if (tr.rec) return "trackBusy";
+        if (tr.rec || tr.copyFramesLeft > 0) return "trackBusy";
         if (this.tracks.length === 1) return "trackLimit";
         this.clear(cmd.track);
         this.tracks.splice(cmd.track, 1);
@@ -1071,12 +1172,69 @@ export class MockEngine implements EngineTransport {
           for (let layer = 0; layer < shifted.layers; layer += 1) this.emitLayerSummary(cmd.track + track, layer);
         });
         return null;
+      case "setTrackLoop":
+        return this.setTrackLoop(tr, cmd.settings);
+      case "duplicateTrack":
+        return this.duplicateTrack(cmd.track);
     }
+  }
+
+  private setTrackLoop(tr: MockTrack, next: TrackLoop): RejectReason | null {
+    if (tr.copyFramesLeft > 0) return "trackBusy";
+    const settings = { ...next };
+    if (tr.layers === 0 && !tr.rec) {
+      // An empty track accepts any settings.
+      tr.loop = settings;
+      tr.clock = null;
+      return null;
+    }
+    const old = tr.loop;
+    if (settings.mode !== old.mode) return "trackNotEmpty";
+    const lengthChanged = settings.bars !== old.bars || settings.beats !== old.beats || settings.ratio !== old.ratio;
+    if (lengthChanged) {
+      if (tr.rec) return "trackBusy";
+      if (this.run !== "stopped") return "transportLocked";
+      // Stopped: only how the loop repeats changes, never its samples (LOOP_EDITING.md).
+      let period: number | null = null;
+      if (settings.mode === "bars") period = this.barsPeriod(settings);
+      else if (settings.mode === "multiple" && this.base) period = Math.round(this.base.period * settings.ratio);
+      if (period !== null) {
+        if (this.tooLong(period)) return "loopTooLong";
+        tr.clock = { period, origin: tr.clock?.origin ?? 0 };
+      }
+    }
+    tr.loop = settings;
+    return null;
+  }
+
+  private duplicateTrack(index: number): RejectReason | null {
+    const tr = this.tracks[index];
+    if (tr.rec || tr.copyFramesLeft > 0) return "trackBusy";
+    if (this.tracks.length >= this.trackCapacity) return "trackLimit";
+    if (tr.layers > this.free) return "poolExhausted";
+    this.free -= tr.layers;
+    const period = this.trackPeriod(tr) ?? 0;
+    const copy: MockTrack = {
+      ...this.emptyTrack(tr.loop),
+      layers: tr.layers,
+      offsets: [...tr.offsets],
+      muted: tr.muted,
+      playing: tr.playing,
+      gain: tr.gain,
+      clock: tr.clock ? { ...tr.clock } : null,
+      // The engine copies at most CHUNK_FRAMES per callback; the copy reports busy until done.
+      copyFramesLeft: tr.layers * period,
+    };
+    this.tracks.splice(index + 1, 0, copy);
+    this.tracks.slice(index + 1).forEach((shifted, k) => {
+      for (let layer = 0; layer < shifted.layers; layer += 1) this.emitLayerSummary(index + 1 + k, layer);
+    });
+    return null;
   }
 
   private setTransport(next: TransportState): RejectReason | null {
     if (validateTransport(next)) return "invalidTransport";
-    if (next.mode === "synced" && this.syncedPeriod(next) > MAX_LOOP_SECONDS * this.sampleRate) return "loopTooLong";
+    if (next.mode === "synced" && this.tooLong(this.syncedPeriod(next))) return "loopTooLong";
     const old = this.transport;
     const modeChanged = next.mode !== old.mode;
     const clockGridChanged =
@@ -1125,6 +1283,19 @@ export class MockEngine implements EngineTransport {
     this.t = 0;
     this.origin = 0;
     this.countInLeft = 0;
+    // Every track, Free ones included, goes back to its own start.
+    for (const tr of this.tracks) if (tr.clock) tr.clock.origin = 0;
+    if (this.base) this.base.origin = 0;
+  }
+
+  /** After a track empties: drop its clock, and the Multiple base once no Multiple track has content. */
+  private releaseClock(tr: MockTrack): void {
+    if (this.isSong(tr)) {
+      if (this.transport.mode === "free" && !this.songHasContent()) this.period = null;
+      return;
+    }
+    if (tr.layers === 0 && !tr.rec) tr.clock = null;
+    if (!this.tracks.some((x) => x.loop.mode === "multiple" && (x.layers > 0 || x.rec))) this.base = null;
   }
 
   private discard(tr: MockTrack): void {
@@ -1132,7 +1303,15 @@ export class MockEngine implements EngineTransport {
     tr.layers = Math.max(0, tr.layers - 1);
     tr.offsets.pop();
     this.free += 1;
-    if (this.transport.mode === "free" && !this.hasContent() && !this.anyRecording()) this.period = null;
+    this.releaseClock(tr);
+  }
+
+  private fitLength(length: number, fit: TrackLoop["loopFit"]): number {
+    if (fit === "exact") return length;
+    const beat = this.framesPerBeat();
+    const beats = length / beat;
+    const whole = fit === "roundDown" ? Math.floor(beats) : fit === "roundUp" ? Math.ceil(beats) : Math.round(beats);
+    return Math.max(1, Math.round(whole * beat));
   }
 
   private finishFirstTake(tr: MockTrack): void {
@@ -1145,27 +1324,19 @@ export class MockEngine implements EngineTransport {
       return;
     }
     tr.rec = null;
-    const beat = this.framesPerBeat();
-    const beats = length / beat;
-    this.period =
-      this.transport.loopFit === "exact"
-        ? length
-        : Math.max(
-            1,
-            Math.round(
-              (this.transport.loopFit === "roundDown"
-                ? Math.floor(beats)
-                : this.transport.loopFit === "roundUp"
-                  ? Math.ceil(beats)
-                  : Math.round(beats)) * beat,
-            ),
-          );
-    this.origin = rec.start;
+    if (this.isSong(tr)) {
+      this.period = this.fitLength(length, this.transport.loopFit);
+      this.origin = rec.start;
+    } else {
+      const period = this.fitLength(length, tr.loop.loopFit);
+      tr.clock = { period, origin: rec.start };
+      if (tr.loop.mode === "multiple") this.base = { period: period / tr.loop.ratio, origin: rec.start };
+    }
     this.emitLayerSummary(this.tracks.indexOf(tr), tr.layers - 1);
   }
 
   private canAddLayer(tr: MockTrack): RejectReason | null {
-    if (tr.rec) return "trackBusy";
+    if (tr.rec || tr.copyFramesLeft > 0) return "trackBusy";
     if (tr.layers >= MAX_LAYERS_PER_TRACK) return "layerLimit";
     if (this.free === 0) {
       // Redo history is the only reclaimable memory; the retry then succeeds.
@@ -1194,8 +1365,10 @@ export class MockEngine implements EngineTransport {
     const blocked = this.canAddLayer(tr);
     if (blocked) return blocked;
     if (tr.layers > 0) return "trackNotEmpty";
+    if (!this.isSong(tr)) return this.recordOwnClock(tr);
     if (this.transport.mode === "free") {
-      if (this.period === null && this.anyRecording()) return "trackBusy";
+      const songFirstTake = this.tracks.some((x) => this.isSong(x) && x.rec?.kind === "firstTake");
+      if (this.period === null && songFirstTake) return "trackBusy";
       if (this.run === "stopped" || this.run === "paused") this.run = "running";
       if (this.period === null) this.begin(tr, { kind: "firstTake", start: this.t, end: null });
       else this.begin(tr, { kind: "newLoop", start: this.t, end: this.t + Math.round(this.period) });
@@ -1213,21 +1386,54 @@ export class MockEngine implements EngineTransport {
     return null;
   }
 
+  /** First take on a Bars, Multiple or Free track. */
+  private recordOwnClock(tr: MockTrack): RejectReason | null {
+    const mode = tr.loop.mode;
+    if (mode === "bars") {
+      const period = this.barsPeriod(tr.loop);
+      if (this.tooLong(period)) return "loopTooLong";
+      this.startFor(tr);
+      const start = this.nextBarAtOrAfter(this.t);
+      tr.clock = { period, origin: start };
+      this.begin(tr, { kind: "newLoop", start, end: start + period });
+      return null;
+    }
+    if (mode === "multiple" && this.base) {
+      const period = Math.round(this.base.period * tr.loop.ratio);
+      if (this.tooLong(period)) return "loopTooLong";
+      this.startFor(tr);
+      const start = this.nextCycleAtOrAfter(this.t, this.base.origin, this.base.period);
+      tr.clock = { period, origin: start };
+      this.begin(tr, { kind: "newLoop", start, end: start + period });
+      return null;
+    }
+    // Free, or the first Multiple take (it sets the base): the take is the length.
+    const otherSettingBase = this.tracks.some(
+      (x) => x !== tr && x.loop.mode === "multiple" && x.rec?.kind === "firstTake",
+    );
+    if (mode === "multiple" && otherSettingBase) return "trackBusy";
+    this.startFor(tr);
+    this.begin(tr, { kind: "firstTake", start: this.t, end: null });
+    return null;
+  }
+
   private overdub(tr: MockTrack): RejectReason | null {
     const blocked = this.canAddLayer(tr);
     if (blocked) return blocked;
-    if (tr.layers === 0 || this.period === null) return "trackEmpty";
-    if (this.transport.mode === "free") {
+    const period = this.trackPeriod(tr);
+    if (tr.layers === 0 || period === null) return "trackEmpty";
+    const song = this.isSong(tr);
+    if (!song) this.startFor(tr);
+    else if (this.transport.mode === "free") {
       if (this.run === "stopped" || this.run === "paused") this.run = "running";
     } else if (this.run === "stopped" || this.run === "paused") {
       this.play();
     }
     let start: number;
-    const when = this.transport.overdubStart;
+    const when = song ? this.transport.overdubStart : tr.loop.overdubStart;
     if (when === "loopStart") {
-      const cycles = Math.ceil((this.t - this.origin) / this.period - 1e-9);
-      start = this.origin + Math.round(cycles * this.period);
-    } else if (when === "nextBar" || this.transport.mode === "synced") {
+      start = this.nextCycleAtOrAfter(this.t, this.trackOrigin(tr), period);
+    } else if (when === "nextBar" || (song && this.transport.mode === "synced")) {
       start = this.nextBarAtOrAfter(this.t);
     } else {
       start = this.t;
@@ -1247,7 +1453,8 @@ export class MockEngine implements EngineTransport {
       this.finishFirstTake(tr);
       return null;
     }
-    const requested = this.transport.mode === "free" ? this.t + 64 : this.nextBarAtOrAfter(this.t);
+    const onBars = this.isSong(tr) ? this.transport.mode !== "free" : tr.loop.mode === "bars";
+    const requested = onBars ? this.nextBarAtOrAfter(this.t) : this.t + 64;
     rec.end = rec.end === null ? requested : Math.min(rec.end, requested);
     return null;
   }
@@ -1261,7 +1468,8 @@ export class MockEngine implements EngineTransport {
     tr.redoOffsets = [];
     tr.rec = null;
     tr.playing = true;
-    if (this.transport.mode === "free" && !this.hasContent() && !this.anyRecording()) this.period = null;
+    tr.copyFramesLeft = 0;
+    this.releaseClock(tr);
   }
 
   /** Browser-only stand-in: deterministic 128-bin musical-looking envelopes. */
@@ -1274,8 +1482,10 @@ export class MockEngine implements EngineTransport {
       return Math.min(1, body + accents + layer * 0.05);
     });
     this.emit({ type: "layerSummary", payload: { track, layer, bins } });
-    if (this.period !== null) {
-      const beats = this.period / this.framesPerBeat();
+    const tr = this.tracks[track];
+    const period = tr ? this.trackPeriod(tr) : this.period;
+    if (period !== null) {
+      const beats = period / this.framesPerBeat();
       if (Math.abs(beats - Math.round(beats)) < 1e-6) {
         const medianOffsetMs = ((track + layer) % 2 === 0 ? 12 : -7) + layer * 2;
         const suggestedNudgeFrames = Math.round((-medianOffsetMs * this.sampleRate) / 1_000);
@@ -1297,6 +1507,10 @@ export class MockEngine implements EngineTransport {
   }
 
   private advanceLooper(frames: number): void {
+    // DuplicateTrack copies run while stopped too (the engine copies in every callback).
+    for (const tr of this.tracks) {
+      if (tr.copyFramesLeft > 0) tr.copyFramesLeft = Math.max(0, tr.copyFramesLeft - frames * COPY_SPEED);
+    }
     if (this.run === "countIn") {
       this.countInLeft -= frames;
       if (this.countInLeft > 0) return;
@@ -1325,6 +1539,12 @@ export class MockEngine implements EngineTransport {
     else if (tr.rec) state = tr.rec.kind === "overdub" ? "overdubbing" : "recording";
     else if (tr.layers === 0) state = "empty";
     else state = tr.playing && this.run === "running" ? "playing" : "stopped";
+    const loopPeriod = this.trackPeriod(tr);
+    let loopPhase = 0;
+    if (loopPeriod !== null && loopPeriod > 0) {
+      const rel = this.t - this.trackOrigin(tr);
+      loopPhase = Math.max(0, Math.round(rel - Math.floor(rel / loopPeriod) * loopPeriod));
+    }
     return {
       state,
       layers: tr.layers,
@@ -1336,6 +1556,10 @@ export class MockEngine implements EngineTransport {
       recordStart: tr.rec ? tr.rec.start : null,
       recordEnd: tr.rec ? tr.rec.end : null,
       layerOffsets: [...tr.offsets],
+      loop: { ...tr.loop },
+      loopPeriod,
+      loopPhase,
+      busy: tr.copyFramesLeft > 0,
     };
   }
 

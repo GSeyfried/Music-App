@@ -1257,6 +1257,35 @@ input[type="range"] {
   color: var(--text-dim);
 }
 
+/* Song settings and the selected track's loop settings (PER_TRACK_LOOPS.md). */
+.transport-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+.transport-group-track {
+  padding-left: var(--s-3);
+  border-left: 2px solid var(--tc, var(--border));
+}
+
+.transport-group-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.transport-group-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+
 .lock-note {
   margin: 0;
   display: flex;

@@ -2,7 +2,9 @@
 // (commands), and the actions that tie them together.
 
 import { createContext, useContext, useEffect, useMemo, useSyncExternalStore, type ReactNode } from "react";
-import type { TransportState } from "../models/domain";
+import { DEFAULT_TRACK_LOOP, type TrackLoop, type TransportState } from "../models/domain";
+import { getAppSetting } from "../settings/appSettings";
+import { sameTrackLoop, trackLoopDefaults } from "../settings/registry";
 import { engine as defaultEngine } from "./bridge";
 import type { EngineClient } from "./client";
 import {
@@ -29,6 +31,8 @@ export interface EngineActions {
   sendLooper(command: LooperCommand): void;
   /** Merge a change into the current transport and send it. */
   patchTransport(patch: Partial<TransportState>): void;
+  /** Merge a change into one track's loop settings and send them (`setTrackLoop`). */
+  patchTrackLoop(track: number, patch: Partial<TrackLoop>): void;
   /** Merge into the last applied analysis config and send the result. */
   setAnalysisConfig(patch: AnalysisConfig): Promise<void>;
   /** Choose which device input channel(s) the engine records (live, no restart). */
@@ -122,6 +126,11 @@ export function createActions(client: EngineClient, store: EngineStore): EngineA
       if (!current) return;
       sendLooper({ type: "setTransport", transport: { ...current, ...patch } });
     },
+    patchTrackLoop: (track, patch) => {
+      const current = store.getSnapshot().looper?.tracks[track]?.loop;
+      if (!current) return;
+      sendLooper({ type: "setTrackLoop", track, settings: { ...current, ...patch } });
+    },
     setAnalysisConfig: (patch) =>
       run(async () => {
         const next = mergeConfig(store.getSnapshot().analysisConfig, patch);
@@ -200,7 +209,19 @@ export function createActions(client: EngineClient, store: EngineStore): EngineA
     addTrack: () => {
       const view = store.getSnapshot().looper;
       if (!view || view.trackCapacity === null || view.tracks.length >= view.trackCapacity) return;
-      sendLooper({ type: "addTrack" });
+      const track = view.tracks.length;
+      // New tracks start from the registry defaults, not the selected track (PER_TRACK_LOOPS.md).
+      const settings = trackLoopDefaults(getAppSetting);
+      const add = client.looper({ type: "addTrack" });
+      if (sameTrackLoop(settings, DEFAULT_TRACK_LOOP)) {
+        add.catch((e) => store.pushError(toEngineError(e)));
+        return;
+      }
+      // The engine applies looper commands in order, so this reaches the new track. Capacity was
+      // checked above; a rare refused add shows as a `noSuchTrack` notice.
+      add
+        .then(() => client.looper({ type: "setTrackLoop", track, settings }))
+        .catch((e) => store.pushError(toEngineError(e)));
     },
     dismissError: (id) => store.dismissError(id),
     dismissWarning: (kind) => store.dismissWarning(kind),

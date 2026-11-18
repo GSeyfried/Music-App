@@ -5,7 +5,7 @@
 
 import type { LooperCommand } from "../engine/protocol";
 import type { LooperView } from "../engine/store";
-import { mainAction, trackControls } from "./looperControls";
+import { isTrackBusy, mainAction, trackControls } from "./looperControls";
 import { shortcutKeys, type ShortcutId } from "./shortcuts";
 
 export type TrackActionId =
@@ -15,6 +15,7 @@ export type TrackActionId =
   | "track.solo"
   | "track.undo"
   | "track.redo"
+  | "track.duplicate"
   | "track.details"
   | "track.clear"
   | "track.remove";
@@ -26,6 +27,8 @@ export interface TrackAction {
   /** For toggles: current state, shown as a check. */
   checked?: boolean;
   destructive?: boolean;
+  /** Why it is disabled, when that is not obvious. */
+  reason?: string;
   shortcut: string[];
   /** What to send; null for UI-only actions (details). */
   command: LooperCommand | null;
@@ -53,6 +56,7 @@ export function trackActions(view: LooperView, track: number): TrackAction[] {
     { id: "track.solo", label: "Solo", enabled: true, checked: t.solo, shortcut: keys("solo"), command: { type: "setSolo", track, solo: !t.solo } },
     { id: "track.undo", label: "Undo overdub", enabled: can.canUndo, shortcut: keys("undo"), command: { type: "undo", track } },
     { id: "track.redo", label: "Redo overdub", enabled: can.canRedo, shortcut: keys("redo"), command: { type: "redo", track } },
+    duplicateAction(view, track),
     { id: "track.details", label: "Details…", enabled: true, shortcut: [], command: null },
     {
       id: "track.clear",
@@ -65,12 +69,32 @@ export function trackActions(view: LooperView, track: number): TrackAction[] {
     {
       id: "track.remove",
       label: "Remove track",
-      enabled: view.tracks.length > 1 && !(t.state === "armed" || t.state === "recording" || t.state === "overdubbing"),
+      enabled: view.tracks.length > 1 && !isTrackBusy(t) && !t.busy,
       destructive: true,
       shortcut: [],
       command: { type: "removeTrack", track },
     },
   ];
+}
+
+/** Duplicate: a new track right after this one with the same loop settings and a copy of its layers. */
+export function duplicateAction(view: LooperView, track: number): TrackAction {
+  const t = view.tracks[track];
+  let reason: string | undefined;
+  if (!t) reason = "No such track";
+  else if (t.busy) reason = "This track is still being copied";
+  else if (isTrackBusy(t)) reason = "Finish recording first";
+  else if (view.trackCapacity === null) reason = "This engine build cannot add tracks";
+  else if (view.tracks.length >= view.trackCapacity) reason = `Track limit reached: ${view.trackCapacity} tracks`;
+  else if (t.layers > view.freeLayers) reason = "Not enough free layer memory to copy this track";
+  return {
+    id: "track.duplicate",
+    label: "Duplicate track",
+    enabled: reason === undefined,
+    reason,
+    shortcut: [],
+    command: { type: "duplicateTrack", track },
+  };
 }
 
 export interface AddTrackState {

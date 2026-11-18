@@ -83,6 +83,44 @@ export const defaultTransport: TransportState = {
   sampleRate: 48_000,
 };
 
+// ---- Per-track loops (docs/projects/looper-01/PER_TRACK_LOOPS.md "Contract") ----
+
+/**
+ * How one track's loop lines up. song: follow the song transport exactly
+ * (today's behaviour). bars: N bars + M beats on the song grid, starting on a
+ * bar line. multiple: a ratio of the base loop (the first Multiple take sets
+ * the base). free: whatever the take is, on its own clock.
+ */
+export type TrackLoopMode = "song" | "bars" | "multiple" | "free";
+
+export interface TrackLoop {
+  mode: TrackLoopMode;
+  /** Bars mode: length = bars + beats on the song grid (bars + beats >= 1). */
+  bars: number;
+  beats: number;
+  /** Multiple mode: one of LOOP_RATIOS. */
+  ratio: number;
+  /** Used when recording on this track starts from stopped (0..=8). */
+  countInBars: number;
+  overdubStart: OverdubStart;
+  /** Free / first Multiple take. */
+  loopFit: LoopFit;
+}
+
+/** Multiple-mode ratios of the base loop: ×¼ … ×16. */
+export const LOOP_RATIOS = [0.25, 0.5, 1, 1.5, 2, 3, 4, 8, 16] as const;
+
+/** The engine's `TrackLoop::default()`: follow the song. */
+export const DEFAULT_TRACK_LOOP: TrackLoop = {
+  mode: "song",
+  bars: 1,
+  beats: 0,
+  ratio: 1,
+  countInBars: 1,
+  overdubStart: "loopStart",
+  loopFit: "nearestBeat",
+};
+
 // ---- Project / session ---------------------------------------------------
 
 export type TrackKind = "audio" | "midi";

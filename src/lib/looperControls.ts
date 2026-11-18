@@ -3,10 +3,11 @@
 // The engine stays the authority: anything it still refuses arrives as a
 // `looperNotice`. These rules only avoid offering actions that cannot work.
 
-import type { LoopMode } from "../models/domain";
+import type { LoopMode, TrackLoop, TrackLoopMode } from "../models/domain";
 import type { LooperCommand, RunState, TrackSnapshot } from "../engine/protocol";
 import type { LooperView } from "../engine/store";
 
+/** Recording (or armed to). A DuplicateTrack copy in progress is `t.busy`, checked separately. */
 export const isTrackBusy = (t: TrackSnapshot) =>
   t.state === "armed" || t.state === "recording" || t.state === "overdubbing";
 
@@ -27,17 +28,30 @@ export function mainAction(view: LooperView, track: number): MainAction {
   if (t.state === "recording" || t.state === "overdubbing") {
     return { command: { type: "stopRecording", track }, label: "Stop", tone: "stop", enabled: true };
   }
+  if (t.busy) return { command: { type: "record", track }, label: "Copying…", tone: "record", enabled: false, reason: "Still copying the duplicated layers" };
   if (t.layers === 0) {
-    // Free mode: while one track records the first take (which sets the loop length),
-    // no other track can start; the engine would reply `trackBusy`.
+    // While one track records the first take that sets a shared length, no
+    // other track that depends on it can start; the engine would reply `trackBusy`.
+    // Song tracks in Free mode share the song loop; Multiple tracks share the base.
+    const mode = t.loop.mode;
     const definingLoop =
-      view.transport.mode === "free" && view.loopPeriodFrames === null && view.tracks.some(isTrackBusy);
+      mode === "song"
+        ? view.transport.mode === "free" &&
+          view.loopPeriodFrames === null &&
+          view.tracks.some((x) => x.loop.mode === "song" && isTrackBusy(x))
+        : mode === "multiple" &&
+          t.loopPeriod === null &&
+          view.tracks.some((x, i) => i !== track && x.loop.mode === "multiple" && isTrackBusy(x));
     return {
       command: { type: "record", track },
       label: "Record",
       tone: "record",
       enabled: !definingLoop,
-      reason: definingLoop ? "Another track is setting the loop length" : undefined,
+      reason: definingLoop
+        ? mode === "song"
+          ? "Another track is setting the loop length"
+          : "Another track is setting the base loop"
+        : undefined,
     };
   }
   return { command: { type: "overdub", track }, label: "Overdub", tone: "overdub", enabled: true };
@@ -52,13 +66,86 @@ export interface TrackControls {
 
 export function trackControls(t: TrackSnapshot): TrackControls {
   const busy = isTrackBusy(t);
+  const copying = t.busy === true;
   return {
-    canTogglePlay: t.layers > 0 && !busy,
+    canTogglePlay: t.layers > 0 && !busy && !copying,
     // The base layer cannot be undone (use Clear), so Undo needs an overdub.
-    canUndo: !busy && t.layers >= 2,
-    canRedo: !busy && t.redoLayers > 0,
-    canClear: t.layers > 0 || busy,
+    canUndo: !busy && !copying && t.layers >= 2,
+    canRedo: !busy && !copying && t.redoLayers > 0,
+    canClear: (t.layers > 0 || busy) && !copying,
   };
+}
+
+/** Which of a track's own loop settings can change now (PER_TRACK_LOOPS.md "Contract"). */
+export interface TrackLoopControls {
+  /** Mode: only on an empty track (engine: `trackNotEmpty`). */
+  modeLocked: boolean;
+  modeReason?: string;
+  /** Bars, beats, ratio: on a track with content only while stopped (engine: `transportLocked`). */
+  lengthLocked: boolean;
+  lengthReason?: string;
+  /** Everything, while a duplicate is still being copied (engine: `trackBusy`). */
+  allLocked: boolean;
+  allReason?: string;
+}
+
+export function trackLoopControls(view: LooperView, track: number): TrackLoopControls {
+  const t = view.tracks[track];
+  if (!t) return { modeLocked: true, lengthLocked: true, allLocked: true, allReason: "No such track" };
+  if (t.busy) {
+    const allReason = "Still copying the duplicated layers. Settings unlock when the copy finishes.";
+    return { modeLocked: true, modeReason: allReason, lengthLocked: true, lengthReason: allReason, allLocked: true, allReason };
+  }
+  const content = t.layers > 0 || isTrackBusy(t);
+  const recording = isTrackBusy(t);
+  const lengthLocked = content && (recording || view.run !== "stopped");
+  return {
+    modeLocked: content,
+    modeReason: content ? "Clear the track to change how it loops. Its layers were recorded for this mode." : undefined,
+    lengthLocked,
+    lengthReason: lengthLocked
+      ? recording
+        ? "Finish recording before changing the loop length."
+        : "Stop playback to change this track's loop length. Its layers are kept."
+      : undefined,
+    allLocked: false,
+  };
+}
+
+/** "×¼", "×1.5", "×16" … */
+export function ratioLabel(r: number): string {
+  if (r === 0.25) return "×¼";
+  if (r === 0.5) return "×½";
+  return `×${r}`;
+}
+
+/** One-line summary of how a track loops, e.g. "2 bars + 1 beat", "×2 of the base loop". */
+export function trackLoopSummary(loop: TrackLoop): string {
+  switch (loop.mode) {
+    case "song":
+      return "Same as song";
+    case "bars": {
+      const bars = `${loop.bars} bar${loop.bars === 1 ? "" : "s"}`;
+      return loop.beats > 0 ? `${bars} + ${loop.beats} beat${loop.beats === 1 ? "" : "s"}` : bars;
+    }
+    case "multiple":
+      return `${ratioLabel(loop.ratio)} of the base loop`;
+    case "free":
+      return "Free (own length)";
+  }
+}
+
+export function trackLoopModeLabel(mode: TrackLoopMode): string {
+  switch (mode) {
+    case "song":
+      return "Same as song";
+    case "bars":
+      return "Bars";
+    case "multiple":
+      return "Multiple";
+    case "free":
+      return "Free";
+  }
 }
 
 export interface TransportControls {

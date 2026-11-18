@@ -13,6 +13,8 @@ export interface MenuItem {
   checked?: boolean;
   destructive?: boolean;
   shortcut?: string[];
+  /** Why it is disabled (shown as a tooltip). */
+  reason?: string;
   /** Start a new visual group before this item. */
   separatorBefore?: boolean;
 }
@@ -113,6 +115,7 @@ export function ContextMenu({ label, x, y, items, onSelect, onClose }: Props) {
             data-index={i}
             tabIndex={i === active ? 0 : -1}
             disabled={!it.enabled}
+            title={!it.enabled ? it.reason : undefined}
             className={it.destructive ? "menu-item is-destructive" : "menu-item"}
             onClick={() => onSelect(it.id)}
           >

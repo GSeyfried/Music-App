@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { describeError, describeNotice, describeUnpitched, describeWarning } from "../engine/messages";
 import { ENGINE_ERROR_KINDS, type PitchFrame, type RejectReason, type TrackSnapshot } from "../engine/protocol";
 import type { LooperView } from "../engine/store";
+import { DEFAULT_TRACK_LOOP } from "../models/domain";
 import { LOOPER_STATE } from "../test/fixtures";
 import { formatDb, formatGain } from "./format";
 import { ringProgress } from "./loopProgress";
@@ -103,6 +104,10 @@ const track = (over: Partial<TrackSnapshot> = {}): TrackSnapshot => ({
   redoLayers: 0,
   recordStart: null,
   recordEnd: null,
+  loop: { ...DEFAULT_TRACK_LOOP },
+  loopPeriod: null,
+  loopPhase: 0,
+  busy: false,
   ...over,
 });
 
@@ -187,7 +192,7 @@ describe("loop progress ring", () => {
       ...LOOPER_STATE,
       loopPeriodFrames: null,
       frame: 72_000,
-      tracks: [{ ...LOOPER_STATE.tracks[1], state: "recording" as const, layers: 1, recordStart: 0 }],
+      tracks: [{ ...LOOPER_STATE.tracks[1], state: "recording" as const, layers: 1, recordStart: 0, loopPeriod: null }],
     };
     expect(ringProgress(s, 0, 0)).toMatchObject({ mode: "freeTake", caption: "1.5 s" });
     expect(ringProgress(LOOPER_STATE, 1, 0).mode).toBe("idle");
@@ -314,6 +319,7 @@ describe("track command table", () => {
       "track.solo",
       "track.undo",
       "track.redo",
+      "track.duplicate",
       "track.details",
       "track.clear",
       "track.remove",
