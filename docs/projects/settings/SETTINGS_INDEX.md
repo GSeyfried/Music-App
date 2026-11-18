@@ -116,3 +116,4 @@ tuning; only the first few are likely user-facing.
 | `looper.maxLoopSeconds` | Longest loop | The longest loop you can record. Longer loops use more memory per layer. | 30 s | app | (none) | exists (not in UI) |
 | `looper.memoryLimitBytes` | Memory guard | Refuses layer settings that would reserve more than this. | 512 MB | app | Start-audio error | exists (not in UI) |
 | `view.loopRingFloorDb` | Layer ring floor | Quietest level drawn on the layer rings; louder parts reach further out. | −48 dBFS | app | Track card layer rings | exists (constant `LAYER_RING_FLOOR_DB`, not in UI) |
+| `view.livePitchPanel` | Live pitch panel | Show the tuner and pitch curve beside the tracks in Studio. Pitch analysis only runs while something needs it (this panel, Practice Lab, or pitch-reactive colors). | off | app | Studio "Live pitch" toggle; tuner, pitch curve | exists |

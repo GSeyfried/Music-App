@@ -2301,3 +2301,15 @@ input[type="range"] {
   stroke-width: 0.5;
   stroke-linejoin: round;
 }
+
+/* Live pitch panel toggle (view.livePitchPanel) */
+.studio-view-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-block: calc(var(--s-2) * -1) 0;
+}
+@media (min-width: 1180px) {
+  .studio-body[data-side="off"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

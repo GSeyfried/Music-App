@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { onAppMenu } from "./engine/bridge";
 import { useThemeEffects } from "./settings/useThemeEffects";
+import { useAnalysisWhenNeeded } from "./settings/useAnalysisWhenNeeded";
 import { Alerts, EngineModeBanner, MicPermissionBanner, Toasts } from "./components/Alerts";
 import { MidiIndicator } from "./components/HardwarePanels";
 import { InputCluster } from "./components/InputControls";
@@ -53,6 +54,7 @@ function Shell() {
   const projectLabel = project?.unsavedChanges ? `${projectName} · Unsaved` : projectName;
   useLiveShortcuts();
   useThemeEffects();
+  useAnalysisWhenNeeded(workspace === "practice");
   const { setOverlay } = ui;
   useEffect(() => onAppMenu((id) => id === "settings" && setOverlay("settings")), [setOverlay]);
   return (

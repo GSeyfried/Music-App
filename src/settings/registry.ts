@@ -38,6 +38,7 @@ export interface AppSettings {
   "view.loopRingTicks": boolean;
   "view.playheadEmphasis": boolean;
   "view.timingReadout": boolean;
+  "view.livePitchPanel": boolean;
   "theme.mode": ThemeMode;
   "theme.pitchReactive": boolean;
   "theme.pitchReactiveStrength": number;
@@ -64,6 +65,7 @@ export const APP_DEFAULTS: AppSettings = {
   "view.loopRingTicks": true,
   "view.playheadEmphasis": true,
   "view.timingReadout": true,
+  "view.livePitchPanel": false,
   "theme.mode": "system",
   "theme.pitchReactive": false,
   "theme.pitchReactiveStrength": 0.35,
@@ -149,6 +151,17 @@ export const SETTINGS: SettingDef[] = [
     description: "After each take, show how far your hits landed from the beat.",
     category: "Loop display",
     tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "view.livePitchPanel",
+    source: "app",
+    kind: "bool",
+    label: "Live pitch panel",
+    description:
+      "Show the tuner and pitch curve beside the tracks in Studio. Pitch analysis only runs while something needs it (this panel, Practice Lab, or pitch-reactive colors).",
+    category: "Studio",
+    tier: "daily",
     scope: "app",
   },
   // ---- Practice -------------------------------------------------------------

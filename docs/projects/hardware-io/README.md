@@ -406,3 +406,27 @@ and in `looper/io.rs` (mine, one line once the variant exists): when
   exist (currently no: microphone prompt should follow a user action).
 - PENDING: clippy `field_reassign_with_default` in `engine.rs` test
   `looper_commands_need_audio_but_transport_can_be_preset` (hub file, pre-existing, not changed).
+
+## Mic only when needed (requested 2026-11-17, not started)
+
+The user does not want the app always listening. Done so far: the Studio live
+pitch panel is hidden by default (`view.livePitchPanel`), and pitch analysis
+runs only for Practice Lab, that panel, or pitch-reactive colors.
+
+Still open: the microphone stays open (macOS mic indicator lit) whenever audio
+runs, because `hardware::open_audio` opens capture and playback together and
+the looper's output depends on the duplex bridge.
+
+Proposed engine change (next session):
+- Split the lifecycles: playback (output stream + looper mix + metronome) can
+  run with no capture stream; capture opens on demand.
+- Open capture when something needs input: arming/recording a take or overdub
+  (open early enough for count-in/latency), monitoring on, the tuner or live
+  pitch panel shown, Practice recording, calibration. Close it after a short
+  idle delay (setting, e.g. `audio.micIdleCloseSeconds`, default ~10 s).
+- Keep loops, transport position and the clock anchor across capture
+  open/close (same restore path as device restarts), and re-establish input
+  latency/clock mapping on each open.
+- PENDING: whether reopening adds an audible gap or clock jump on the output;
+  how quickly CoreAudio reopens a USB interface (H4n); whether an armed
+  overdub with "Loop start" leaves enough time to open the mic.
