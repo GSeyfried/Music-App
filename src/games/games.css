@@ -250,10 +250,29 @@
   border: 1px solid var(--border);
 }
 
+.glider-stage > .btn {
+  position: absolute;
+  z-index: 2;
+  right: var(--s-2);
+  top: var(--s-2);
+}
+
+.glider-stage:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  border-radius: 0;
+  background: var(--bg);
+}
+
+.glider-stage:fullscreen .glider-canvas {
+  width: 100%;
+  height: 100%;
+}
+
 .glider-canvas {
   display: block;
   width: 100%;
-  height: clamp(280px, 52vh, 520px);
+  height: clamp(280px, 60vh, 760px);
 }
 
 .glider-overlay {

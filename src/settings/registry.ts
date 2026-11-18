@@ -25,12 +25,32 @@ export type GameDifficulty = "superEasy" | "easy" | "medium" | "hard";
 export type GameRangeSource = "myRange" | "custom";
 export type GameSpeed = "slow" | "normal" | "fast";
 
-/**
- * Pitch Glider cannot use a narrower target window than this. It keeps the
- * Hard opening at exactly ±25 cents while the other levels inherit Practice's
- * pitch tolerance. This is converted to a height from the active voice range.
- */
-export const GAME_MIN_OPENING_TOLERANCE_CENTS = 25;
+/** Pitch accuracy required to clear a Pitch Glider gate, in cents. */
+export const GAME_DIFFICULTY_TOLERANCE_CENTS: Record<GameDifficulty, number> = {
+  superEasy: 100,
+  easy: 60,
+  medium: 40,
+  hard: 25,
+};
+/** Live pitch wobble that expands the glider envelope to the pipe edge. */
+export const GAME_DIFFICULTY_STABILITY_CENTS: Record<GameDifficulty, number> = {
+  superEasy: 100,
+  easy: 60,
+  medium: 40,
+  hard: 25,
+};
+/** Horizontal pipe width per difficulty; wider pipes require a longer steady hold. */
+export const GAME_GATE_WIDTHS: Record<GameDifficulty, number> = { superEasy: 0.1, easy: 0.13, medium: 0.16, hard: 0.2 };
+/** Drawn craft radius as a fraction of visible viewport height; also used for collision. */
+export const GAME_CRAFT_RADIUS = 0.035;
+/** Keep openings this far from the play-field edge where the range permits. */
+export const GAME_GATE_EDGE_MARGIN = 0.06;
+/** First pipe position beyond the right edge, in play-field widths. */
+export const GAME_FIRST_GATE_DELAY = 0.6;
+/** Smooth camera follow time for the next pipe target. */
+export const GAME_VIEWPORT_PAN_SMOOTHING_MS = 180;
+/** Nonlinear pitch-display curve: lower values magnify small cents changes. */
+export const GAME_PITCH_WARP_EXPONENT = 0.55;
 /** Pitch Glider scroll speed per setting, in play-field heights per second. */
 export const GAME_SPEEDS: Record<GameSpeed, number> = { slow: 0.22, normal: 0.32, fast: 0.45 };
 /** Pitch Glider distance between gates, in play-field heights. */
@@ -97,6 +117,7 @@ export interface AppSettings {
   "games.rangeLowMidi": number;
   "games.rangeHighMidi": number;
   "games.speed": GameSpeed;
+  "games.viewportSemitones": number;
   /** Pitch smoothing time constant for the craft, ms. */
   "games.pitchSmoothingMs": number;
   /** How fast the craft sinks with no confident pitch, play-field heights per second. */
@@ -154,7 +175,8 @@ export const APP_DEFAULTS: AppSettings = {
   "games.rangeLowMidi": 48,
   "games.rangeHighMidi": 72,
   "games.speed": "normal",
-  "games.pitchSmoothingMs": 120,
+  "games.viewportSemitones": 12,
+  "games.pitchSmoothingMs": 30,
   "games.gravity": 0.25,
   "games.minClarity": 0.8,
   "games.bestScores": { superEasy: 0, easy: 0, medium: 0, hard: 0 },
@@ -637,7 +659,20 @@ export const SETTINGS: SettingDef[] = [
     max: 500,
     step: 10,
     label: "Glider smoothing",
-    description: "How much the glider smooths your pitch, in ms. Higher is calmer but slower to respond.",
+    description: "How quickly the glider follows a clear sung pitch, in ms. The low default is intentionally fast; higher values feel calmer but respond later.",
+    category: "Games",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "games.viewportSemitones",
+    source: "app",
+    kind: "number",
+    min: 5,
+    max: 36,
+    step: 1,
+    label: "Pitch viewport",
+    description: "How many semitones fill the Pitch Glider view. The camera follows the next pipe while keeping your full selected range eligible.",
     category: "Games",
     tier: "advanced",
     scope: "app",
@@ -650,7 +685,7 @@ export const SETTINGS: SettingDef[] = [
     max: 1,
     step: 0.05,
     label: "Glider sink rate",
-    description: "How fast the glider sinks while you're not singing a clear note (play-field heights per second).",
+    description: "How fast the glider visibly sinks while you're not singing a clear note (play-field heights per second).",
     category: "Games",
     tier: "advanced",
     scope: "app",

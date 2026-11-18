@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { PitchFrame } from "../engine/protocol";
 import {
-  CRAFT_RADIUS,
   CRAFT_X,
-  GATE_WIDTH,
+  craftRadiusFor,
+  envelopeRadiusFor,
+  gateGeometry,
   gameConfig,
-  hasPassed,
   hitsGate,
   holdProgress,
   isSteadyPitch,
@@ -13,17 +13,20 @@ import {
   newGame,
   normalizeRange,
   nudgeRange,
-  openingFor,
   openingToleranceCentsFor,
   pitchToHeight,
+  pitchViewport,
   heightToPitch,
   smoothToward,
+  stabilityToleranceCentsFor,
   stepGame,
   stepHold,
   steeringPitch,
+  targetCueFor,
   togglePlay,
   updateExtreme,
   type GameState,
+  type Gate,
 } from "./logic";
 
 const frame = (midi: number | null, clarity = 0.95, stabilityCents: number | null = 10): PitchFrame => ({
@@ -103,6 +106,12 @@ describe("pitch to height", () => {
     expect(smoothToward(0.3, 1, 0, 100)).toBe(0.3);
   });
 
+  it("zooms and clamps a pitch viewport inside the full eligible range", () => {
+    expect(pitchViewport({ low: 48, high: 72 }, 60, 12)).toEqual({ low: 54, high: 66 });
+    expect(pitchViewport({ low: 48, high: 72 }, 49, 12)).toEqual({ low: 48, high: 60 });
+    expect(pitchViewport({ low: 48, high: 72 }, 90, 12)).toEqual({ low: 60, high: 72 });
+  });
+
   it("steers only on fresh, clear pitches", () => {
     expect(steeringPitch(frame(60), 10, 0.8, 250)).toBe(60);
     expect(steeringPitch(frame(60, 0.6), 10, 0.8, 250)).toBeNull();
@@ -113,73 +122,109 @@ describe("pitch to height", () => {
 
 describe("pitch glider", () => {
   const range = { low: 48, high: 72 };
-
-  it("uses all Practice difficulty levels and derives openings from cents", () => {
-    expect(openingToleranceCentsFor("superEasy")).toBeGreaterThan(openingToleranceCentsFor("easy"));
-    expect(openingToleranceCentsFor("easy")).toBeGreaterThan(openingToleranceCentsFor("medium"));
-    expect(openingToleranceCentsFor("medium")).toBe(openingToleranceCentsFor("hard"));
-    // The physical gap includes the craft diameter, leaving its centre 25¢
-    // of pitch clearance up and down: 50 / (24 semitones × 100¢).
-    expect(openingToleranceCentsFor("hard")).toBe(25);
-    expect(openingFor("hard", range) - 2 * CRAFT_RADIUS).toBeCloseTo(50 / 2400);
-    // The same cents window occupies less screen space in a wider voice range.
-    expect(openingFor("hard", { low: 36, high: 84 }) - 2 * CRAFT_RADIUS).toBeCloseTo(50 / 4800);
-    const g = makeGate(1, openingFor("hard", range), 1);
-    expect(g.gapY + g.gapSize / 2).toBeLessThanOrEqual(1);
-    expect(makeGate(1, 0.3, 0).gapY - 0.15).toBeGreaterThanOrEqual(0);
-  });
-
-  it("leaves the craft centre exactly the selected cents tolerance", () => {
-    const gapSize = openingFor("hard", range);
-    const gate = { x: CRAFT_X - GATE_WIDTH / 2, gapY: 0.5, gapSize, passed: false };
-    const clearance = gapSize / 2 - CRAFT_RADIUS;
-    expect(clearance * (range.high - range.low) * 100).toBeCloseTo(25);
-    expect(hitsGate(0.5 + clearance - 0.0001, gate)).toBe(false);
-    expect(hitsGate(0.5 + clearance + 0.0001, gate)).toBe(true);
-  });
-
-  it("collides with the gate's solid parts only", () => {
-    const gate = { x: CRAFT_X - GATE_WIDTH / 2, gapY: 0.5, gapSize: 0.3, passed: false };
-    expect(hitsGate(0.5, gate)).toBe(false);
-    expect(hitsGate(0.5 + 0.15 - CRAFT_RADIUS + 0.01, gate)).toBe(true);
-    expect(hitsGate(0.5 - 0.15 + CRAFT_RADIUS - 0.01, gate)).toBe(true);
-    expect(hitsGate(0.9, { ...gate, x: CRAFT_X + 0.5 })).toBe(false);
-    expect(hasPassed({ ...gate, x: CRAFT_X - CRAFT_RADIUS - GATE_WIDTH - 0.01 })).toBe(true);
-    expect(hasPassed(gate)).toBe(false);
-  });
-
-  const conf = gameConfig(2, "easy", { low: 48, high: 72 }, "normal", 0.25, 100);
+  const conf = gameConfig(2, "hard", range, "normal", 0.25, 0);
   const playing = (over: Partial<GameState> = {}): GameState => ({ ...newGame(), phase: "playing", ...over });
 
-  it("scores a gate once when the craft passes through", () => {
-    const gate = { x: CRAFT_X + CRAFT_RADIUS + 0.01, gapY: 0.5, gapSize: 0.42, passed: false };
-    let s = playing({ gates: [gate] });
-    for (let i = 0; i < 60; i++) s = stepGame(s, conf, 16, 0.5, () => 0.5);
+  it("uses a real descending cents progression with Hard fixed at ±25 cents", () => {
+    expect(openingToleranceCentsFor("superEasy")).toBeGreaterThan(openingToleranceCentsFor("easy"));
+    expect(openingToleranceCentsFor("easy")).toBeGreaterThan(openingToleranceCentsFor("medium"));
+    expect(openingToleranceCentsFor("medium")).toBeGreaterThan(openingToleranceCentsFor("hard"));
+    expect(openingToleranceCentsFor("hard")).toBe(25);
+  });
+
+  it("targets exact semitones and derives its complete visible geometry from cents", () => {
+    const g = makeGate(1, conf, 1);
+    expect(Number.isInteger(g.targetMidi)).toBe(true);
+    expect(g.gapY).toBe(pitchToHeight(g.targetMidi, range));
+    expect(g.gapBottom).toBeGreaterThanOrEqual(0.06);
+    expect(g.gapTop).toBeLessThanOrEqual(0.94);
+    expect(g.width).toBe(conf.pipeWidth);
+  });
+
+  it("keeps the glider the same displayed size for wide and narrow voice ranges", () => {
+    for (const fullRange of [{ low: 48, high: 72 }, { low: 36, high: 84 }]) {
+      const cfg = gameConfig(2, "hard", fullRange, "normal", 0.25, 0, 12);
+      const view = pitchViewport(fullRange, 60, 12);
+      const worldSpan = pitchToHeight(view.high, fullRange) - pitchToHeight(view.low, fullRange);
+      expect(craftRadiusFor(60, cfg) / worldSpan).toBeCloseTo(0.035);
+    }
+  });
+
+  it("magnifies cents drift continuously around a semitone", () => {
+    const exact = pitchToHeight(60, range);
+    const tenCents = pitchToHeight(60.1, range);
+    expect(tenCents - exact).toBeGreaterThan(0.1 / (range.high - range.low));
+    expect(pitchToHeight(60.5, range)).toBeCloseTo((60.5 - range.low) / (range.high - range.low));
+    expect(pitchToHeight(60.49, range)).toBeLessThan(pitchToHeight(60.51, range));
+  });
+
+  it("keeps target cues visible and points toward the target", () => {
+    expect(targetCueFor({ gapY: 0.8 }, 0.4)).toMatchObject({ y: 0.8, direction: "up", clamped: false });
+    expect(targetCueFor({ gapY: 0.1 }, 0.6, 0.2, 0.8)).toMatchObject({ y: 0.2, direction: "down", clamped: true });
+    expect(targetCueFor({ gapY: 0.9 }, 0.9, 0.2, 0.8)).toMatchObject({ y: 0.8, direction: "level", clamped: true });
+  });
+
+  it("makes the drawn craft centre clear at exactly ±25 cents and hit outside it", () => {
+    const craftRadius = craftRadiusFor(60, conf);
+    const geometry = gateGeometry(60, 25, range, craftRadius);
+    const target: Gate = { x: CRAFT_X, targetMidi: 60, width: conf.pipeWidth, craftRadius, ...geometry, passed: false };
+    expect(geometry.gapTop - craftRadius).toBeCloseTo(pitchToHeight(60.25, range));
+    expect(geometry.gapBottom + craftRadius).toBeCloseTo(pitchToHeight(59.75, range));
+    expect(hitsGate(pitchToHeight(60.25, range), target)).toBe(false);
+    expect(hitsGate(pitchToHeight(60.251, range), target)).toBe(true);
+    expect(hitsGate(pitchToHeight(59.75, range), target)).toBe(false);
+    expect(hitsGate(pitchToHeight(59.749, range), target)).toBe(true);
+  });
+
+  it("requires the craft to stay inside through the full visible pipe width", () => {
+    const target = makeGate(CRAFT_X + 0.05, conf, 0.5);
+    let s = playing({ gates: [target], craftY: pitchToHeight(target.targetMidi, range) });
+    for (let i = 0; i < 80; i++) s = stepGame(s, conf, 16, target.targetMidi, 0, () => 0.5);
     expect(s.phase).toBe("playing");
     expect(s.score).toBe(1);
     expect(s.gates[0].passed).toBe(true);
-    for (let i = 0; i < 10; i++) s = stepGame(s, conf, 16, 0.5, () => 0.5);
-    expect(s.score).toBe(1);
   });
 
-  it("ends the game on a crash", () => {
-    const gate = { x: CRAFT_X + CRAFT_RADIUS + 0.01, gapY: 0.8, gapSize: 0.2, passed: false };
-    let s = playing({ gates: [gate], craftY: 0.2 });
-    for (let i = 0; i < 30 && s.phase === "playing"; i++) s = stepGame(s, conf, 16, 0.2, () => 0.5);
+  it("has no hidden pitch death: only a visibly wrong craft position collides", () => {
+    const target = makeGate(CRAFT_X, conf, 0.5);
+    const centered = playing({ gates: [target], craftY: target.gapY });
+    // A different current pitch is harmless while the displayed, smoothed craft remains in the opening.
+    expect(stepGame(centered, { ...conf, smoothingMs: 100000 }, 16, target.targetMidi + 2, 0, () => 0.5).phase).toBe("playing");
+    const outside = playing({ gates: [target], craftY: target.gapTop });
+    expect(stepGame(outside, conf, 16, target.targetMidi + 1, 0, () => 0.5).phase).toBe("over");
+  });
+
+  it("shows instability as the same envelope that collides with a pipe", () => {
+    const target = makeGate(CRAFT_X, conf, 0.5);
+    const atThreshold = envelopeRadiusFor(stabilityToleranceCentsFor("hard"), conf, target.targetMidi);
+    const unstable = envelopeRadiusFor(stabilityToleranceCentsFor("hard") + 1, conf, target.targetMidi);
+    expect(target.gapTop - target.gapY).toBeCloseTo(atThreshold);
+    expect(hitsGate(target.gapY, target, atThreshold)).toBe(false);
+    expect(hitsGate(target.gapY, target, unstable)).toBe(true);
+    const state = playing({ gates: [target], craftY: target.gapY });
+    expect(stepGame(state, conf, 16, target.targetMidi, stabilityToleranceCentsFor("hard") + 1, () => 0.5).phase).toBe("over");
+    const offPipe = playing({ gates: [{ ...target, x: CRAFT_X + 1 }], craftY: target.gapY });
+    expect(stepGame(offPipe, conf, 16, target.targetMidi, stabilityToleranceCentsFor("hard") + 1, () => 0.5).phase).toBe("playing");
+  });
+
+  it("silence sinks visibly and dies only after its craft circle hits a pipe", () => {
+    const target = makeGate(CRAFT_X, conf, 0.5);
+    const inside = playing({ gates: [target], craftY: target.gapY });
+    const first = stepGame(inside, conf, 16, null, null, () => 0.5);
+    expect(first.phase).toBe("playing");
+    let s = first;
+    for (let i = 0; i < 80 && s.phase === "playing"; i++) s = stepGame(s, conf, 16, null, null, () => 0.5);
     expect(s.phase).toBe("over");
-    expect(s.score).toBe(0);
-    // Frozen once over.
-    expect(stepGame(s, conf, 16, 0.2, () => 0.5)).toBe(s);
   });
 
   it("sinks without a confident pitch and spawns gates off screen", () => {
     let s = playing({ craftY: 0.5 });
-    s = stepGame(s, conf, 100, null, () => 0.5);
+    s = stepGame(s, conf, 100, null, null, () => 0.5);
     expect(s.voiced).toBe(false);
     expect(s.craftY).toBeCloseTo(0.5 - 0.025);
     expect(s.gates).toHaveLength(1);
     expect(s.gates[0].x).toBeGreaterThanOrEqual(conf.width);
-    for (let i = 0; i < 200; i++) s = stepGame(s, conf, 100, null, () => 0.5);
+    for (let i = 0; i < 200; i++) s = stepGame(s, conf, 100, null, null, () => 0.5);
     expect(s.craftY).toBeGreaterThanOrEqual(0);
   });
 
@@ -188,7 +233,7 @@ describe("pitch glider", () => {
     const p = togglePlay(ready);
     expect(p.phase).toBe("playing");
     expect(togglePlay(p).phase).toBe("paused");
-    expect(stepGame(togglePlay(p), conf, 16, 0.9, () => 0.5).craftY).toBe(0.5);
+    expect(stepGame(togglePlay(p), conf, 16, 60, 0, () => 0.5).craftY).toBe(0.5);
     const restarted = togglePlay({ ...p, phase: "over", score: 7 });
     expect(restarted).toMatchObject({ phase: "playing", score: 0, gates: [] });
   });

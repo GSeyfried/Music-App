@@ -6,8 +6,19 @@
 // `width` units wide (the canvas aspect ratio), so collisions use one scale.
 
 import type { PitchFrame } from "../engine/protocol";
-import { DIFFICULTY_PRESETS } from "../practice/difficulty";
-import { GAME_GATE_SPACING, GAME_MIN_OPENING_TOLERANCE_CENTS, GAME_SPEEDS, type GameDifficulty, type GameSpeed } from "../settings/registry";
+import {
+  GAME_DIFFICULTY_TOLERANCE_CENTS,
+  GAME_DIFFICULTY_STABILITY_CENTS,
+  GAME_CRAFT_RADIUS,
+  GAME_FIRST_GATE_DELAY,
+  GAME_GATE_EDGE_MARGIN,
+  GAME_GATE_WIDTHS,
+  GAME_GATE_SPACING,
+  GAME_PITCH_WARP_EXPONENT,
+  GAME_SPEEDS,
+  type GameDifficulty,
+  type GameSpeed,
+} from "../settings/registry";
 
 export const MIN_MIDI = 21;
 export const MAX_MIDI = 108;
@@ -87,16 +98,32 @@ export function nudgeRange(range: MidiRange, end: "low" | "high", delta: number)
 
 // ---- Pitch Glider: input ------------------------------------------------------
 
-/** Height (0 bottom .. 1 top) for a sung MIDI pitch across the game range, clamped. */
+/**
+ * Height (0 bottom .. 1 top) for a sung MIDI pitch across the game range.
+ * Cents close to a semitone are magnified with a continuous, monotonic curve,
+ * making a 10–25¢ wobble visible without changing note ordering or endpoints.
+ */
 export function pitchToHeight(midi: number, range: MidiRange): number {
   const span = range.high - range.low;
   if (span <= 0) return 0.5;
-  return clamp((midi - range.low) / span, 0, 1);
+  const bounded = clamp(midi, range.low, range.high);
+  const nearest = Math.round(bounded);
+  const centsFromNearest = bounded - nearest;
+  const warpedOffset = Math.sign(centsFromNearest) * 0.5 * (Math.abs(centsFromNearest) / 0.5) ** GAME_PITCH_WARP_EXPONENT;
+  return clamp((nearest + warpedOffset - range.low) / span, 0, 1);
 }
 
-/** The MIDI pitch at a height; inverse of pitchToHeight inside the range. */
+/** Linear coordinate conversion for labels; pitchToHeight deliberately warps live pitch around notes. */
 export function heightToPitch(y: number, range: MidiRange): number {
   return range.low + clamp(y, 0, 1) * (range.high - range.low);
+}
+
+/** A zoomed, clamped pitch viewport inside the complete eligible voice range. */
+export function pitchViewport(fullRange: MidiRange, centerMidi: number, semitones: number): MidiRange {
+  const span = fullRange.high - fullRange.low;
+  const size = clamp(semitones, 1, span);
+  const low = clamp(centerMidi - size / 2, fullRange.low, fullRange.high - size);
+  return { low, high: low + size };
 }
 
 /** Exponential smoothing toward `target` with time constant `tauMs` (0 = no smoothing). */
@@ -108,33 +135,15 @@ export function smoothToward(current: number, target: number, dtMs: number, tauM
 // ---- Pitch Glider: world ------------------------------------------------------
 
 export const CRAFT_X = 0.45;
-export const CRAFT_RADIUS = 0.035;
-export const GATE_WIDTH = 0.12;
-/** Openings keep this far from the top and bottom edges. */
-const GAP_MARGIN = 0.06;
-/** The first gate appears this far beyond the right edge. */
-const FIRST_GATE_DELAY = 0.6;
+export const CRAFT_RADIUS = GAME_CRAFT_RADIUS;
 
-/**
- * Half of an opening in cents. Games share Practice's pitch thresholds, but
- * never make a physical opening smaller than ±25¢; Hard is therefore exactly
- * that window even though Practice scoring may be stricter.
- */
+/** Pitch accuracy required to clear a gate at each difficulty. */
 export function openingToleranceCentsFor(difficulty: GameDifficulty): number {
-  return Math.max(DIFFICULTY_PRESETS[difficulty].notePitchThresholdCents, GAME_MIN_OPENING_TOLERANCE_CENTS);
+  return GAME_DIFFICULTY_TOLERANCE_CENTS[difficulty];
 }
 
-/**
- * Physical gate height for a cents window across the active MIDI range.
- * Include the craft's diameter so the craft centre gets the requested pitch
- * tolerance; otherwise a ±25¢ Hard opening is smaller than the craft across a
- * typical two-octave range and cannot be flown through.
- */
-export function openingFor(difficulty: GameDifficulty, range: MidiRange): number {
-  const spanSemitones = range.high - range.low;
-  if (spanSemitones <= 0) return 1;
-  const pitchWindow = (2 * openingToleranceCentsFor(difficulty)) / (100 * spanSemitones);
-  return clamp(2 * CRAFT_RADIUS + pitchWindow, 0, 1);
+export function stabilityToleranceCentsFor(difficulty: GameDifficulty): number {
+  return GAME_DIFFICULTY_STABILITY_CENTS[difficulty];
 }
 
 export function speedFor(speed: GameSpeed): number {
@@ -144,7 +153,14 @@ export function speedFor(speed: GameSpeed): number {
 export interface Gate {
   /** Left edge of the gate. */
   x: number;
-  /** Centre of the opening (0..1). */
+  /** Exact semitone the player must sing at the gate. */
+  targetMidi: number;
+  /** Visual pipe geometry, derived from targetMidi and its cents tolerance. */
+  width: number;
+  /** Base vertical craft radius in world coordinates at this target's viewport. */
+  craftRadius: number;
+  gapBottom: number;
+  gapTop: number;
   gapY: number;
   gapSize: number;
   passed: boolean;
@@ -157,6 +173,10 @@ export interface GameState {
   craftY: number;
   /** True while the craft is following a confident pitch this frame. */
   voiced: boolean;
+  /** Base drawn vertical radius in world coordinates for the active viewport. */
+  craftRadius: number;
+  /** Drawn and collided vertical radius, including live pitch wobble. */
+  envelopeRadius: number;
   gates: Gate[];
   score: number;
   /** Distance travelled, for the scrolling backdrop. */
@@ -165,7 +185,11 @@ export interface GameState {
 
 export interface GameConfig {
   width: number;
-  opening: number;
+  range: MidiRange;
+  toleranceCents: number;
+  stabilityToleranceCents: number;
+  pipeWidth: number;
+  viewportSemitones: number;
   /** Play-field heights per second. */
   speed: number;
   /** Sink rate with no confident pitch, heights per second. */
@@ -175,7 +199,16 @@ export interface GameConfig {
 }
 
 export function newGame(): GameState {
-  return { phase: "ready", craftY: 0.5, voiced: false, gates: [], score: 0, distance: 0 };
+  return {
+    phase: "ready",
+    craftY: 0.5,
+    voiced: false,
+    craftRadius: CRAFT_RADIUS,
+    envelopeRadius: CRAFT_RADIUS,
+    gates: [],
+    score: 0,
+    distance: 0,
+  };
 }
 
 export function gameConfig(
@@ -185,51 +218,124 @@ export function gameConfig(
   speed: GameSpeed,
   gravity: number,
   smoothingMs: number,
+  viewportSemitones = 12,
 ): GameConfig {
-  return { width, opening: openingFor(difficulty, range), speed: speedFor(speed), gravity, smoothingMs, spacing: GAME_GATE_SPACING };
+  return {
+    width,
+    range,
+    toleranceCents: openingToleranceCentsFor(difficulty),
+    stabilityToleranceCents: stabilityToleranceCentsFor(difficulty),
+    pipeWidth: GAME_GATE_WIDTHS[difficulty],
+    viewportSemitones,
+    speed: speedFor(speed),
+    gravity,
+    smoothingMs,
+    spacing: GAME_GATE_SPACING,
+  };
 }
 
-/** A gate with its opening centred at `rand01` across the allowed band. */
-export function makeGate(x: number, opening: number, rand01: number): Gate {
-  const lo = GAP_MARGIN + opening / 2;
-  const hi = 1 - GAP_MARGIN - opening / 2;
-  const gapY = hi <= lo ? 0.5 : lo + clamp(rand01, 0, 1) * (hi - lo);
-  return { x, gapY, gapSize: opening, passed: false };
+/** World-coordinate radius that renders as the configured screen-height radius in a zoomed viewport. */
+export function craftRadiusFor(targetMidi: number, cfg: Pick<GameConfig, "range" | "viewportSemitones">): number {
+  const view = pitchViewport(cfg.range, targetMidi, cfg.viewportSemitones);
+  const span = pitchToHeight(view.high, cfg.range) - pitchToHeight(view.low, cfg.range);
+  return CRAFT_RADIUS * Math.max(span, 0.0001);
 }
 
-/** True if the craft (a circle at CRAFT_X, y) touches a gate's solid parts. */
-export function hitsGate(craftY: number, gate: Gate, radius = CRAFT_RADIUS): boolean {
-  const overlapsX = CRAFT_X + radius > gate.x && CRAFT_X - radius < gate.x + GATE_WIDTH;
-  if (!overlapsX) return false;
-  const top = gate.gapY + gate.gapSize / 2;
-  const bottom = gate.gapY - gate.gapSize / 2;
-  return craftY + radius > top || craftY - radius < bottom;
+/** Exact visible opening for a target note: cents clearance plus the drawn craft radius. */
+export function gateGeometry(
+  targetMidi: number,
+  toleranceCents: number,
+  range: MidiRange,
+  craftRadius = CRAFT_RADIUS,
+): Pick<Gate, "gapBottom" | "gapTop" | "gapY" | "gapSize"> {
+  const bottom = pitchToHeight(targetMidi - toleranceCents / 100, range) - craftRadius;
+  const top = pitchToHeight(targetMidi + toleranceCents / 100, range) + craftRadius;
+  return { gapBottom: bottom, gapTop: top, gapY: (bottom + top) / 2, gapSize: top - bottom };
 }
 
-/** True once the craft is wholly past the gate's right edge. */
+/** The visible wobble envelope reaches a pipe edge at the stability threshold. */
+export function envelopeRadiusFor(
+  stabilityCents: number | null,
+  cfg: Pick<GameConfig, "range" | "toleranceCents" | "stabilityToleranceCents" | "viewportSemitones">,
+  targetMidi: number,
+): number {
+  const craftRadius = craftRadiusFor(targetMidi, cfg);
+  if (stabilityCents === null || stabilityCents <= 0) return craftRadius;
+  const displayCents = (stabilityCents * cfg.toleranceCents) / cfg.stabilityToleranceCents;
+  const centre = pitchToHeight(targetMidi, cfg.range);
+  return craftRadius + Math.abs(pitchToHeight(targetMidi + displayCents / 100, cfg.range) - centre);
+}
+
+export interface TargetCue {
+  y: number;
+  direction: "up" | "down" | "level";
+  clamped: boolean;
+}
+
+/** Position and point an approaching-pipe cue without letting it leave the visible band. */
+export function targetCueFor(gate: Pick<Gate, "gapY">, craftY: number, usableBottom = GAME_GATE_EDGE_MARGIN, usableTop = 1 - GAME_GATE_EDGE_MARGIN): TargetCue {
+  const y = clamp(gate.gapY, usableBottom, usableTop);
+  return {
+    y,
+    direction: gate.gapY > craftY ? "up" : gate.gapY < craftY ? "down" : "level",
+    clamped: y !== gate.gapY,
+  };
+}
+
+/** A gate targets one exact MIDI semitone that leaves its visual opening on screen. */
+export function makeGate(x: number, cfg: GameConfig, rand01: number): Gate {
+  const candidates = Array.from({ length: cfg.range.high - cfg.range.low + 1 }, (_, i) => cfg.range.low + i).filter((m) => {
+    const geometry = gateGeometry(m, cfg.toleranceCents, cfg.range, craftRadiusFor(m, cfg));
+    return geometry.gapBottom >= GAME_GATE_EDGE_MARGIN && geometry.gapTop <= 1 - GAME_GATE_EDGE_MARGIN;
+  });
+  const notes = candidates.length > 0 ? candidates : [Math.round((cfg.range.low + cfg.range.high) / 2)];
+  const targetMidi = notes[Math.min(notes.length - 1, Math.floor(clamp(rand01, 0, 0.999999) * notes.length))];
+  const craftRadius = craftRadiusFor(targetMidi, cfg);
+  const geometry = gateGeometry(targetMidi, cfg.toleranceCents, cfg.range, craftRadius);
+  return { x, targetMidi, width: cfg.pipeWidth, craftRadius, ...geometry, passed: false };
+}
+
+/** True if the drawn craft circle visibly touches a solid part of the drawn pipe. */
+export function hitsGate(craftY: number, gate: Gate, verticalRadius = gate.craftRadius, horizontalRadius = CRAFT_RADIUS): boolean {
+  const overlapsX = CRAFT_X + horizontalRadius > gate.x && CRAFT_X - horizontalRadius < gate.x + gate.width;
+  return overlapsX && (craftY - verticalRadius < gate.gapBottom || craftY + verticalRadius > gate.gapTop);
+}
+
+/** True once the craft is wholly past the pipe's right edge. */
 export function hasPassed(gate: Gate, radius = CRAFT_RADIUS): boolean {
-  return gate.x + GATE_WIDTH < CRAFT_X - radius;
+  return gate.x + gate.width < CRAFT_X - radius;
 }
 
 /**
- * Advance the game by `dtMs`. `targetY` is the height of a confident sung pitch
- * (already mapped through pitchToHeight) or null when there is none, in which
- * case the craft sinks. `rand` supplies 0..1 values for new openings.
+ * Advance the game by `dtMs`. Deaths use only the same smoothed craft circle
+ * and pipe geometry the canvas draws; there is no hidden pitch verdict.
  */
-export function stepGame(state: GameState, cfg: GameConfig, dtMs: number, targetY: number | null, rand: () => number): GameState {
+export function stepGame(
+  state: GameState,
+  cfg: GameConfig,
+  dtMs: number,
+  sungMidi: number | null,
+  stabilityCents: number | null,
+  rand: () => number,
+): GameState {
   if (state.phase !== "playing" || dtMs <= 0) return state;
   // Long frame gaps (tab hidden, debugger) would teleport everything: cap them.
   const dt = Math.min(dtMs, 100);
-  const voiced = targetY !== null;
-  const craftY = voiced
+  const voiced = sungMidi !== null;
+  const targetY = sungMidi === null ? null : pitchToHeight(sungMidi, cfg.range);
+  const craftY = targetY !== null
     ? smoothToward(state.craftY, targetY, dt, cfg.smoothingMs)
     : clamp(state.craftY - (cfg.gravity * dt) / 1000, 0, 1);
   const dx = (cfg.speed * dt) / 1000;
+  const activeTarget = state.gates.find((gate) => !gate.passed)?.targetMidi ?? sungMidi ?? (cfg.range.low + cfg.range.high) / 2;
+  const craftRadius = craftRadiusFor(activeTarget, cfg);
+  const envelopeRadius = envelopeRadiusFor(stabilityCents, cfg, activeTarget);
   let score = state.score;
+  let crashed = false;
   const gates: Gate[] = [];
   for (const g of state.gates) {
     const moved = { ...g, x: g.x - dx };
-    if (moved.x + GATE_WIDTH < -0.1) continue;
+    if (moved.x + moved.width < -0.1) continue;
     if (!moved.passed && hasPassed(moved)) {
       moved.passed = true;
       score++;
@@ -237,13 +343,15 @@ export function stepGame(state: GameState, cfg: GameConfig, dtMs: number, target
     gates.push(moved);
   }
   const last = gates[gates.length - 1];
-  const nextX = last ? last.x + cfg.spacing : cfg.width + FIRST_GATE_DELAY;
-  if (nextX < cfg.width + cfg.spacing) gates.push(makeGate(Math.max(nextX, cfg.width), cfg.opening, rand()));
-  const crashed = gates.some((g) => hitsGate(craftY, g));
+  const nextX = last ? last.x + cfg.spacing : cfg.width + GAME_FIRST_GATE_DELAY;
+  if (nextX < cfg.width + cfg.spacing) gates.push(makeGate(Math.max(nextX, cfg.width), cfg, rand()));
+  crashed = gates.some((gate) => hitsGate(craftY, gate, envelopeRadius));
   return {
     phase: crashed ? "over" : "playing",
     craftY,
     voiced,
+    craftRadius,
+    envelopeRadius,
     gates,
     score,
     distance: state.distance + dx,

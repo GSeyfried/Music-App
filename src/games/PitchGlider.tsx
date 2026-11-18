@@ -14,21 +14,22 @@ import { noteLabel, STALE_MS } from "../lib/tuner";
 import { fitCanvas, setText, useFrame } from "../lib/useFrame";
 import { AdvancedOptions } from "../settings/AdvancedOptions";
 import { getAppSetting, setAppSetting, useAppSetting } from "../settings/appSettings";
-import { settingById, type SettingDef } from "../settings/registry";
+import { GAME_VIEWPORT_PAN_SMOOTHING_MS, settingById, type SettingDef } from "../settings/registry";
 import { noteColor } from "../settings/noteColors";
 import { SettingControl } from "../settings/SettingControl";
 import {
   CRAFT_RADIUS,
   CRAFT_X,
-  GATE_WIDTH,
   gameConfig,
-  heightToPitch,
   newGame,
   normalizeRange,
   nudgeRange,
   pitchToHeight,
+  pitchViewport,
+  smoothToward,
   stepGame,
   steeringPitch,
+  targetCueFor,
   togglePlay,
   type GamePhase,
   type GameState,
@@ -58,21 +59,30 @@ export function PitchGlider() {
   const range = useGameRange();
   const rangeSource = useAppSetting("games.range");
   const difficulty = useAppSetting("games.difficulty");
+  const viewportSemitones = useAppSetting("games.viewportSemitones");
   const noteColors = useAppSetting("notes.colorMap");
   const best = useAppSetting("games.bestScores");
   const [phase, setPhase] = useState<GamePhase>("ready");
   const [lastScore, setLastScore] = useState(0);
   const [newBest, setNewBest] = useState(false);
   const canvas = useRef<HTMLCanvasElement>(null);
+  const stage = useRef<HTMLDivElement>(null);
   const scoreEl = useRef<HTMLSpanElement>(null);
   const noteEl = useRef<HTMLSpanElement>(null);
   const game = useRef<GameState>(newGame());
   const trail = useRef<number[]>([]);
   const lastNow = useRef<number | null>(null);
   const theme = useRef<{ version: number; colors: CanvasTheme } | null>(null);
+  const cameraMidi = useRef((range.low + range.high) / 2);
 
   const rangeRef = useRef(range);
   rangeRef.current = range;
+
+  const toggleFullscreen = () => {
+    if (!stage.current) return;
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void stage.current.requestFullscreen();
+  };
 
   const toggle = () => {
     const wasOver = game.current.phase === "over";
@@ -123,17 +133,22 @@ export function PitchGlider() {
       getAppSetting("games.speed"),
       getAppSetting("games.gravity"),
       getAppSetting("games.pitchSmoothingMs"),
+      getAppSetting("games.viewportSemitones"),
     );
     const midi = steeringPitch(live.lastPitch, now - live.pitchAt, getAppSetting("games.minClarity"), STALE_MS);
+    const stabilityCents = midi === null ? null : live.lastPitch?.stabilityCents ?? null;
     const target = midi === null ? null : pitchToHeight(midi, r);
     const before = game.current;
     if (before.phase === "ready" && target !== null) {
       // Before starting, the glider already follows your voice so you can find your footing.
       game.current = { ...before, craftY: target, voiced: true };
     } else {
-      game.current = stepGame(before, cfg, dt, target, Math.random);
+      game.current = stepGame(before, cfg, dt, midi, stabilityCents, Math.random);
     }
     const g = game.current;
+    const nextTarget = g.gates.find((gate) => !gate.passed)?.targetMidi ?? midi ?? cameraMidi.current;
+    cameraMidi.current = smoothToward(cameraMidi.current, nextTarget, dt, GAME_VIEWPORT_PAN_SMOOTHING_MS);
+    const viewport = pitchViewport(r, cameraMidi.current, viewportSemitones);
     if (g.phase === "playing" || g.phase === "ready") {
       trail.current.push(g.craftY);
       if (trail.current.length > TRAIL) trail.current.shift();
@@ -157,7 +172,7 @@ export function PitchGlider() {
     }
     const ctx = el.getContext("2d");
     if (!ctx) return;
-    draw(ctx, theme.current.colors, g, trail.current, r, midi, noteColors, cfg.speed, width, height, dpr);
+    draw(ctx, theme.current.colors, g, trail.current, r, viewport, midi, noteColors, cfg.speed, width, height, dpr);
   });
 
   const bestHere = best[difficulty] ?? 0;
@@ -190,7 +205,8 @@ export function PitchGlider() {
           </Button>
         )}
       </div>
-      <div className="glider-stage">
+      <div ref={stage} className="glider-stage">
+        <Button variant="ghost" size="sm" onPress={toggleFullscreen}>Fullscreen</Button>
         <canvas ref={canvas} className="glider-canvas" role="img" aria-label="Pitch Glider play field" />
         {phase !== "playing" && (
           <div className="glider-overlay">
@@ -222,6 +238,7 @@ export function PitchGlider() {
       <div className="glider-settings">
         <Setting id="games.difficulty" />
         <Setting id="games.speed" />
+        <Setting id="games.viewportSemitones" />
         <Setting id="games.range" />
         {rangeSource === "custom" && (
           <>
@@ -255,6 +272,7 @@ function draw(
   g: GameState,
   trail: number[],
   range: MidiRange,
+  viewport: MidiRange,
   sungMidi: number | null,
   noteColors: readonly string[],
   speed: number,
@@ -264,7 +282,10 @@ function draw(
 ) {
   const H = height;
   const X = (x: number) => x * H;
-  const Y = (y: number) => H - y * H;
+  const viewportBottom = pitchToHeight(viewport.low, range);
+  const viewportTop = pitchToHeight(viewport.high, range);
+  const viewportSpan = Math.max(0.0001, viewportTop - viewportBottom);
+  const Y = (y: number) => H - ((y - viewportBottom) / viewportSpan) * H;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = c.bg;
@@ -273,7 +294,7 @@ function draw(
   // Semitone lines across the range; C lines stronger and labelled.
   ctx.font = "11px system-ui, sans-serif";
   ctx.textBaseline = "middle";
-  for (let m = Math.ceil(range.low); m <= range.high; m++) {
+  for (let m = Math.ceil(viewport.low); m <= viewport.high; m++) {
     const y = Y(pitchToHeight(m, range));
     const isC = m % 12 === 0;
     ctx.strokeStyle = isC ? c.gridStrong : c.grid;
@@ -303,10 +324,10 @@ function draw(
   // Gates: walls of light with a glowing rim around the opening.
   for (const gate of g.gates) {
     const x = X(gate.x);
-    const w = X(GATE_WIDTH);
-    const top = Y(gate.gapY + gate.gapSize / 2);
-    const bottom = Y(gate.gapY - gate.gapSize / 2);
-    const targetColor = noteColor(noteColors, heightToPitch(gate.gapY, range));
+    const w = X(gate.width);
+    const top = Y(gate.gapTop);
+    const bottom = Y(gate.gapBottom);
+    const targetColor = noteColor(noteColors, gate.targetMidi);
     ctx.fillStyle = targetColor;
     roundRect(ctx, x, -8, w, top + 8, 6);
     roundRect(ctx, x, bottom, w, H - bottom + 8, 6);
@@ -333,7 +354,17 @@ function draw(
     if (!gate.passed) {
       ctx.fillStyle = c.textDim;
       ctx.textAlign = "center";
-      ctx.fillText(noteLabel(heightToPitch(gate.gapY, range)), x + w / 2, Y(gate.gapY));
+      ctx.fillText(noteLabel(gate.targetMidi), x + w / 2, Y(gate.gapY));
+      ctx.textAlign = "start";
+    }
+    // Cue sits immediately before the approaching pipe and stays inside the visible band.
+    if (!gate.passed && x > 22) {
+      const cue = targetCueFor(gate, g.craftY, viewportBottom, viewportTop);
+      const arrow = cue.direction === "up" ? "↑" : cue.direction === "down" ? "↓" : "•";
+      ctx.fillStyle = targetColor;
+      ctx.font = "600 12px system-ui, sans-serif";
+      ctx.textAlign = "right";
+      ctx.fillText(`${noteLabel(gate.targetMidi)} ${arrow}`, x - 8, Y(cue.y));
       ctx.textAlign = "start";
     }
   }
@@ -360,17 +391,30 @@ function draw(
   const cx = X(CRAFT_X);
   const cy = Y(g.craftY);
   const r = X(CRAFT_RADIUS);
+  const ry = (g.craftRadius / viewportSpan) * H;
+  const envelopeR = (g.envelopeRadius / viewportSpan) * H;
+  if (envelopeR > ry) {
+    ctx.save();
+    ctx.strokeStyle = sungMidi === null ? c.textDim : noteColor(noteColors, sungMidi);
+    ctx.globalAlpha = 0.38;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, r, envelopeR, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
   ctx.fillStyle = g.phase === "over" ? c.off : g.voiced && sungMidi !== null ? noteColor(noteColors, sungMidi) : c.textDim;
   ctx.beginPath();
   ctx.moveTo(cx + r * 1.5, cy);
-  ctx.lineTo(cx - r * 1.1, cy - r * 1.05);
+  ctx.lineTo(cx - r * 1.1, cy - ry * 1.05);
   ctx.lineTo(cx - r * 0.55, cy);
-  ctx.lineTo(cx - r * 1.1, cy + r * 1.05);
+  ctx.lineTo(cx - r * 1.1, cy + ry * 1.05);
   ctx.closePath();
   ctx.fill();
   ctx.fillStyle = c.bg;
   ctx.beginPath();
-  ctx.arc(cx + r * 0.35, cy, r * 0.28, 0, Math.PI * 2);
+  ctx.ellipse(cx + r * 0.35, cy, r * 0.28, ry * 0.28, 0, 0, Math.PI * 2);
   ctx.fill();
 }
 
