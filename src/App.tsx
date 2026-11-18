@@ -9,7 +9,9 @@ import { ShortcutSheet, useLiveShortcuts } from "./components/Shortcuts";
 import { TrackInspector } from "./components/TrackInspector";
 import { UiProvider, useUi } from "./components/UiContext";
 import { Button } from "./components/ui/controls";
-import { EngineProvider, useEngineState } from "./engine/EngineContext";
+import { EngineProvider, useEngineActions, useEngineState, useEngineStore } from "./engine/EngineContext";
+import { studioStopOnEnter } from "./practice/studioHandoff";
+import { getAppSetting } from "./settings/appSettings";
 import type { EngineClient } from "./engine/client";
 import { shortcutKeys } from "./lib/shortcuts";
 import { PracticeLab } from "./workspaces/PracticeLab";
@@ -36,6 +38,15 @@ function EngineBadge() {
 
 function Shell() {
   const [workspace, setWorkspace] = useState<WorkspaceId>("studio");
+  const engineStore = useEngineStore();
+  const { sendLooper } = useEngineActions();
+  const selectWorkspace = (id: WorkspaceId) => {
+    if (id === "practice" && workspace !== "practice") {
+      const stop = studioStopOnEnter(engineStore.getSnapshot().looper, getAppSetting("practice.stopStudioOnEnter"));
+      if (stop) sendLooper(stop);
+    }
+    setWorkspace(id);
+  };
   const ui = useUi();
   const project = useProject((state) => state.project);
   const projectName = project?.name || "Untitled";
@@ -59,7 +70,7 @@ function Shell() {
               role="tab"
               aria-selected={workspace === w.id}
               className={workspace === w.id ? "tab is-on" : "tab"}
-              onClick={() => setWorkspace(w.id)}
+              onClick={() => selectWorkspace(w.id)}
             >
               {w.label}
             </button>

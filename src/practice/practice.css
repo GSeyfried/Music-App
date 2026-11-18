@@ -423,3 +423,25 @@
     flex-wrap: wrap;
   }
 }
+
+/* ---- difficulty and scale exercises ----------------------------------------------------- */
+
+.pl-difficulty {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s-3);
+}
+
+.pl-scale-tonic .segmented-row {
+  flex-wrap: wrap;
+}
+
+.pl-scale-tonic .seg {
+  flex: 1 0 var(--hit);
+  padding: 0 var(--s-2);
+}
+
+.pl-scale .pl-input {
+  max-width: 20rem;
+}

@@ -12,6 +12,9 @@
 import type { EngineClient } from "../engine/client";
 import { toEngineError, type EngineEvent } from "../engine/protocol";
 import type { EngineStore } from "../engine/store";
+import { getAppSetting, setAppSetting } from "../settings/appSettings";
+import type { Difficulty } from "../settings/registry";
+import { DIFFICULTY_PRESETS, difficultyAfterEdit, difficultyOf, isPreset } from "./difficulty";
 import {
   DEFAULT_PRACTICE_CONFIG,
   type AttemptRecord,
@@ -20,6 +23,7 @@ import {
   type PracticeConfig,
   type PracticeProgress,
   type PracticeStatus,
+  type Reference,
   type ReferenceDetail,
   type ReferenceSummary,
   type ScoringConfig,
@@ -190,8 +194,22 @@ export class PracticeStore {
     await this.attempt(async () => {
       const [status, config] = await Promise.all([this.client.call("practice_status"), this.client.call("practice_get_config")]);
       this.set({ status, config });
+      this.syncDifficulty();
     });
     if (!this.snapshot.unsupported) await this.loadReferences();
+  }
+
+  /**
+   * The engine's saved tolerances are the authority: if they no longer match
+   * the chosen preset (edited elsewhere, or an older library), show the mode
+   * they do match (or Custom) rather than overwriting them.
+   */
+  private syncDifficulty(): void {
+    const current = getAppSetting("practice.difficulty");
+    if (isPreset(current)) {
+      const actual = difficultyOf(this.snapshot.config.scoring);
+      if (actual !== current) setAppSetting("practice.difficulty", actual);
+    }
   }
 
   async loadReferences(): Promise<void> {
@@ -279,8 +297,50 @@ export class PracticeStore {
     });
   }
 
-  /** Re-score the open result with changed tolerances (also saved as the default). */
+  /** Re-score the open result with tolerances changed by hand (also saved as the default; difficulty becomes Custom). */
   rescore(patch: Partial<ScoringConfig>): Promise<unknown> {
+    const r = this.snapshot.result;
+    if (r) this.markHandEdit(r.report.config, patch);
+    return this.rescoreWith(patch);
+  }
+
+  /** Change scoring defaults for future attempts by hand (difficulty becomes Custom). */
+  setScoring(patch: Partial<ScoringConfig>): Promise<unknown> {
+    this.markHandEdit(this.snapshot.config.scoring, patch);
+    return this.saveScoring(patch);
+  }
+
+  /**
+   * Choose a difficulty. A preset applies its tolerances through the same
+   * path as a hand edit: the open result is re-scored (when it still has its
+   * take) and the values become the default for future attempts.
+   */
+  applyDifficulty(mode: Difficulty): Promise<unknown> {
+    setAppSetting("practice.difficulty", mode);
+    if (!isPreset(mode)) return Promise.resolve();
+    const patch = DIFFICULTY_PRESETS[mode];
+    return this.snapshot.result?.take ? this.rescoreWith(patch) : this.saveScoring(patch);
+  }
+
+  /**
+   * Add a generated reference (e.g. a scale exercise) to the library and open
+   * it. Uses the library import (replace: false), so no extra engine command.
+   */
+  addReference(reference: Reference): Promise<unknown> {
+    return this.attempt(async () => {
+      await this.client.call("practice_import_library", { library: { formatVersion: 1, references: [reference] }, replace: false });
+      await this.loadReferences();
+      await this.select(reference.id);
+    });
+  }
+
+  private markHandEdit(before: ScoringConfig, patch: Partial<ScoringConfig>): void {
+    const current = getAppSetting("practice.difficulty");
+    const next = difficultyAfterEdit(current, before, patch);
+    if (next !== current) setAppSetting("practice.difficulty", next);
+  }
+
+  private rescoreWith(patch: Partial<ScoringConfig>): Promise<unknown> {
     const r = this.snapshot.result;
     if (!r) return Promise.resolve();
     const scoring = { ...r.report.config, ...patch };
@@ -293,8 +353,7 @@ export class PracticeStore {
     });
   }
 
-  /** Change scoring defaults for future attempts. */
-  setScoring(patch: Partial<ScoringConfig>): Promise<unknown> {
+  private saveScoring(patch: Partial<ScoringConfig>): Promise<unknown> {
     return this.attempt(async () => {
       const config = await this.client.call("practice_set_config", {
         config: { ...this.snapshot.config, scoring: { ...this.snapshot.config.scoring, ...patch } },
