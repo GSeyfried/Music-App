@@ -19,6 +19,7 @@
 import { DEFAULT_TRACK_LOOP, type AudioDevice, type TrackLoop, type TrackLoopMode, type TransportState } from "../models/domain";
 import type { PracticeCommands, PracticeEvent, TransportMap } from "../practice/types";
 import type { ProjectCommands, ProjectEngineEvent } from "../project/types";
+import type { ArrangementCommands, ArrangementEngineEvent } from "../produce/types";
 
 // ---- Preview instrument (preview.rs) ------------------------------------------
 
@@ -801,6 +802,8 @@ export type EngineEvent =
   | { type: "audioSession"; payload: SessionEvent }
   | { type: "audioSessionInfo"; payload: SessionInfo }
   | ProjectEngineEvent
+  // PRODUCE (docs/projects/produce/README.md "Contract"); consumed by src/produce.
+  | ArrangementEngineEvent
   // Practice Lab (docs/projects/practice-lab/INTERFACE.md); consumed by src/practice.
   | PracticeEvent;
 
@@ -827,6 +830,7 @@ export const EVENT_TYPES: readonly EngineEventType[] = [
   "audioSession",
   "audioSessionInfo",
   "project",
+  "arrangementPosition",
   "practiceState",
   "practiceProgress",
   "practiceTake",
@@ -855,7 +859,7 @@ export function parseEngineEvent(raw: unknown): EngineEvent | null {
  * Tauri command table: command name -> argument object and result. Argument
  * keys are camelCase (Tauri maps them to the Rust snake_case parameters).
  */
-export interface EngineCommands extends PracticeCommands, ProjectCommands {
+export interface EngineCommands extends PracticeCommands, ProjectCommands, ArrangementCommands {
   list_input_devices: { args: undefined; result: AudioDevice[] };
   start_input: { args: { deviceId: string | null }; result: EngineStatus };
   stop_input: { args: undefined; result: EngineStatus };

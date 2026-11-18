@@ -16,6 +16,7 @@ import {
 } from "../models/domain";
 import { DEFAULT_AUDIO_CONFIG, LAYER_SUMMARY_BINS } from "./protocol";
 import { MockPractice } from "../practice/mockPractice";
+import { MockArrangement, resamplePeaks } from "../produce/mockArrangement";
 import type { OpKind, OpResult, ProjectInfo, ProjectRequest } from "../project/types";
 import type {
   AnalysisConfig,
@@ -349,6 +350,8 @@ export class MockEngine implements EngineTransport {
   private tracks: MockTrack[];
   private free = POOL_LAYERS;
   private latency = 0;
+  /** Envelopes of audio loaded from PRODUCE, by "track:layer". */
+  private loadedBins = new Map<string, number[]>();
   /** Simulated Practice Lab (src/practice/mockPractice.ts). */
   readonly practice = new MockPractice({
     capturing: () => this.capturing,
@@ -357,6 +360,27 @@ export class MockEngine implements EngineTransport {
     looperAvailable: () => this.capturing,
     looperRunning: () => this.run === "running" || this.run === "countIn",
     play: () => this.looperCommand({ type: "play" }),
+    emit: (e) => this.emit(e),
+  });
+
+  /** Simulated PRODUCE arrangement (src/produce/mockArrangement.ts). */
+  readonly arrangement = new MockArrangement({
+    sampleRate: () => this.sampleRate,
+    looperTracks: () =>
+      this.capturing
+        ? this.tracks.map((tr) => ({ layers: tr.layers, period: this.trackPeriod(tr), offsets: [...tr.offsets], gain: tr.gain }))
+        : null,
+    layerBins: (track, layer) => this.layerBins(track, layer),
+    loadIntoLooper: (track, frames, bins) => this.loadIntoLooper(track, frames, bins),
+    stopLooper: () => {
+      if (this.capturing && this.run !== "stopped") {
+        this.stop();
+        this.emit({ type: "looper", payload: this.looperState() });
+      }
+    },
+    markUnsaved: () => {
+      this.project = { ...this.project, unsavedChanges: true };
+    },
     emit: (e) => this.emit(e),
   });
 
@@ -436,6 +460,11 @@ export class MockEngine implements EngineTransport {
         return null;
 
       default:
+        if (command.startsWith("arrangement_")) {
+          const result = this.arrangement.invoke(command, args);
+          if (command === "arrangement_play") this.ensureTimer();
+          return result;
+        }
         if (command.startsWith("practice_")) return this.practice.invoke(command, args);
         throw { kind: "invalid", message: `the simulated engine has no command "${command}"` } satisfies EngineError;
     }
@@ -662,7 +691,7 @@ export class MockEngine implements EngineTransport {
   }
 
   private ensureTimer(): void {
-    if (this.realtime && !this.timer && (this.capturing || this.midiOpen.size > 0)) {
+    if (this.realtime && !this.timer && (this.capturing || this.midiOpen.size > 0 || this.arrangement.isPlaying)) {
       this.timer = setInterval(() => this.tick(TICK_MS / 1000), TICK_MS);
     }
   }
@@ -921,6 +950,7 @@ export class MockEngine implements EngineTransport {
     this.capturing = false;
     if (pending) this.finishCalibration(pending.apply, true);
     this.practice.audioStopped();
+    this.arrangement.audioStopped();
     this.stopTimerIfIdle();
     const status = this.status();
     this.emit({ type: "status", payload: status });
@@ -978,6 +1008,8 @@ export class MockEngine implements EngineTransport {
       const problem = validateTrackLoop(cmd.settings);
       if (problem) throw { kind: "invalid", message: problem } satisfies EngineError;
     }
+    // The looper and arrangement transports are exclusive: starting one stops the other.
+    if (["play", "resume", "restart", "record", "overdub"].includes(cmd.type)) this.arrangement.stop();
     const rejected = this.apply(cmd);
     if (rejected) this.notice({ kind: "rejected", reason: rejected });
     this.emit({ type: "looper", payload: this.looperState() });
@@ -1482,6 +1514,7 @@ export class MockEngine implements EngineTransport {
 
   private clear(index: number): void {
     const tr = this.tracks[index];
+    this.loadedBins.delete(`${index}:0`);
     this.free += tr.layers + tr.redo;
     tr.layers = 0;
     tr.redo = 0;
@@ -1494,14 +1527,54 @@ export class MockEngine implements EngineTransport {
   }
 
   /** Browser-only stand-in: deterministic 128-bin musical-looking envelopes. */
-  private emitLayerSummary(track: number, layer: number): void {
-    if (track < 0 || layer < 0) return;
-    const bins = Array.from({ length: LAYER_SUMMARY_BINS }, (_, bin) => {
+  /** Deterministic 128-bin envelope for a layer (or the audio loaded into it from PRODUCE). */
+  private layerBins(track: number, layer: number): number[] {
+    const loaded = this.loadedBins.get(`${track}:${layer}`);
+    if (loaded) return [...loaded];
+    return Array.from({ length: LAYER_SUMMARY_BINS }, (_, bin) => {
       const phase = (bin / LAYER_SUMMARY_BINS) * Math.PI * 2;
       const body = 0.12 + 0.32 * Math.abs(Math.sin(phase * (2 + layer) + track * 0.7));
       const accents = bin % 16 < 3 ? 0.28 * (1 - (bin % 16) / 3) : 0;
       return Math.min(1, body + accents + layer * 0.05);
     });
+  }
+
+  /**
+   * PRODUCE "Send to Play": load rendered audio into an empty track (or a new
+   * one) as its base layer, with a Free loop of the region's length.
+   */
+  private loadIntoLooper(track: number | null, frames: number, bins: number[]): number {
+    if (!this.capturing) throw { kind: "invalid", message: "start audio before sending to PLAY" } satisfies EngineError;
+    if (this.tooLong(frames)) throw { kind: "invalid", message: `longer than the ${MAX_LOOP_SECONDS} s loop limit` } satisfies EngineError;
+    let index = track;
+    if (index === null) {
+      if (this.tracks.length >= this.trackCapacity) {
+        throw { kind: "resourceLimit", message: "no more PLAY tracks can be added" } satisfies EngineError;
+      }
+      this.tracks.push(this.emptyTrack());
+      index = this.tracks.length - 1;
+    }
+    const tr = this.tracks[index];
+    if (!tr) throw { kind: "invalid", message: `PLAY track ${index + 1} does not exist` } satisfies EngineError;
+    if (tr.layers > 0 || tr.rec || tr.copyFramesLeft > 0) {
+      throw { kind: "invalid", message: `PLAY track ${index + 1} is not empty` } satisfies EngineError;
+    }
+    if (this.free === 0) throw { kind: "resourceLimit", message: "no free layer memory" } satisfies EngineError;
+    this.free -= 1;
+    tr.layers = 1;
+    tr.offsets = [0];
+    tr.playing = true;
+    tr.loop = { ...tr.loop, mode: "free" };
+    tr.clock = { period: Math.round(frames), origin: 0 };
+    this.loadedBins.set(`${index}:0`, resamplePeaks(bins, LAYER_SUMMARY_BINS));
+    this.emitLayerSummary(index, 0);
+    this.emit({ type: "looper", payload: this.looperState() });
+    return index;
+  }
+
+  private emitLayerSummary(track: number, layer: number): void {
+    if (track < 0 || layer < 0) return;
+    const bins = this.layerBins(track, layer);
     this.emit({ type: "layerSummary", payload: { track, layer, bins } });
     const tr = this.tracks[track];
     const period = tr ? this.trackPeriod(tr) : this.period;
@@ -1778,6 +1851,7 @@ export class MockEngine implements EngineTransport {
 
     this.advanceLooper(frames);
     this.emit({ type: "looper", payload: this.looperState() });
+    this.arrangement.tick(seconds);
     this.practice.tick(seconds);
   }
 }

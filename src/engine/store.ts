@@ -187,6 +187,8 @@ export interface EngineSnapshot {
    * it is fine as snapshot state). null until one arrives or while analysis is off.
    */
   chord: ChordEvent | null;
+  /** PRODUCE: whether the arrangement transport is playing (changes rarely; the frame is in `live.arrangement`). */
+  arrangementPlaying: boolean;
 }
 
 export interface LiveData {
@@ -219,6 +221,10 @@ export interface LiveData {
   chord: ChordEvent | null;
   /** performance.now() when `chord` arrived. */
   chordAt: number;
+  /** PRODUCE: latest arrangement playhead (~30 Hz while playing); null until the first event. */
+  arrangement: { frame: number; playing: boolean } | null;
+  /** performance.now() when `arrangement` arrived (for interpolating between events). */
+  arrangementAt: number;
 }
 
 function looperView(s: LooperState): LooperView {
@@ -263,6 +269,8 @@ export class EngineStore {
     practiceProgress: null,
     chord: null,
     chordAt: 0,
+    arrangement: null,
+    arrangementAt: 0,
   };
 
   constructor(transportKind: TransportKind = "native") {
@@ -291,6 +299,7 @@ export class EngineStore {
       infoToasts: [],
       micPermission: null,
       sessionInfo: null,
+      arrangementPlaying: false,
     };
   }
 
@@ -441,6 +450,11 @@ export class EngineStore {
         if (event.payload.kind === "done") {
           this.set({ status: { ...this.snapshot.status, unsavedChanges: event.payload.project.unsavedChanges } });
         }
+        return;
+      case "arrangementPosition":
+        live.arrangement = { frame: event.payload.frame, playing: event.payload.playing };
+        live.arrangementAt = now;
+        this.set({ arrangementPlaying: event.payload.playing });
         return;
       case "audioDiagnostics":
         live.audioDiagnostics = event.payload;
