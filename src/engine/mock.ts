@@ -1040,10 +1040,10 @@ export class MockEngine implements EngineTransport {
   }
   private nextBarAtOrAfter(frame: number): number {
     const step = this.framesPerBar();
-    return Math.round(Math.ceil(frame / step - 1e-9) * step);
+    return Math.round(Math.ceil(frame / step - 1e-9) * step) + 0; // + 0: never -0
   }
   private nextCycleAtOrAfter(frame: number, origin: number, period: number): number {
-    return origin + Math.round(Math.ceil((frame - origin) / period - 1e-9) * period);
+    return origin + Math.round(Math.ceil((frame - origin) / period - 1e-9) * period) + 0;
   }
   private tooLong(period: number): boolean {
     return period > MAX_LOOP_SECONDS * this.sampleRate;

@@ -163,6 +163,8 @@ interface StepperProps {
   /** Pressing − / + moves by this much (defaults to `step`). */
   bigStep?: number;
   disabled?: boolean;
+  /** Shown (as a tooltip) while disabled: why this cannot change now. */
+  disabledReason?: string;
   format?: (v: number) => string;
   /** Allow typing a value. */
   editable?: boolean;
@@ -178,6 +180,7 @@ export function Stepper({
   step = 1,
   bigStep,
   disabled,
+  disabledReason,
   format = String,
   editable = false,
   onChange,
@@ -192,7 +195,13 @@ export function Stepper({
     if (Number.isFinite(v) && clampRound(v) !== value) onChange(clampRound(v));
   };
   return (
-    <div className={disabled ? "stepper is-disabled" : "stepper"} role="group" aria-label={label}>
+    <div
+      className={disabled ? "stepper is-disabled" : "stepper"}
+      role="group"
+      aria-label={label}
+      title={disabled ? disabledReason : undefined}
+      data-locked-reason={disabled ? disabledReason : undefined}
+    >
       <ControlLabel label={label} help={help} />
       <div className="stepper-row">
         <button
@@ -251,12 +260,23 @@ interface SegmentedProps<T extends string | number> {
   value: T;
   options: { value: T; label: string }[];
   disabled?: boolean;
+  /** Shown (as a tooltip) while disabled: why this cannot change now. */
+  disabledReason?: string;
   onChange: (v: T) => void;
 }
 
-export function Segmented<T extends string | number>({ label, help, value, options, disabled, onChange }: SegmentedProps<T>) {
+export function Segmented<T extends string | number>({
+  label,
+  help,
+  value,
+  options,
+  disabled,
+  disabledReason,
+  onChange,
+}: SegmentedProps<T>) {
+  const reason = disabled ? disabledReason : undefined;
   return (
-    <div className={disabled ? "segmented is-disabled" : "segmented"}>
+    <div className={disabled ? "segmented is-disabled" : "segmented"} title={reason} data-locked-reason={reason}>
       <ControlLabel label={label} help={help} />
       <div className="segmented-row" role="radiogroup" aria-label={label}>
         {options.map((o) => (

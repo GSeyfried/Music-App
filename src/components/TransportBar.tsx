@@ -1,6 +1,10 @@
-// Global transport: play/stop/pause/restart, position, tempo, meter, loop
-// mode and length, count-in, click. Settings that would change an existing
-// loop are locked (with an explanation) while loops exist.
+// Global transport: play/stop/pause/restart, position, and two groups of
+// settings (PER_TRACK_LOOPS.md):
+//   - Song: tempo, meter and click, always global.
+//   - "Track N loop": the selected track's loop settings (mode, length, ratio,
+//     count-in, overdub start, fit). A track that loops "Same as song" shows the
+//     song's loop mode and length here, exactly as before per-track loops.
+// Settings that would change an existing loop are disabled with the reason.
 
 import { useRef, useState } from "react";
 import { useEngineActions, useEngineState, useLive } from "../engine/EngineContext";
@@ -11,6 +15,8 @@ import { setAttr, setText, useFrame } from "../lib/useFrame";
 import { AdvancedOptions } from "../settings/AdvancedOptions";
 import { Icon } from "./ui/Icon";
 import { Button, ConfirmButton, HelpTip, Segmented, Stepper } from "./ui/controls";
+import { TrackLoopGroup } from "./TrackLoopGroup";
+import { useUi } from "./UiContext";
 
 export function positionText(s: LooperState | null): { main: string; sub: string } {
   if (!s) return { main: "—", sub: "" };
@@ -48,16 +54,18 @@ const DENOMINATORS = [2, 4, 8, 16].map((d) => ({ value: d, label: String(d) }));
 /** Meters offered in the Meter menu; anything else is set with "Custom…". */
 const METERS = ["4/4", "3/4", "2/4", "2/2", "5/4", "7/4", "3/8", "5/8", "6/8", "7/8", "9/8", "12/8"];
 const CUSTOM_METER = "custom";
+const GRID_LOCK_REASON =
+  "Tempo and meter are locked while loops exist in Synced mode. Clear the loops to change them.";
 
 export function TransportBar() {
   const view = useEngineState((s) => s.looper);
   const { sendLooper, patchTransport } = useEngineActions();
+  const { selectedTrack } = useUi();
   const [customMeter, setCustomMeter] = useState(false);
   if (!view) return null;
   const c = transportControls(view);
   const tr = view.transport;
   const meter = `${tr.timeSignature.numerator}/${tr.timeSignature.denominator}`;
-  const synced = tr.mode === "synced";
   const running = view.run === "running" || view.run === "countIn";
   const pause = pauseCommand(view.run);
 
@@ -113,156 +121,104 @@ export function TransportBar() {
       </div>
 
       <div className="transport-settings">
-        <Segmented
-          label="Loop mode"
-          help="Free follows your performance. Synced records a loop whose duration is set by tempo, meter, bars, and beats."
-          value={tr.mode}
-          disabled={c.modeLocked}
-          options={[
-            { value: "free", label: "Free" },
-            { value: "synced", label: "Synced" },
-          ]}
-          onChange={(mode) => patchTransport({ mode })}
-        />
-        <Stepper
-          label="Tempo (BPM)"
-          help="The pulse speed. In 7/8, for example, each eighth note receives one beat at this tempo."
-          value={tr.bpm}
-          min={20}
-          max={400}
-          step={1}
-          editable
-          disabled={c.gridLocked}
-          format={(v) => v.toFixed(0)}
-          onChange={(bpm) => patchTransport({ bpm })}
-        />
-        <label className="field">
-          <span className="control-label">
-            <span className="stepper-label">Meter</span>
-            <HelpTip
-              label="Meter"
-              text="Beats per measure / the note that counts as one beat. 6/8 is six eighth notes per measure. Choose Custom for any other meter (1–32 beats)."
-            />
-          </span>
-          <select
-            aria-label="Meter"
-            value={customMeter || !METERS.includes(meter) ? CUSTOM_METER : meter}
-            disabled={c.gridLocked}
-            onChange={(e) => {
-              const v = e.currentTarget.value;
-              if (v === CUSTOM_METER) return setCustomMeter(true);
-              setCustomMeter(false);
-              const [numerator, denominator] = v.split("/").map(Number);
-              patchTransport({ timeSignature: { numerator, denominator } });
-            }}
-          >
-            {METERS.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-            <option value={CUSTOM_METER}>{METERS.includes(meter) ? "Custom…" : `Custom (${meter})`}</option>
-          </select>
-        </label>
-        {(customMeter || !METERS.includes(meter)) && (
-          <>
+        <div className="transport-group" role="group" aria-label="Song settings">
+          <span className="transport-group-label">Song</span>
+          <div className="transport-group-row">
             <Stepper
-              label="Beats per measure"
-              help="How many pulses make one measure, 1–32."
-              value={tr.timeSignature.numerator}
+              label="Tempo (BPM)"
+              help="The pulse speed. In 7/8, for example, each eighth note receives one beat at this tempo."
+              value={tr.bpm}
+              min={20}
+              max={400}
+              step={1}
+              editable
+              disabled={c.gridLocked}
+              disabledReason={GRID_LOCK_REASON}
+              format={(v) => v.toFixed(0)}
+              onChange={(bpm) => patchTransport({ bpm })}
+            />
+            <label className="field" title={c.gridLocked ? GRID_LOCK_REASON : undefined}>
+              <span className="control-label">
+                <span className="stepper-label">Meter</span>
+                <HelpTip
+                  label="Meter"
+                  text="Beats per measure / the note that counts as one beat. 6/8 is six eighth notes per measure. Choose Custom for any other meter (1–32 beats)."
+                />
+              </span>
+              <select
+                aria-label="Meter"
+                value={customMeter || !METERS.includes(meter) ? CUSTOM_METER : meter}
+                disabled={c.gridLocked}
+                onChange={(e) => {
+                  const v = e.currentTarget.value;
+                  if (v === CUSTOM_METER) return setCustomMeter(true);
+                  setCustomMeter(false);
+                  const [numerator, denominator] = v.split("/").map(Number);
+                  patchTransport({ timeSignature: { numerator, denominator } });
+                }}
+              >
+                {METERS.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+                <option value={CUSTOM_METER}>{METERS.includes(meter) ? "Custom…" : `Custom (${meter})`}</option>
+              </select>
+            </label>
+            {(customMeter || !METERS.includes(meter)) && (
+              <>
+                <Stepper
+                  label="Beats per measure"
+                  help="How many pulses make one measure, 1–32."
+                  value={tr.timeSignature.numerator}
+                  min={1}
+                  max={32}
+                  disabled={c.gridLocked}
+                  disabledReason={GRID_LOCK_REASON}
+                  onChange={(numerator) => patchTransport({ timeSignature: { ...tr.timeSignature, numerator } })}
+                />
+                <Segmented
+                  label="Beat unit"
+                  help="The note value counted as one beat: 4 means quarter notes, 8 means eighth notes."
+                  value={tr.timeSignature.denominator}
+                  disabled={c.gridLocked}
+                  disabledReason={GRID_LOCK_REASON}
+                  options={DENOMINATORS}
+                  onChange={(denominator) => patchTransport({ timeSignature: { ...tr.timeSignature, denominator } })}
+                />
+              </>
+            )}
+            <Stepper
+              label="Click subdivision"
+              help="Clicks inside each beat: 1 is the beat, 2 divides it in half, and 3 gives triplets."
+              value={tr.metronome.subdivision}
               min={1}
-              max={32}
-              disabled={c.gridLocked}
-              onChange={(numerator) => patchTransport({ timeSignature: { ...tr.timeSignature, numerator } })}
-            />
-            <Segmented
-              label="Beat unit"
-              help="The note value counted as one beat: 4 means quarter notes, 8 means eighth notes."
-              value={tr.timeSignature.denominator}
-              disabled={c.gridLocked}
-              options={DENOMINATORS}
-              onChange={(denominator) => patchTransport({ timeSignature: { ...tr.timeSignature, denominator } })}
-            />
-          </>
-        )}
-        {synced && (
-          <>
-            <Stepper
-              label="Loop bars"
-              help="Whole measures in one repeating cycle. This combines with the extra-beats setting below."
-              value={tr.loopLength.bars}
-              min={0}
-              max={256}
-              disabled={c.lengthLocked}
-              onChange={(bars) => patchTransport({ loopLength: { ...tr.loopLength, bars } })}
-            />
-            <Stepper
-              label="+ beats"
-              help="Adds individual beats after the whole measures—for example, 1 bar + 2 beats."
-              value={tr.loopLength.beats}
-              min={0}
-              max={64}
-              disabled={c.lengthLocked}
-              onChange={(beats) => patchTransport({ loopLength: { ...tr.loopLength, beats } })}
-            />
-            <Stepper
-              label="Count-in bars"
-              help="Measures of click before recording begins. Zero starts at the next available loop boundary."
-              value={tr.metronome.countInBars}
-              min={0}
               max={8}
-              onChange={(countInBars) => patchTransport({ metronome: { ...tr.metronome, countInBars } })}
+              onChange={(subdivision) => patchTransport({ metronome: { ...tr.metronome, subdivision } })}
             />
-          </>
-        )}
-        {!synced && (
-          <Segmented
-            label="Fit first take"
-            help="Chooses the repeating boundary when you stop. Nearest, Down, and Up use whole beats while retaining a short hidden safety tail."
-            value={tr.loopFit}
-            disabled={c.modeLocked}
-            options={[
-              { value: "exact", label: "Exact" },
-              { value: "nearestBeat", label: "Nearest" },
-              { value: "roundDown", label: "Down" },
-              { value: "roundUp", label: "Up" },
-            ]}
-            onChange={(loopFit) => patchTransport({ loopFit })}
-          />
-        )}
-        <AdvancedOptions categories={["Looper", "Loop display"]} />
-        <Stepper
-          label="Click subdivision"
-          help="Clicks inside each beat: 1 is the beat, 2 divides it in half, and 3 gives triplets."
-          value={tr.metronome.subdivision}
-          min={1}
-          max={8}
-          onChange={(subdivision) => patchTransport({ metronome: { ...tr.metronome, subdivision } })}
-        />
-        <div className="segmented">
-          <span className="control-label"><span className="stepper-label">Click</span><HelpTip label="Click" text="Plays the metronome without writing it into loop layers. Use headphones to prevent acoustic speaker bleed." /></span>
-          <Button
-            variant="toggle"
-            icon="metronome"
-            pressed={tr.metronome.enabled}
-            aria-label="Metronome click"
-            title="Turn the metronome click on or off"
-            onPress={() => patchTransport({ metronome: { ...tr.metronome, enabled: !tr.metronome.enabled } })}
-          >
-            {tr.metronome.enabled ? "On" : "Off"}
-          </Button>
+            <div className="segmented">
+              <span className="control-label"><span className="stepper-label">Click</span><HelpTip label="Click" text="Plays the metronome without writing it into loop layers. Use headphones to prevent acoustic speaker bleed." /></span>
+              <Button
+                variant="toggle"
+                icon="metronome"
+                pressed={tr.metronome.enabled}
+                aria-label="Metronome click"
+                title="Turn the metronome click on or off"
+                onPress={() => patchTransport({ metronome: { ...tr.metronome, enabled: !tr.metronome.enabled } })}
+              >
+                {tr.metronome.enabled ? "On" : "Off"}
+              </Button>
+            </div>
+            <AdvancedOptions categories={["Looper", "Loop display"]} />
+          </div>
         </div>
+        <TrackLoopGroup view={view} track={selectedTrack} />
       </div>
-      {(c.modeLocked || c.gridLocked) && (
+      {c.gridLocked && (
         <p className="lock-note">
           <Icon name="lock" size={16} />
-          {c.gridLocked
-            ? "Tempo, meter and mode are locked while loops exist. Stop playback to resize the loop without deleting its layers."
-            : "Loop mode is locked while loops exist. Tempo changes only move the click in Free mode."}
+          {GRID_LOCK_REASON}
         </p>
-      )}
-      {!synced && !c.modeLocked && (
-        <p className="hint">Free mode: your first take sets the loop length. Synced mode: the loop length comes from tempo × bars.</p>
       )}
       {tr.metronome.enabled && (
         <p className="hint" role="note">

@@ -471,15 +471,17 @@ export function normalizeTrackLoop(raw: unknown): TrackLoop {
  * object when nothing is missing.
  */
 export function normalizeLooperState(s: WireLooperState): LooperState {
+  const loopKeys = Object.keys(DEFAULT_TRACK_LOOP) as (keyof TrackLoop)[];
+  const fullLoop = (l: TrackLoop | undefined) => !!l && loopKeys.every((k) => l[k] !== undefined);
   const complete = s.tracks.every(
-    (t) => t.loop !== undefined && t.loopPeriod !== undefined && t.loopPhase !== undefined && t.busy !== undefined,
+    (t) => fullLoop(t.loop) && t.loopPeriod !== undefined && t.loopPhase !== undefined && t.busy !== undefined,
   );
   if (complete) return s as LooperState;
   return {
     ...s,
     tracks: s.tracks.map((t) => ({
       ...t,
-      loop: t.loop === undefined ? { ...DEFAULT_TRACK_LOOP } : normalizeTrackLoop(t.loop),
+      loop: fullLoop(t.loop) ? (t.loop as TrackLoop) : normalizeTrackLoop(t.loop),
       loopPeriod: t.loopPeriod === undefined ? s.loopPeriodFrames : t.loopPeriod,
       loopPhase: t.loopPhase ?? s.loopPhase,
       busy: t.busy ?? false,

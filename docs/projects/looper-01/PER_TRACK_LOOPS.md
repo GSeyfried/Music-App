@@ -1,6 +1,6 @@
 # Per-track loop settings
 
-Status: slice 1 built (b1b8db3). Slices 2–3 (engine) and 5 (UI) in progress against the contract below.
+Status: slice 1 built (b1b8db3). Slices 2–3 (engine) in progress; slice 5 (UI) built against the mock engine (see "UI deviations").
 
 ## What the user asked for
 
@@ -143,3 +143,44 @@ pub struct TrackLoop {
   every Multiple track is empty.
 - Count-in only applies when starting from stopped, using the recording
   track's count-in.
+
+## UI deviations (slice 5, TypeScript side)
+
+Built against the contract above with the mock engine (`src/engine/mock.ts`);
+not yet run against the Rust slices 2–3. Where the contract left a choice,
+the UI and mock do this. The engine work should confirm or change these.
+
+- **Same as song tracks use the song's count-in, overdub start and fit**
+  (`transport.metronome.countInBars`, `transport.overdubStart`,
+  `transport.loopFit`), exactly as before. The track's own `countInBars`,
+  `overdubStart` and `loopFit` are shown and used only in Bars, Multiple and
+  Free. "Fit first take" is shown for Free and Multiple only (a Bars loop has a
+  fixed length).
+- **Invalid settings** (a ratio outside `LOOP_RATIOS`, bars + beats = 0,
+  count-in > 8) fail the `setTrackLoop` call itself with kind `invalid`, like
+  `setTransport` does. The UI never sends them; it also copes with a
+  `RejectReason` instead.
+- **While a duplicate is still copying** (`busy`), the mock refuses every
+  command on that track with `trackBusy` (including `setTrackLoop`), and the UI
+  disables its loop settings, Record, Undo/Redo, Clear, Remove and Duplicate
+  with the reason "Still copying…".
+- **Mock-only choices** (the UI does not depend on them; any `loopPeriod` may be
+  null):
+  - An empty Bars track reports its configured period; an empty Multiple track
+    reports base × ratio once a base exists, otherwise null.
+  - The first Multiple take on a ×r track sets the base to take ÷ r.
+  - A track's count-in applies to Bars, Multiple and Free, for Record and
+    Overdub, whenever the transport is stopped.
+  - DuplicateTrack also needs free pool layers for the copy (`poolExhausted`
+    otherwise).
+- **Selection:** a click anywhere on a track card selects it (`aria-current`,
+  `aria-pressed` on its title button); double-clicking the title still opens
+  Track details. The transport bar group is labelled "Track N loop".
+- **Tempo/meter locks are unchanged:** locked only in Synced mode while loops
+  exist. PENDING: should a tempo change be locked (or refused) while a Bars or
+  Multiple track has content, since their periods come from the song grid?
+- **`looper.trackDefaults.ratio`** is stored as a string ("0.25" … "16") so
+  the generic choice control can edit it; `trackLoopDefaults()` converts it.
+- **New tracks:** after `addTrack`, the UI sends `setTrackLoop` for index
+  `tracks.length` only when the registry defaults differ from
+  `DEFAULT_TRACK_LOOP`, relying on the engine applying looper commands in order.
