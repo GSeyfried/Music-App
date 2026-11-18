@@ -55,6 +55,12 @@ export const GAME_PITCH_WARP_EXPONENT = 0.55;
 export const GAME_SPEEDS: Record<GameSpeed, number> = { slow: 0.22, normal: 0.32, fast: 0.45 };
 /** Pitch Glider distance between gates, in play-field heights. */
 export const GAME_GATE_SPACING = 0.9;
+/** Default melodic interval between consecutive Pitch Glider pipes. */
+export const GAME_PIPE_DISTANCE_SEMITONES = 5;
+/** Hands-free game start requires this long on the prompted pitch class. */
+export const GAME_VOICE_START_HOLD_MS = 250;
+/** Maximum distance from the prompted semitone during a hands-free start. */
+export const GAME_VOICE_START_TOLERANCE_CENTS = 45;
 
 /** Values owned by the frontend ("app" source), with their types. */
 export interface AppSettings {
@@ -117,6 +123,10 @@ export interface AppSettings {
   "games.rangeLowMidi": number;
   "games.rangeHighMidi": number;
   "games.speed": GameSpeed;
+  /** Requested interval between consecutive pipe targets, in semitones. */
+  "games.pipeDistanceSemitones": number;
+  "games.voiceStartHoldMs": number;
+  "games.voiceStartToleranceCents": number;
   "games.viewportSemitones": number;
   /** Pitch smoothing time constant for the craft, ms. */
   "games.pitchSmoothingMs": number;
@@ -175,6 +185,9 @@ export const APP_DEFAULTS: AppSettings = {
   "games.rangeLowMidi": 48,
   "games.rangeHighMidi": 72,
   "games.speed": "normal",
+  "games.pipeDistanceSemitones": GAME_PIPE_DISTANCE_SEMITONES,
+  "games.voiceStartHoldMs": GAME_VOICE_START_HOLD_MS,
+  "games.voiceStartToleranceCents": GAME_VOICE_START_TOLERANCE_CENTS,
   "games.viewportSemitones": 12,
   "games.pitchSmoothingMs": 30,
   "games.gravity": 0.25,
@@ -652,6 +665,19 @@ export const SETTINGS: SettingDef[] = [
     ],
   },
   {
+    id: "games.pipeDistanceSemitones",
+    source: "app",
+    kind: "number",
+    min: 1,
+    max: 24,
+    step: 1,
+    label: "Pipe pitch distance",
+    description: "Target interval between consecutive pipes, in semitones. Larger values require a bigger pitch change in the same travel time.",
+    category: "Games",
+    tier: "daily",
+    scope: "app",
+  },
+  {
     id: "games.pitchSmoothingMs",
     source: "app",
     kind: "number",
@@ -662,6 +688,32 @@ export const SETTINGS: SettingDef[] = [
     description: "How quickly the glider follows a clear sung pitch, in ms. The low default is intentionally fast; higher values feel calmer but respond later.",
     category: "Games",
     tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "games.voiceStartHoldMs",
+    source: "app",
+    kind: "number",
+    min: 100,
+    max: 250,
+    step: 25,
+    label: "Hands-free start hold",
+    description: "How long to sing the randomized start note before a game begins, in ms.",
+    category: "Games",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "games.voiceStartToleranceCents",
+    source: "app",
+    kind: "number",
+    min: 10,
+    max: 50,
+    step: 5,
+    label: "Hands-free start tolerance",
+    description: "How close the sung pitch must remain to the randomized start note.",
+    category: "Games",
+    tier: "internal",
     scope: "app",
   },
   {

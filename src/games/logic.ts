@@ -15,6 +15,7 @@ import {
   GAME_GATE_WIDTHS,
   GAME_GATE_SPACING,
   GAME_PITCH_WARP_EXPONENT,
+  GAME_PIPE_DISTANCE_SEMITONES,
   GAME_SPEEDS,
   type GameDifficulty,
   type GameSpeed,
@@ -132,6 +133,39 @@ export function smoothToward(current: number, target: number, dtMs: number, tauM
   return current + (target - current) * (1 - Math.exp(-dtMs / tauMs));
 }
 
+export interface VoiceStartState {
+  sinceMs: number | null;
+  progress: number;
+  ready: boolean;
+}
+
+export const VOICE_START_IDLE: VoiceStartState = { sinceMs: null, progress: 0, ready: false };
+
+/** Pick a randomized note name (pitch class); octave-specific starts are intentionally deferred. */
+export function randomStartPitchClass(rand01: number): number {
+  return Math.min(11, Math.floor(clamp(rand01, 0, 0.999999) * 12));
+}
+
+/** Hold the prompted pitch class steadily; any octave currently qualifies. */
+export function stepVoiceStart(
+  state: VoiceStartState,
+  sungMidi: number | null,
+  targetPitchClass: number,
+  nowMs: number,
+  holdMs: number,
+  toleranceCents: number,
+): VoiceStartState {
+  if (state.ready) return state;
+  if (sungMidi === null) return VOICE_START_IDLE;
+  const nearest = Math.round(sungMidi);
+  const pitchClass = ((nearest % 12) + 12) % 12;
+  const inTune = Math.abs(sungMidi - nearest) * 100 <= toleranceCents;
+  if (pitchClass !== targetPitchClass || !inTune) return VOICE_START_IDLE;
+  const sinceMs = state.sinceMs ?? nowMs;
+  const progress = holdMs <= 0 ? 1 : Math.min(1, (nowMs - sinceMs) / holdMs);
+  return { sinceMs, progress, ready: progress >= 1 };
+}
+
 // ---- Pitch Glider: world ------------------------------------------------------
 
 export const CRAFT_X = 0.45;
@@ -196,6 +230,8 @@ export interface GameConfig {
   gravity: number;
   smoothingMs: number;
   spacing: number;
+  /** Requested melodic interval between consecutive pipe targets. */
+  pipeDistanceSemitones: number;
 }
 
 export function newGame(): GameState {
@@ -219,6 +255,7 @@ export function gameConfig(
   gravity: number,
   smoothingMs: number,
   viewportSemitones = 12,
+  pipeDistanceSemitones = GAME_PIPE_DISTANCE_SEMITONES,
 ): GameConfig {
   return {
     width,
@@ -231,6 +268,7 @@ export function gameConfig(
     gravity,
     smoothingMs,
     spacing: GAME_GATE_SPACING,
+    pipeDistanceSemitones,
   };
 }
 
@@ -283,12 +321,17 @@ export function targetCueFor(gate: Pick<Gate, "gapY">, craftY: number, usableBot
 }
 
 /** A gate targets one exact MIDI semitone that leaves its visual opening on screen. */
-export function makeGate(x: number, cfg: GameConfig, rand01: number): Gate {
+export function makeGate(x: number, cfg: GameConfig, rand01: number, previousTarget?: number): Gate {
   const candidates = Array.from({ length: cfg.range.high - cfg.range.low + 1 }, (_, i) => cfg.range.low + i).filter((m) => {
     const geometry = gateGeometry(m, cfg.toleranceCents, cfg.range, craftRadiusFor(m, cfg));
     return geometry.gapBottom >= GAME_GATE_EDGE_MARGIN && geometry.gapTop <= 1 - GAME_GATE_EDGE_MARGIN;
   });
-  const notes = candidates.length > 0 ? candidates : [Math.round((cfg.range.low + cfg.range.high) / 2)];
+  let notes = candidates.length > 0 ? candidates : [Math.round((cfg.range.low + cfg.range.high) / 2)];
+  if (previousTarget !== undefined && notes.length > 1) {
+    const requested = Math.max(1, Math.round(cfg.pipeDistanceSemitones));
+    const closestDistance = Math.min(...notes.map((note) => Math.abs(Math.abs(note - previousTarget) - requested)));
+    notes = notes.filter((note) => Math.abs(Math.abs(note - previousTarget) - requested) === closestDistance);
+  }
   const targetMidi = notes[Math.min(notes.length - 1, Math.floor(clamp(rand01, 0, 0.999999) * notes.length))];
   const craftRadius = craftRadiusFor(targetMidi, cfg);
   const geometry = gateGeometry(targetMidi, cfg.toleranceCents, cfg.range, craftRadius);
@@ -344,7 +387,7 @@ export function stepGame(
   }
   const last = gates[gates.length - 1];
   const nextX = last ? last.x + cfg.spacing : cfg.width + GAME_FIRST_GATE_DELAY;
-  if (nextX < cfg.width + cfg.spacing) gates.push(makeGate(Math.max(nextX, cfg.width), cfg, rand()));
+  if (nextX < cfg.width + cfg.spacing) gates.push(makeGate(Math.max(nextX, cfg.width), cfg, rand(), last?.targetMidi));
   crashed = gates.some((gate) => hitsGate(craftY, gate, envelopeRadius));
   return {
     phase: crashed ? "over" : "playing",

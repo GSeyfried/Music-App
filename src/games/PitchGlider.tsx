@@ -15,7 +15,7 @@ import { fitCanvas, setText, useFrame } from "../lib/useFrame";
 import { AdvancedOptions } from "../settings/AdvancedOptions";
 import { getAppSetting, setAppSetting, useAppSetting } from "../settings/appSettings";
 import { GAME_VIEWPORT_PAN_SMOOTHING_MS, settingById, type SettingDef } from "../settings/registry";
-import { noteColor } from "../settings/noteColors";
+import { NOTE_NAMES, noteColor } from "../settings/noteColors";
 import { SettingControl } from "../settings/SettingControl";
 import {
   CRAFT_RADIUS,
@@ -26,14 +26,18 @@ import {
   nudgeRange,
   pitchToHeight,
   pitchViewport,
+  randomStartPitchClass,
   smoothToward,
   stepGame,
+  stepVoiceStart,
   steeringPitch,
   targetCueFor,
   togglePlay,
   type GamePhase,
   type GameState,
   type MidiRange,
+  type VoiceStartState,
+  VOICE_START_IDLE,
 } from "./logic";
 import { useVoiceRange } from "./RangeFinder";
 
@@ -65,6 +69,7 @@ export function PitchGlider() {
   const [phase, setPhase] = useState<GamePhase>("ready");
   const [lastScore, setLastScore] = useState(0);
   const [newBest, setNewBest] = useState(false);
+  const [startPitchClass, setStartPitchClass] = useState(() => randomStartPitchClass(Math.random()));
   const canvas = useRef<HTMLCanvasElement>(null);
   const stage = useRef<HTMLDivElement>(null);
   const scoreEl = useRef<HTMLSpanElement>(null);
@@ -74,6 +79,8 @@ export function PitchGlider() {
   const lastNow = useRef<number | null>(null);
   const theme = useRef<{ version: number; colors: CanvasTheme } | null>(null);
   const cameraMidi = useRef((range.low + range.high) / 2);
+  const startPitchClassRef = useRef(startPitchClass);
+  const voiceStart = useRef<VoiceStartState>(VOICE_START_IDLE);
 
   const rangeRef = useRef(range);
   rangeRef.current = range;
@@ -88,6 +95,7 @@ export function PitchGlider() {
     const wasOver = game.current.phase === "over";
     game.current = togglePlay(game.current);
     if (wasOver) trail.current = [];
+    voiceStart.current = VOICE_START_IDLE;
     lastNow.current = null;
     setPhase(game.current.phase);
   };
@@ -134,12 +142,30 @@ export function PitchGlider() {
       getAppSetting("games.gravity"),
       getAppSetting("games.pitchSmoothingMs"),
       getAppSetting("games.viewportSemitones"),
+      getAppSetting("games.pipeDistanceSemitones"),
     );
     const midi = steeringPitch(live.lastPitch, now - live.pitchAt, getAppSetting("games.minClarity"), STALE_MS);
     const stabilityCents = midi === null ? null : live.lastPitch?.stabilityCents ?? null;
     const target = midi === null ? null : pitchToHeight(midi, r);
     const before = game.current;
-    if (before.phase === "ready" && target !== null) {
+    if (before.phase === "ready" || before.phase === "over") {
+      voiceStart.current = stepVoiceStart(
+        voiceStart.current,
+        midi,
+        startPitchClassRef.current,
+        now,
+        getAppSetting("games.voiceStartHoldMs"),
+        getAppSetting("games.voiceStartToleranceCents"),
+      );
+    } else {
+      voiceStart.current = VOICE_START_IDLE;
+    }
+    if ((before.phase === "ready" || before.phase === "over") && voiceStart.current.ready) {
+      game.current = togglePlay(before);
+      if (before.phase === "over") trail.current = [];
+      voiceStart.current = VOICE_START_IDLE;
+      lastNow.current = null;
+    } else if (before.phase === "ready" && target !== null) {
       // Before starting, the glider already follows your voice so you can find your footing.
       game.current = { ...before, craftY: target, voiced: true };
     } else {
@@ -162,6 +188,10 @@ export function PitchGlider() {
         const beat = g.score > (bests[d] ?? 0);
         setNewBest(beat);
         if (beat) setAppSetting("games.bestScores", { ...bests, [d]: g.score });
+        const nextStart = randomStartPitchClass(Math.random());
+        startPitchClassRef.current = nextStart;
+        setStartPitchClass(nextStart);
+        voiceStart.current = VOICE_START_IDLE;
       }
     }
     setText(scoreEl.current, String(g.score));
@@ -217,6 +247,9 @@ export function PitchGlider() {
                   Sing to fly: higher notes lift the glider, lower notes bring it down, and it sinks when you stop.
                   Glide through the openings. Range {noteLabel(range.low)}–{noteLabel(range.high)}.
                 </p>
+                <p>
+                  Sing <strong style={{ color: noteColor(noteColors, startPitchClass) }}>{NOTE_NAMES[startPitchClass]}</strong> for ¼ second to start hands-free, or press Play.
+                </p>
               </>
             )}
             {phase === "paused" && <h3>Paused</h3>}
@@ -227,6 +260,9 @@ export function PitchGlider() {
                   Score <strong>{lastScore}</strong> · Best <strong>{bestHere}</strong>
                 </p>
                 {newBest && <p className="glider-best">New best on {difficulty}!</p>}
+                <p>
+                  Sing <strong style={{ color: noteColor(noteColors, startPitchClass) }}>{NOTE_NAMES[startPitchClass]}</strong> for ¼ second to play again, or use the button.
+                </p>
               </>
             )}
             <Button variant="solid" size="lg" icon={phase === "over" ? "restart" : "play"} shortcut={["Space"]} onPress={toggle}>
@@ -238,6 +274,7 @@ export function PitchGlider() {
       <div className="glider-settings">
         <Setting id="games.difficulty" />
         <Setting id="games.speed" />
+        <Setting id="games.pipeDistanceSemitones" />
         <Setting id="games.viewportSemitones" />
         <Setting id="games.range" />
         {rangeSource === "custom" && (

@@ -16,15 +16,18 @@ import {
   openingToleranceCentsFor,
   pitchToHeight,
   pitchViewport,
+  randomStartPitchClass,
   heightToPitch,
   smoothToward,
   stabilityToleranceCentsFor,
   stepGame,
   stepHold,
   steeringPitch,
+  stepVoiceStart,
   targetCueFor,
   togglePlay,
   updateExtreme,
+  VOICE_START_IDLE,
   type GameState,
   type Gate,
 } from "./logic";
@@ -120,6 +123,29 @@ describe("pitch to height", () => {
   });
 });
 
+describe("hands-free game start", () => {
+  it("randomizes the prompted note name across all pitch classes", () => {
+    expect(randomStartPitchClass(0)).toBe(0);
+    expect(randomStartPitchClass(0.5)).toBe(6);
+    expect(randomStartPitchClass(1)).toBe(11);
+  });
+
+  it("starts after at most a quarter-second hold and ignores octave", () => {
+    let state = stepVoiceStart(VOICE_START_IDLE, 48.1, 0, 0, 250, 45);
+    state = stepVoiceStart(state, 60.1, 0, 249, 250, 45);
+    expect(state.ready).toBe(false);
+    state = stepVoiceStart(state, 72.1, 0, 250, 250, 45);
+    expect(state).toMatchObject({ progress: 1, ready: true });
+  });
+
+  it("resets the hold for a wrong, unclear, or out-of-tune note", () => {
+    const holding = stepVoiceStart(VOICE_START_IDLE, 60, 0, 0, 250, 45);
+    expect(stepVoiceStart(holding, 61, 0, 200, 250, 45)).toEqual(VOICE_START_IDLE);
+    expect(stepVoiceStart(holding, null, 0, 200, 250, 45)).toEqual(VOICE_START_IDLE);
+    expect(stepVoiceStart(holding, 60.49, 0, 200, 250, 45)).toEqual(VOICE_START_IDLE);
+  });
+});
+
 describe("pitch glider", () => {
   const range = { low: 48, high: 72 };
   const conf = gameConfig(2, "hard", range, "normal", 0.25, 0);
@@ -139,6 +165,24 @@ describe("pitch glider", () => {
     expect(g.gapBottom).toBeGreaterThanOrEqual(0.06);
     expect(g.gapTop).toBeLessThanOrEqual(0.94);
     expect(g.width).toBe(conf.pipeWidth);
+  });
+
+  it("uses the adjustable pipe pitch distance for consecutive targets", () => {
+    const close = { ...conf, pipeDistanceSemitones: 2 };
+    const wide = gameConfig(2, "hard", { low: 36, high: 84 }, "normal", 0.25, 0, 12, 12);
+    const closeGate = makeGate(1, close, 0, 60);
+    const wideGate = makeGate(1, wide, 0, 60);
+
+    expect(Math.abs(closeGate.targetMidi - 60)).toBe(2);
+    expect(Math.abs(wideGate.targetMidi - 60)).toBe(12);
+  });
+
+  it("falls back to the nearest achievable pipe distance at a range edge", () => {
+    const impossible = { ...conf, pipeDistanceSemitones: 24 };
+    const gate = makeGate(1, impossible, 0, 71);
+    const lowestEligible = makeGate(1, impossible, 0).targetMidi;
+
+    expect(gate.targetMidi).toBe(lowestEligible);
   });
 
   it("keeps the glider the same displayed size for wide and narrow voice ranges", () => {

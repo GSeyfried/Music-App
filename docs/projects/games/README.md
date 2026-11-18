@@ -1,5 +1,8 @@
 # Games (Pitch Glider, Range Finder)
 
+Future game-family planning: [GROOVE](groove.md) (exploratory/PENDING; no
+implementation or settings decisions yet).
+
 Status: Games tab built (merged 1d34530). Pitch Glider and the Range Finder
 were tested with the simulated engine only; the user is now playing them on
 real hardware.
@@ -33,3 +36,21 @@ craft-centre clearance is fixed at ±25¢.
    same pure transform maps craft and pipe collision geometry for drawing, so
    zooming cannot create a visual/collision mismatch. A stage fullscreen button
    uses the available monitor; the regular stage grows responsively as well.
+6. **Adjustable pipe distance.** `games.pipeDistanceSemitones` sets the desired
+   interval between consecutive exact-note targets. The nearest achievable
+   interval is used at range edges, so raising it creates larger pitch jumps
+   without changing the time available between pipes.
+7. **Hands-free start.** Each round randomizes a prompted note name. Holding
+   that pitch class in any octave for 250 ms starts the game; Play and Space
+   remain available. Octave-specific prompts are PENDING.
+
+## Reusable performance-to-start pattern (future/PENDING)
+
+Games and practice tools should retain an explicit Play control while allowing
+an optional musical prompt to start hands-free. Pitch Glider currently proves
+the simplest form: sing a randomized note name. Future prompt recognizers may
+ask the player to perform a piano chord, a scale, an interval such as a perfect
+fifth, or copy a short bongo rhythm. The recognizer and latency rules must be
+specific to voice, acoustic audio, MIDI, or touch input, but successful prompts
+should feed one shared start action. Exact prompts, scoring, accessibility, and
+whether octave matters remain PENDING.
