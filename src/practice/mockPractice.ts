@@ -238,6 +238,11 @@ export class MockPractice {
         this.config = next;
         return next;
       }
+      case "practice_export_file":
+        // The simulator has no file system; report what would have been written.
+        return { references: this.references.length, attempts: this.references.reduce((n, r) => n + r.attempts.length, 0) };
+      case "practice_import_file":
+        throw err("invalid", "the simulated engine cannot read files");
       case "practice_export_library":
         return { formatVersion: 1, references: this.references };
       case "practice_import_library": {

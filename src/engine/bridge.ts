@@ -49,6 +49,18 @@ export const projectDialogs = {
     nativeAvailable()
       ? await save({ title: "Export MIDI", defaultPath: `${name || "Melody"}.mid`, filters: [{ name: "MIDI", extensions: ["mid", "midi"] }] })
       : null,
+  savePracticeData: async () =>
+    nativeAvailable()
+      ? await save({
+          title: "Export practice data",
+          defaultPath: `VoiceLoop practice ${new Date().toISOString().slice(0, 10)}.json`,
+          filters: [{ name: "JSON", extensions: ["json"] }],
+        })
+      : null,
+  openPracticeData: async () =>
+    nativeAvailable()
+      ? singlePath(await open({ multiple: false, title: "Import practice data", filters: [{ name: "JSON", extensions: ["json"] }] }))
+      : null,
   openMidi: async () =>
     nativeAvailable()
       ? singlePath(await open({ multiple: false, title: "Import MIDI", filters: [{ name: "MIDI", extensions: ["mid", "midi"] }] }))

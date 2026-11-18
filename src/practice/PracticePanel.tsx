@@ -7,6 +7,7 @@ import { takeToStaff } from "../notation/fromTake";
 import { Staff } from "../notation/Staff";
 import { SettingControl } from "../settings/SettingControl";
 import { useEngineActions, useEngineState, useLive } from "../engine/EngineContext";
+import { nativeAvailable, projectDialogs } from "../engine/bridge";
 import { Button, ConfirmButton, Segmented, Stepper } from "../components/ui/controls";
 import { noteLabel } from "../lib/tuner";
 import { setText, useFrame } from "../lib/useFrame";
@@ -529,8 +530,44 @@ function Library({ ready }: { ready: boolean }) {
             ))}
           </ul>
         )}
+        <PracticeDataRow />
       </Widget>
     </>
+  );
+}
+
+/** Export / import the whole Practice library as JSON (debugging and backup). */
+function PracticeDataRow() {
+  const store = usePracticeStore();
+  const [message, setMessage] = useState<string | null>(null);
+  const count = (s: { references: number; attempts: number }) =>
+    `${s.references} reference${s.references === 1 ? "" : "s"} and ${s.attempts} attempt${s.attempts === 1 ? "" : "s"}`;
+  const exportData = async () => {
+    const path = await projectDialogs.savePracticeData();
+    if (!path) return;
+    const s = await store.exportToFile(path);
+    setMessage(s ? `Exported ${count(s)} to ${path}.` : "Export failed.");
+  };
+  const importData = async () => {
+    const path = await projectDialogs.openPracticeData();
+    if (!path) return;
+    const s = await store.importFromFile(path);
+    setMessage(s ? `Imported ${count(s)}.` : "Import failed.");
+  };
+  return (
+    <div className="pl-row pl-data">
+      <Button variant="ghost" size="sm" disabled={!nativeAvailable()} onPress={() => void exportData()}>
+        Export practice data…
+      </Button>
+      <Button variant="ghost" size="sm" disabled={!nativeAvailable()} onPress={() => void importData()}>
+        Import practice data…
+      </Button>
+      {message && (
+        <p className="hint pl-small" role="status">
+          {message}
+        </p>
+      )}
+    </div>
   );
 }
 

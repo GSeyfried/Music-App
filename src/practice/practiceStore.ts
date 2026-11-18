@@ -12,7 +12,7 @@
 import type { EngineClient } from "../engine/client";
 import { toEngineError, type EngineEvent } from "../engine/protocol";
 import type { EngineStore } from "../engine/store";
-import { getAppSetting, setAppSetting } from "../settings/appSettings";
+import { allAppSettings, getAppSetting, setAppSetting } from "../settings/appSettings";
 import type { Difficulty } from "../settings/registry";
 import { DIFFICULTY_PRESETS, difficultyAfterEdit, difficultyOf, isPreset } from "./difficulty";
 import {
@@ -21,6 +21,7 @@ import {
   type CaptureOptions,
   type ExpectedNote,
   type PracticeConfig,
+  type PracticeExportSummary,
   type PracticeProgress,
   type PracticeStatus,
   type Reference,
@@ -211,6 +212,28 @@ export class PracticeStore {
       const actual = difficultyOf(this.snapshot.config.scoring);
       if (actual !== current) setAppSetting("practice.difficulty", actual);
     }
+  }
+
+  /**
+   * Export every reference and attempt (with takes), the Practice config and
+   * all app settings to `path` as JSON, for debugging or backup.
+   */
+  exportToFile(path: string): Promise<PracticeExportSummary | undefined> {
+    const extra = {
+      appSettings: allAppSettings(),
+      userAgent: globalThis.navigator?.userAgent ?? null,
+      exportedFrom: "practice-lab",
+    };
+    return this.attempt(() => this.client.call("practice_export_file", { path, extra }));
+  }
+
+  /** Load a practice export; references with the same id are replaced, others kept. */
+  importFromFile(path: string): Promise<PracticeExportSummary | undefined> {
+    return this.attempt(async () => {
+      const summary = await this.client.call("practice_import_file", { path, replace: false });
+      await this.loadReferences();
+      return summary;
+    });
   }
 
   async loadReferences(): Promise<void> {

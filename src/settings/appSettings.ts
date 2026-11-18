@@ -48,6 +48,11 @@ export function setAppSetting<K extends AppSettingId>(id: K, value: AppSettings[
   listeners.forEach((l) => l());
 }
 
+/** A copy of every app setting (for debug exports). */
+export function allAppSettings(): AppSettings {
+  return { ...current };
+}
+
 export function resetAppSettings() {
   current = { ...APP_DEFAULTS };
   save();

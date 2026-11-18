@@ -436,6 +436,15 @@ export interface PracticeCommands {
   practice_set_config: { args: { config: Partial<PracticeConfig> }; result: PracticeConfig };
   practice_export_library: { args: undefined; result: PracticeLibrary };
   practice_import_library: { args: { library: PracticeLibrary; replace: boolean }; result: null };
+  /** Writes the library, config and `extra` to a JSON file (debug/backup). */
+  practice_export_file: { args: { path: string; extra: unknown }; result: PracticeExportSummary };
+  /** Reads a file from practice_export_file (or a bare library); same-id references are replaced. */
+  practice_import_file: { args: { path: string; replace: boolean }; result: PracticeExportSummary };
+}
+
+export interface PracticeExportSummary {
+  references: number;
+  attempts: number;
 }
 
 export type PracticeEvent =

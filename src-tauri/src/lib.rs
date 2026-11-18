@@ -277,6 +277,27 @@ fn practice_export_library(engine: State<'_, Engine>) -> Result<PracticeLibrary,
     engine.practice_export_library()
 }
 
+/// Write every reference and attempt (with takes), the Practice config and
+/// `extra` (UI settings) to a JSON file at `path` (chosen with a save dialog).
+#[tauri::command]
+fn practice_export_file(
+    engine: State<'_, Engine>,
+    path: String,
+    extra: serde_json::Value,
+) -> Result<voiceloop_engine::practice::api::PracticeExportSummary, EngineError> {
+    engine.practice_export_file(std::path::Path::new(&path), extra)
+}
+
+/// Load a file written by `practice_export_file` (or a bare library JSON).
+#[tauri::command]
+fn practice_import_file(
+    engine: State<'_, Engine>,
+    path: String,
+    replace: bool,
+) -> Result<voiceloop_engine::practice::api::PracticeExportSummary, EngineError> {
+    engine.practice_import_file(std::path::Path::new(&path), replace)
+}
+
 #[tauri::command]
 fn practice_import_library(
     engine: State<'_, Engine>,
@@ -373,6 +394,8 @@ pub fn run() {
             practice_set_config,
             practice_export_library,
             practice_import_library,
+            practice_export_file,
+            practice_import_file,
             preview_play,
             preview_stop
         ])
