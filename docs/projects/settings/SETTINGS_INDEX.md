@@ -118,3 +118,9 @@ tuning; only the first few are likely user-facing.
 | `view.loopRingFloorDb` | Layer ring floor | Quietest level drawn on the layer rings; louder parts reach further out. | −48 dBFS | app | Track card layer rings | exists (constant `LAYER_RING_FLOOR_DB`, not in UI) |
 | `view.livePitchPanel` | Live pitch panel | Show the tuner and pitch curve beside the tracks in Studio. Pitch analysis only runs while something needs it (this panel, Practice Lab, or pitch-reactive colors). | off | app | Studio "Live pitch" toggle; tuner, pitch curve | exists |
 | `widgets.hidden` | Hidden widgets | Widgets you have hidden (right-click › Hide widget, or the View menu). Show them again from View › Show all. | none | app | Practice dashboard widgets; View menu | exists |
+| `practice.scale.instrument` | Scale sound | The instrument used when you play a scale or reference to hear it. More instruments are coming. | Piano | app | Scale card "Play"; reference "Play" | exists |
+| `audio.previewVolume` | Preview volume | Volume of scales and references played to hear them (not recorded into loops). | 0.5 | app | Scale/reference playback | exists |
+| `audio.previewTuningA4` | Preview tuning (A4) | Pitch of A4 for played scales and references. PENDING: follow the tuner's reference pitch. | 440 Hz | app | Scale/reference playback | exists (internal) |
+| `practice.startNote.minClarity` | Start note clarity | How clear a sung note must be for "Start from my note". | 0.85 | app | Scale card | exists (internal) |
+| `practice.startNote.maxDriftCents` | Start note steadiness | How far (cents) the sung note may wander while it is being captured. | 35 | app | Scale card | exists (internal) |
+| `practice.startNote.holdMs` | Start note hold | How long (ms) to hold the note for "Start from my note". | 600 ms | app | Scale card | exists (internal) |

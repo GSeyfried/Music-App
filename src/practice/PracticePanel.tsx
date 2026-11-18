@@ -6,7 +6,7 @@ import { useMemo, useRef, useState } from "react";
 import { takeToStaff } from "../notation/fromTake";
 import { Staff } from "../notation/Staff";
 import { SettingControl } from "../settings/SettingControl";
-import { useEngineActions, useEngineState } from "../engine/EngineContext";
+import { useEngineActions, useEngineState, useLive } from "../engine/EngineContext";
 import { Button, ConfirmButton, Segmented, Stepper } from "../components/ui/controls";
 import { noteLabel } from "../lib/tuner";
 import { setText, useFrame } from "../lib/useFrame";
@@ -28,7 +28,9 @@ import {
 import type { AttemptRecord, AttemptSummary, CaptureOptions, ReferenceDetail, ReferenceSummary, ScaleKind, Scores, Take, TakeGrid, Trend } from "./types";
 import { AdvancedOptions } from "../settings/AdvancedOptions";
 import { Widget } from "../components/ui/Widgets";
-import { useAppSetting } from "../settings/appSettings";
+import { getAppSetting, setAppSetting, useAppSetting } from "../settings/appSettings";
+import { evenNotes, playPreview } from "../audio/instruments";
+import { START_NOTE_IDLE, stepStartNote, tonicAndOctave, type StartNoteState } from "./startNote";
 import { settingById, type Difficulty } from "../settings/registry";
 import { SCALE_KINDS, SCALE_LABELS, TONIC_NAMES, scaleDefaults, scaleName, scaleNotes, scaleReference } from "./scales";
 
@@ -278,6 +280,76 @@ function RecordReferenceCard({ ready }: { ready: boolean }) {
   );
 }
 
+/** Hear a reference's notes on the preview instrument (practice.scale.instrument). */
+function PlayTakeButton({ take }: { take: Take }) {
+  const [playing, setPlaying] = useState<{ stop(): void } | null>(null);
+  if (take.notes.length === 0) return null;
+  const toggle = () => {
+    if (playing) {
+      playing.stop();
+      setPlaying(null);
+      return;
+    }
+    const sr = take.sampleRate || 48_000;
+    const t0 = take.notes[0].startFrame;
+    const h = playPreview(
+      take.notes.map((n) => ({ midi: n.note, start: (n.startFrame - t0) / sr, duration: (n.endFrame - n.startFrame) / sr })),
+      getAppSetting("practice.scale.instrument"),
+    );
+    if (!h) return;
+    setPlaying(h);
+    window.setTimeout(() => setPlaying((cur) => (cur === h ? null : cur)), h.seconds * 1000);
+  };
+  return (
+    <Button variant="outline" size="sm" icon={playing ? "stop" : "play"} onPress={toggle}>
+      {playing ? "Stop" : "Play"}
+    </Button>
+  );
+}
+
+/** Octaves offered for scales (C2..C5 starting notes). */
+const SCALE_OCTAVES = [2, 3, 4, 5];
+
+/** Listens for one steady sung note and reports it (scale "Start from my note"). */
+function StartFromMyNote({ onFound }: { onFound: (midi: number) => void }) {
+  const live = useLive();
+  const [listening, setListening] = useState(false);
+  const state = useRef<StartNoteState>(START_NOTE_IDLE);
+  const status = useRef<HTMLSpanElement>(null);
+  useFrame((now) => {
+    if (!listening) return;
+    const p = live.lastPitch;
+    state.current = stepStartNote(state.current, p ? { midi: p.midi, clarity: p.clarity } : null, now, {
+      minClarity: getAppSetting("practice.startNote.minClarity"),
+      maxDriftCents: getAppSetting("practice.startNote.maxDriftCents"),
+      holdMs: getAppSetting("practice.startNote.holdMs"),
+    });
+    const s = state.current;
+    if (s.found !== null) {
+      setListening(false);
+      onFound(s.found);
+      return;
+    }
+    setText(status.current, s.midi === null ? "Sing and hold any comfortable note…" : `${noteLabel(s.midi)} · hold it (${Math.round(s.progress * 100)}%)`);
+  });
+  return (
+    <div className="pl-startnote">
+      <Button
+        variant={listening ? "outline" : "ghost"}
+        size="sm"
+        icon="mic"
+        onPress={() => {
+          state.current = START_NOTE_IDLE;
+          setListening(!listening);
+        }}
+      >
+        {listening ? "Cancel" : "Start from my note"}
+      </Button>
+      {listening && <span className="hint pl-small" ref={status} role="status" />}
+    </div>
+  );
+}
+
 function ScaleExerciseCard() {
   const store = usePracticeStore();
   const busy = usePractice((s) => s.busy);
@@ -292,6 +364,19 @@ function ScaleExerciseCard() {
   const fallbackBpm = useAppSetting("practice.scale.defaultBpm");
   const bpm = transport ? Math.round(transport.bpm) : fallbackBpm;
   const count = scaleNotes(tonic, kind, octave, direction).length;
+  const [playing, setPlaying] = useState<{ stop(): void } | null>(null);
+  const play = () => {
+    if (playing) {
+      playing.stop();
+      setPlaying(null);
+      return;
+    }
+    const notes = evenNotes(scaleNotes(tonic, kind, octave, direction), bpm, noteBeats, getAppSetting("practice.scale.noteGate"));
+    const h = playPreview(notes, getAppSetting("practice.scale.instrument"));
+    if (!h) return;
+    setPlaying(h);
+    window.setTimeout(() => setPlaying((cur) => (cur === h ? null : cur)), h.seconds * 1000);
+  };
   const add = () => {
     const d = scaleDefaults();
     void store.addReference(
@@ -316,6 +401,22 @@ function ScaleExerciseCard() {
       <div className="pl-scale-tonic">
         <Segmented<number> label="Key" value={tonic} options={TONIC_NAMES.map((n, i) => ({ value: i, label: n }))} onChange={setTonic} />
       </div>
+      <div className="pl-scale-octave">
+        <Segmented<number>
+          label="Octave"
+          help="Which octave the scale starts in. Or sing a note and the scale starts there."
+          value={octave}
+          options={SCALE_OCTAVES.map((o) => ({ value: o, label: noteLabel(12 * (o + 1) + tonic) }))}
+          onChange={(o) => setAppSetting("practice.scale.octave", o)}
+        />
+        <StartFromMyNote
+          onFound={(midi) => {
+            const t = tonicAndOctave(midi);
+            setTonic(t.tonic);
+            setAppSetting("practice.scale.octave", t.octave);
+          }}
+        />
+      </div>
       <label className="pl-field">
         <span className="stepper-label">Scale</span>
         <select className="pl-input" value={kind} onChange={(e) => setKind(e.currentTarget.value as ScaleKind)}>
@@ -330,9 +431,14 @@ function ScaleExerciseCard() {
         {count} notes from {noteLabel(scaleNotes(tonic, kind, octave, "up")[0])}, {direction === "up" ? "up" : "up and down"},{" "}
         {noteBeats === 1 ? "one beat" : `${noteBeats} beats`} each at {bpm} BPM.
       </p>
-      <Button variant="solid" icon="plus" disabled={busy || phase !== "idle"} onPress={add}>
-        Add {scaleName(tonic, kind)}
-      </Button>
+      <div className="pl-row">
+        <Button variant="outline" icon={playing ? "stop" : "play"} onPress={play}>
+          {playing ? "Stop" : "Play scale"}
+        </Button>
+        <Button variant="solid" icon="plus" disabled={busy || phase !== "idle"} onPress={add}>
+          Add {scaleName(tonic, kind)}
+        </Button>
+      </div>
     </Widget>
   );
 }
@@ -493,6 +599,7 @@ function ReferenceView({ ready }: { ready: boolean }) {
           {key ? ` · probably ${key}` : ""}
           {s.take.uncertainNotes > 0 ? ` · ${s.take.uncertainNotes} unclear note${s.take.uncertainNotes > 1 ? "s" : ""}` : ""}
         </p>
+        <PlayTakeButton take={detail.take} />
         {phase === "idle" && <ReferenceCurve take={detail.take} label={`Pitch of ${s.name}: ${detail.take.notes.map((n) => noteLabel(n.note)).join(" ")}`} />}
       </Widget>
       {phase === "idle" && (

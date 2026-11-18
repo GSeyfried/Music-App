@@ -39,6 +39,12 @@ export interface AppSettings {
   "view.playheadEmphasis": boolean;
   "view.timingReadout": boolean;
   "view.livePitchPanel": boolean;
+  "practice.scale.instrument": "piano";
+  "practice.startNote.minClarity": number;
+  "practice.startNote.maxDriftCents": number;
+  "practice.startNote.holdMs": number;
+  "audio.previewVolume": number;
+  "audio.previewTuningA4": number;
   /** Hidden dashboard widgets, as "<workspace>:<widget id>". */
   "widgets.hidden": string[];
   "theme.mode": ThemeMode;
@@ -69,6 +75,12 @@ export const APP_DEFAULTS: AppSettings = {
   "view.timingReadout": true,
   "view.livePitchPanel": false,
   "widgets.hidden": [],
+  "practice.scale.instrument": "piano",
+  "practice.startNote.minClarity": 0.85,
+  "practice.startNote.maxDriftCents": 35,
+  "practice.startNote.holdMs": 600,
+  "audio.previewVolume": 0.5,
+  "audio.previewTuningA4": 440,
   "theme.mode": "system",
   "theme.pitchReactive": false,
   "theme.pitchReactiveStrength": 0.35,
@@ -289,6 +301,82 @@ export const SETTINGS: SettingDef[] = [
       "How finely sung timing is rounded for the staff: steps per beat. 4 rounds to sixteenth notes in 4/4; 2 to eighths (cleaner but less exact).",
     category: "Practice",
     tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "practice.scale.instrument",
+    source: "app",
+    kind: "choice",
+    label: "Scale sound",
+    description: "The instrument used when you play a scale or reference to hear it. More instruments are coming.",
+    category: "Practice scales",
+    tier: "advanced",
+    scope: "app",
+    options: [{ value: "piano", label: "Piano" }],
+  },
+  {
+    id: "audio.previewVolume",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 1,
+    step: 0.05,
+    label: "Preview volume",
+    description: "Volume of scales and references played to hear them (not recorded into loops).",
+    category: "Practice scales",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "audio.previewTuningA4",
+    source: "app",
+    kind: "number",
+    min: 400,
+    max: 480,
+    step: 1,
+    label: "Preview tuning (A4)",
+    description: "Pitch of A4 for played scales and references. PENDING: follow the tuner's reference pitch.",
+    category: "Practice scales",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "practice.startNote.minClarity",
+    source: "app",
+    kind: "number",
+    min: 0.5,
+    max: 1,
+    step: 0.05,
+    label: "Start note clarity",
+    description: "How clear a sung note must be for \"Start from my note\".",
+    category: "Practice scales",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "practice.startNote.maxDriftCents",
+    source: "app",
+    kind: "number",
+    min: 10,
+    max: 50,
+    step: 5,
+    label: "Start note steadiness",
+    description: "How far (cents) the sung note may wander while it is being captured.",
+    category: "Practice scales",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "practice.startNote.holdMs",
+    source: "app",
+    kind: "number",
+    min: 200,
+    max: 2000,
+    step: 50,
+    label: "Start note hold",
+    description: "How long (ms) to hold the note for \"Start from my note\".",
+    category: "Practice scales",
+    tier: "internal",
     scope: "app",
   },
   // ---- Appearance -----------------------------------------------------------

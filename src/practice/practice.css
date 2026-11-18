@@ -495,3 +495,21 @@
   max-width: 420px;
   margin-inline: auto;
 }
+
+/* Scale card: octave, start-from-my-note, play */
+.pl-scale-octave {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--s-2) var(--s-3);
+}
+.pl-startnote {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.pl-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
