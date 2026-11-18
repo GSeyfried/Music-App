@@ -91,6 +91,25 @@ tuning; only the first few are likely user-facing.
 | `practice.scale.noteGate` | Scale note gate | How much of each note's beat the exercise holds the note; the rest is a short breath. Internal (not shown). | 0.9 | app | (none; affects the "notes short/long" feedback) | exists |
 | `notation.view` | Note display | Show takes as a piano roll, a staff, or both. | Piano roll | app | Practice result view | exists |
 
+## Voice range and games (exists: `src/games/`, Games workspace)
+
+| ID | Label | Description | Default | Scope | Connected element | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `voice.rangeLowMidi` | Lowest note | The lowest note you can sing comfortably (MIDI number). Set by the Range Finder; reusable by other features (for example the Practice scale octave, PENDING). | 48 (C3) | app | Games › Range Finder (capture, ±1 nudge); Pitch Glider "My range" | exists |
+| `voice.rangeHighMidi` | Highest note | The highest note you can sing comfortably (MIDI number). | 72 (C5) | app | Games › Range Finder; Pitch Glider "My range" | exists |
+| `voice.rangeFinder.minClarity` | Range Finder clarity | How clear your voice must be before the Range Finder counts a note. Internal. | 0.85 | app | Range Finder capture | exists |
+| `voice.rangeFinder.maxStabilityCents` | Range Finder steadiness | How much your pitch may waver (std dev, cents) while a held note is counted. Internal. | 30 ¢ | app | Range Finder capture | exists |
+| `voice.rangeFinder.holdMs` | Range Finder hold time | How long a note must be held on the same semitone to be captured. Internal. | 800 ms | app | Range Finder progress ring | exists |
+| `games.difficulty` | Game difficulty | Pitch Glider opening height: Easy/Medium/Hard = 0.42/0.32/0.22 of the play field (`GAME_OPENINGS` in the registry). | Medium | app | Games › Pitch Glider controls | exists |
+| `games.range` | Game range | Which notes span the play field: My range (`voice.range*`) or Custom (`games.range*Midi`). | My range | app | Games › Pitch Glider controls | exists |
+| `games.rangeLowMidi` | Custom low note | Bottom of the play field when Game range is Custom. | 48 (C3) | app | Pitch Glider custom range nudges | exists |
+| `games.rangeHighMidi` | Custom high note | Top of the play field when Game range is Custom. | 72 (C5) | app | Pitch Glider custom range nudges | exists |
+| `games.speed` | Game speed | How fast gates scroll: Slow/Normal/Fast = 0.22/0.32/0.45 play-field heights per second (`GAME_SPEEDS`). Gates are `GAME_GATE_SPACING` = 0.9 heights apart. | Normal | app | Games › Pitch Glider controls | exists |
+| `games.pitchSmoothingMs` | Glider smoothing | Time constant of the exponential smoothing from sung pitch to glider height. | 120 ms | app | Pitch Glider; Preferences › Games | exists |
+| `games.gravity` | Glider sink rate | How fast the glider sinks without a confident pitch (play-field heights per second). | 0.25 | app | Pitch Glider; Preferences › Games | exists |
+| `games.minClarity` | Glider clarity | Clarity a pitch frame needs for the glider to follow it. Internal. | 0.8 | app | Pitch Glider | exists |
+| `games.bestScores` | Best scores | Best Pitch Glider score per difficulty. Stored value, not a control. | 0 / 0 / 0 | app | Pitch Glider game-over screen | exists |
+
 ## Visuals and theme (proposed; see [visualization](../visualization/README.md))
 
 | ID | Label | Description | Default | Scope | Connected element | Status |
@@ -116,4 +135,4 @@ tuning; only the first few are likely user-facing.
 | `looper.maxLoopSeconds` | Longest loop | The longest loop you can record. Longer loops use more memory per layer. | 30 s | app | (none) | exists (not in UI) |
 | `looper.memoryLimitBytes` | Memory guard | Refuses layer settings that would reserve more than this. | 512 MB | app | Start-audio error | exists (not in UI) |
 | `view.loopRingFloorDb` | Layer ring floor | Quietest level drawn on the layer rings; louder parts reach further out. | −48 dBFS | app | Track card layer rings | exists (constant `LAYER_RING_FLOOR_DB`, not in UI) |
-| `view.livePitchPanel` | Live pitch panel | Show the tuner and pitch curve beside the tracks in Studio. Pitch analysis only runs while something needs it (this panel, Practice Lab, or pitch-reactive colors). | off | app | Studio "Live pitch" toggle; tuner, pitch curve | exists |
+| `view.livePitchPanel` | Live pitch panel | Show the tuner and pitch curve beside the tracks in Studio. Pitch analysis only runs while something needs it (this panel, Practice Lab, Games, or pitch-reactive colors). | off | app | Studio "Live pitch" toggle; tuner, pitch curve | exists |
