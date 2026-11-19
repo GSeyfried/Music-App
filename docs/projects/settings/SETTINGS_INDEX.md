@@ -257,3 +257,39 @@ tuning; only the first few are likely user-facing.
 | `produce.tailBars` | Space after the end | Empty bars shown after the last region. | 8 | app | Timeline width | internal |
 | `produce.headerWidth` | Lane header width | Width of the lane headers, in pixels. | 232 px | app | Lane headers | internal |
 | (const) `LANE_PALETTE` | Lane colors | Colors offered by the lane color picker for a lane with no color of its own (mirrors the `--track-1..8` tokens; a lane with `color: null` follows the theme). | Track palette | app | Lane header color, regions, mixer | internal |
+
+## Effects (exists: `src/effects/`; see [effects](../effects/README.md))
+
+| ID | Label | Description | Default | Scope | Connected element | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `effects.maxPerTrack` | Filters per track | Most filters one track (or lane) can hold; the engine reserves `MAX_EFFECTS_PER_TRACK` (8). | 8 | app | Add filter button (disabled at the limit), paste | internal |
+| `effects.pasteMode` | Paste filters | Pasting adds the copied filters after the track's own (append) or replaces its chain. | Add to the end | app | Settings › Effects; effect context menu, ⌘V | exists |
+| `effects.boxLayout` | Filter boxes | Filter boxes under a PLAY track card's controls, or beside them. | Below | app | Settings › Effects; PLAY track cards | exists |
+| `effects.controlStyle` | Filter controls | Knobs (drag up/down, arrow keys) or sliders for filter parameters. | Knobs | app | Settings › Effects; every effect box | exists |
+| `effects.stemsWet` | Stems include filters | Exported stems rendered with each track's chain (on) or dry; sent as `RenderOptions.wet`. Mixdown and bounce always include filters. | on | app | Settings › Effects; Project › Stems… | exists (engine PENDING) |
+| `effects.presets` | Filter presets | Chains saved with "Save chain as preset" (`{ id, name, chain }[]`). Built-in presets live in `src/effects/presets.ts`. | none | app | Presets menu on every chain | exists |
+| `effects.sendIntervalMs` | Filter drag update interval | While a control is dragged, `setTrackEffects` is sent at most this often (ms). | 30 ms | app | PLAY effect boxes | internal |
+| `effects.echoTimeoutMs` | Filter edit confirm timeout | How long an edited chain is shown before falling back to the engine's copy when no snapshot confirms it (ms). | 1500 ms | app | PLAY effect boxes | internal |
+| `effects.knobDragPixels` | Knob drag distance | Vertical drag (px) for a knob's whole range; Shift is 10x finer. | 160 px | app | Effect knobs | internal |
+
+### Effect parameter defaults (`effects.<kind>.<param>`, generated from `EFFECT_DEFS`)
+
+Every entry is an `internal` app setting: the value a new effect of that kind starts with. Ranges and defaults mirror the effects README parameter table; `mix` is the starting dry/wet.
+
+| Kind | Settings (range, default) |
+| --- | --- |
+| Gain (Tone) | `effects.gain.mix` (0..1, 1); `effects.gain.gainDb` (-36..24 dB, 0) |
+| Filter (Tone) | `effects.filter.mix` (0..1, 1); `effects.filter.type` (lowpass / highpass / bandpass / notch / lowshelf / highshelf / peak; lowpass); `effects.filter.cutoffHz` (20..20000 Hz, 1200); `effects.filter.q` (0.1..18, 0.707); `effects.filter.gainDb` (-24..24 dB, 0) |
+| 3-band EQ (Tone) | `effects.eq3.mix` (0..1, 1); `effects.eq3.lowDb` (-24..24 dB, 0); `effects.eq3.lowHz` (40..800 Hz, 200); `effects.eq3.midDb` (-24..24 dB, 0); `effects.eq3.midHz` (200..8000 Hz, 1000); `effects.eq3.midQ` (0.2..8, 0.9); `effects.eq3.highDb` (-24..24 dB, 0); `effects.eq3.highHz` (1000..16000 Hz, 4000) |
+| Noise gate (Dynamics) | `effects.gate.mix` (0..1, 1); `effects.gate.thresholdDb` (-90..0 dB, -50); `effects.gate.rangeDb` (-90..0 dB, -60); `effects.gate.attackMs` (0.1..50 ms, 1); `effects.gate.holdMs` (0..500 ms, 30); `effects.gate.releaseMs` (5..2000 ms, 120) |
+| Compressor (Dynamics) | `effects.compressor.mix` (0..1, 1); `effects.compressor.thresholdDb` (-60..0 dB, -18); `effects.compressor.ratio` (1..20 ratio, 3); `effects.compressor.kneeDb` (0..24 dB, 6); `effects.compressor.attackMs` (0.1..200 ms, 10); `effects.compressor.releaseMs` (5..2000 ms, 120); `effects.compressor.makeupDb` (0..24 dB, 0) |
+| Delay (Space) | `effects.delay.mix` (0..1, 0.35); `effects.delay.timeMs` (1..2000 ms, 375); `effects.delay.sync` (off / 1/4 / 1/8 / 1/8d / 1/16 / 1/4t; off); `effects.delay.feedback` (0..0.95, 0.35); `effects.delay.toneHz` (500..16000 Hz, 6000) |
+| Reverb (Space) | `effects.reverb.mix` (0..1, 0.3); `effects.reverb.size` (0..1, 0.5); `effects.reverb.decaySec` (0.1..12 s, 1.8); `effects.reverb.damping` (0..1, 0.5); `effects.reverb.preDelayMs` (0..200 ms, 20) |
+| Saturation (Character) | `effects.saturation.mix` (0..1, 1); `effects.saturation.driveDb` (0..36 dB, 12); `effects.saturation.mode` (soft / hard / tube / fold; soft); `effects.saturation.toneHz` (500..16000 Hz, 8000); `effects.saturation.outputDb` (-24..12 dB, -3) |
+| Bitcrusher (Character) | `effects.bitcrusher.mix` (0..1, 1); `effects.bitcrusher.bits` (1..16 bits, 8); `effects.bitcrusher.downsample` (1..32, 4) |
+| Auto filter (Movement) | `effects.autoFilter.mix` (0..1, 1); `effects.autoFilter.type` (lowpass / bandpass / highpass; lowpass); `effects.autoFilter.baseHz` (40..8000 Hz, 400); `effects.autoFilter.depthOct` (0..6 oct, 3); `effects.autoFilter.source` (lfo / envelope; lfo); `effects.autoFilter.rateHz` (0.05..20 Hz, 1); `effects.autoFilter.sync` (off / 1/1 / 1/2 / 1/4 / 1/8; off); `effects.autoFilter.q` (0.5..18, 4); `effects.autoFilter.envAttackMs` (1..200 ms, 10); `effects.autoFilter.envReleaseMs` (10..2000 ms, 200) |
+| Chorus (Movement) | `effects.chorus.mix` (0..1, 0.5); `effects.chorus.rateHz` (0.05..5 Hz, 0.8); `effects.chorus.depthMs` (0..15 ms, 4); `effects.chorus.delayMs` (5..40 ms, 15); `effects.chorus.feedback` (0..0.9, 0) |
+| Flanger (Movement) | `effects.flanger.mix` (0..1, 0.5); `effects.flanger.rateHz` (0.05..5 Hz, 0.3); `effects.flanger.depthMs` (0..8 ms, 2); `effects.flanger.delayMs` (0.1..10 ms, 1); `effects.flanger.feedback` (-0.95..0.95, 0.6) |
+| Phaser (Movement) | `effects.phaser.mix` (0..1, 0.5); `effects.phaser.rateHz` (0.05..5 Hz, 0.5); `effects.phaser.stages` (2 / 4 / 6 / 8 / 12; 6); `effects.phaser.depth` (0..1, 0.8); `effects.phaser.feedback` (0..0.9, 0.5); `effects.phaser.centerHz` (100..4000 Hz, 800) |
+| Tremolo (Movement) | `effects.tremolo.mix` (0..1, 1); `effects.tremolo.rateHz` (0.1..20 Hz, 5); `effects.tremolo.depth` (0..1, 0.6); `effects.tremolo.shape` (sine / triangle / square; sine); `effects.tremolo.sync` (off / 1/4 / 1/8 / 1/16; off) |
+| Ring mod (Movement) | `effects.ringMod.mix` (0..1, 1); `effects.ringMod.freqHz` (1..4000 Hz, 220) |

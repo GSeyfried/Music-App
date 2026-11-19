@@ -2,6 +2,7 @@
 // operations the editor performs. Every edit returns a new Arrangement and
 // never mutates its input (the undo stack keeps old ones).
 
+import { emptyChain, validateChain } from "../effects/types";
 import type { ProduceSnap } from "../settings/registry";
 import type { Arrangement, ArrangementRegion, ArrangementTrack, AudioAsset } from "./types";
 
@@ -287,7 +288,7 @@ export function duplicateRegions(a: Arrangement, ids: string[]): { arrangement: 
 export const deleteRegions = (a: Arrangement, ids: string[]) => mapRegions(a, ids, () => null);
 
 export function newTrack(name: string): ArrangementTrack {
-  return { id: newId("lane"), name, color: null, kind: "audio", gain: 1, pan: 0, muted: false, solo: false, regions: [] };
+  return { id: newId("lane"), name, color: null, kind: "audio", gain: 1, pan: 0, muted: false, solo: false, regions: [], effects: emptyChain() };
 }
 
 export function moveTrack(a: Arrangement, trackId: string, delta: number): Arrangement {
@@ -338,6 +339,8 @@ export function validateArrangement(a: Arrangement, assets: AudioAsset[]): strin
     trackIds.add(t.id);
     if (!(fin(t.gain) && t.gain >= 0 && t.gain <= 2)) return `lane "${t.name}": gain must be 0..2`;
     if (!(fin(t.pan) && t.pan >= -1 && t.pan <= 1)) return `lane "${t.name}": pan must be -1..1`;
+    const fx = validateChain(t.effects);
+    if (fx) return `lane "${t.name}": ${fx}`;
     for (const r of t.regions) {
       if (!r.id || regionIds.has(r.id)) return `duplicate region id "${r.id}"`;
       regionIds.add(r.id);

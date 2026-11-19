@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { emptyChain } from "../effects/types";
 import { createEngine } from "../engine/client";
 import { MockEngine } from "../engine/mock";
 import { parseEngineEvent } from "../engine/protocol";
@@ -49,7 +50,7 @@ const arr = (regions: ArrangementRegion[][]): Arrangement => ({
   sampleRate: 48_000,
   markers: [],
   loopRange: null,
-  tracks: regions.map((rs, i) => ({ id: `l${i}`, name: `L${i}`, color: null, kind: "audio", gain: 1, pan: 0, muted: false, solo: false, regions: rs })),
+  tracks: regions.map((rs, i) => ({ id: `l${i}`, name: `L${i}`, color: null, kind: "audio", gain: 1, pan: 0, muted: false, solo: false, regions: rs, effects: emptyChain() })),
 });
 
 describe("snap math", () => {

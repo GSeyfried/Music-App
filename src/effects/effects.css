@@ -1,0 +1,332 @@
+/* Effect chains ("filters"): PLAY track cards, PRODUCE inspector and mixer. */
+
+.fx-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.fx-chain {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding-top: var(--s-2);
+  border-top: 1px solid var(--border);
+}
+
+.fx-chain.is-bypassed .fx-boxes {
+  opacity: 0.55;
+}
+
+.fx-chain-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.fx-chain-title {
+  margin: 0 auto 0 0;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.fx-count {
+  color: var(--text-faint);
+}
+
+.fx-anchor {
+  display: inline-flex;
+}
+
+.fx-icon-btn {
+  min-width: 36px;
+  min-height: 36px;
+}
+
+.fx-save {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--s-2);
+}
+
+.fx-save label {
+  display: grid;
+  gap: var(--s-1);
+  flex: 1 1 10em;
+}
+
+.fx-save input {
+  min-height: 36px;
+  padding: 0 var(--s-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.fx-scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.fx-layer-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.fx-layer-chip {
+  min-width: 40px;
+  min-height: 32px;
+  padding: 0 var(--s-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.fx-layer-chip.is-on {
+  border-color: var(--tc, var(--accent));
+  background: color-mix(in srgb, var(--tc, var(--accent)) 22%, transparent);
+  color: var(--text);
+}
+
+.fx-boxes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.fx-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--tc, var(--accent));
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.fx-box:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
+.fx-box.is-bypassed {
+  border-left-color: var(--border-strong);
+}
+
+.fx-box.is-bypassed .fx-box-body {
+  opacity: 0.5;
+}
+
+.fx-box.is-dragging {
+  opacity: 0.4;
+}
+
+.fx-box-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.fx-grip {
+  cursor: grab;
+  color: var(--text-faint);
+  padding: 0 var(--s-1);
+  user-select: none;
+}
+
+.fx-box-title {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  min-height: 36px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fx-caret {
+  color: var(--text-faint);
+  width: 1em;
+}
+
+.fx-box-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  gap: var(--s-2);
+  align-items: start;
+}
+
+.fx-box-body .fx-choice,
+.fx-box-body .fx-select,
+.fx-box-body .fx-slider {
+  grid-column: 1 / -1;
+}
+
+.fx-control-label {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+
+.fx-control-value {
+  font-size: var(--fs-xs);
+  color: var(--text);
+}
+
+.fx-knob {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  text-align: center;
+}
+
+.fx-knob.is-disabled {
+  opacity: 0.5;
+}
+
+.fx-knob-dial {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background:
+    conic-gradient(from -135deg, var(--tc, var(--accent)) calc(var(--fx-travel) * 270deg), var(--surface-3) 0 270deg, transparent 0);
+  touch-action: none;
+  cursor: ns-resize;
+}
+
+.fx-knob-dial::before {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.fx-knob-dial:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
+.fx-knob-pointer {
+  position: absolute;
+  left: calc(50% - 1.5px);
+  top: 7px;
+  width: 3px;
+  height: 13px;
+  border-radius: 2px;
+  background: var(--text);
+  transform-origin: 50% 15px;
+  transform: rotate(var(--fx-angle));
+}
+
+.fx-slider {
+  display: grid;
+  grid-template-columns: 6em 1fr 5.5em;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.fx-slider.is-disabled {
+  opacity: 0.5;
+}
+
+.fx-select {
+  display: grid;
+  grid-template-columns: 6em 1fr;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.fx-select select {
+  min-height: 36px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.fx-choice .segmented-row .seg {
+  min-height: 32px;
+}
+
+.fx-freeze {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.menu-heading {
+  padding: var(--s-2) var(--s-3) var(--s-1);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* PLAY: boxes beside the card's controls (effects.boxLayout = "side"). */
+.track-main {
+  display: contents;
+}
+
+.track-card.fx-side {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(240px, 1.2fr);
+  column-gap: var(--s-4);
+  grid-column: span 2;
+}
+
+.track-card.fx-side .track-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.track-card.fx-side .fx-chain {
+  border-top: 0;
+  border-left: 1px solid var(--border);
+  padding: 0 0 0 var(--s-4);
+}
+
+@media (max-width: 719px) {
+  .track-card.fx-side {
+    grid-template-columns: 1fr;
+    grid-column: auto;
+  }
+
+  .track-card.fx-side .fx-chain {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    padding: var(--s-2) 0 0;
+  }
+}
+
+/* PRODUCE mixer strip: a narrow column. */
+.pr-strip .fx-chain.is-compact {
+  width: 100%;
+}
+
+.pr-strip .fx-chain.is-compact .fx-box-body {
+  grid-template-columns: 1fr;
+}
