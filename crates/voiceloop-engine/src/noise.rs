@@ -557,6 +557,8 @@ pub struct NoiseGlue {
     active: Option<Active>,
     learn: Option<Learn>,
     pretake: Option<PreTake>,
+    /// New layers waiting for a pre-take profile before auto-apply (track, layer, since).
+    deferred: Vec<(u8, u8, Instant)>,
     next_id: u64,
     /// Looper sample rate (layers are at this rate).
     rate: u32,
@@ -583,6 +585,7 @@ impl NoiseGlue {
             active: None,
             learn: None,
             pretake: None,
+            deferred: Vec::new(),
             next_id: 1,
             rate: 48_000,
             transport: None,
@@ -608,7 +611,11 @@ impl NoiseGlue {
 
     /// Something needs frequent polling.
     pub fn is_busy(&self) -> bool {
-        self.active.is_some() || !self.queue.is_empty() || self.learn.is_some() || self.pretake.is_some()
+        self.active.is_some()
+            || !self.queue.is_empty()
+            || self.learn.is_some()
+            || self.pretake.is_some()
+            || !self.deferred.is_empty()
     }
 
     pub fn take_dirty(&mut self) -> bool {
@@ -871,6 +878,7 @@ impl NoiseGlue {
 
     fn drop_jobs(&mut self, track: Option<u8>) {
         self.queue.retain(|j| track.is_some_and(|t| t != j.track));
+        self.deferred.retain(|&(t, _, _)| track.is_some_and(|x| x != t));
     }
 
     fn begin_pretake(&mut self, track: u8) {
@@ -937,7 +945,8 @@ impl NoiseGlue {
             }
         }
         for (t, l) in auto {
-            self.auto_apply(t, l);
+            // The room sound before this take may still be turning into a profile.
+            self.deferred.push((t, l, now));
         }
     }
 
@@ -1028,6 +1037,14 @@ impl NoiseGlue {
     /// operation uses the looper's transfer rings.
     pub fn tick(&mut self, playback: Option<&mut LooperHandles>, input_rate: Option<u32>, can_transfer: bool) {
         self.tick_learn(input_rate);
+        let now = Instant::now();
+        let waiting = self.pretake.is_some_and(|p| p.started);
+        let (ready, later): (Vec<_>, Vec<_>) =
+            self.deferred.drain(..).partition(|&(_, _, since)| !waiting || now.duration_since(since) > PRETAKE_WAIT);
+        self.deferred = later;
+        for (t, l, _) in ready {
+            self.auto_apply(t, l);
+        }
         self.tick_jobs(playback, can_transfer);
     }
 
@@ -1275,6 +1292,7 @@ impl NoiseGlue {
             self.cancel_learn();
         }
         self.queue.clear();
+        self.deferred.clear();
         self.active = None;
         self.profiles = docs.profiles.into_iter().map(Profile::from_doc).collect();
         let entry = |d: Option<LayerNoiseDoc>| {

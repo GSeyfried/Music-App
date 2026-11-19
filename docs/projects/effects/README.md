@@ -138,3 +138,114 @@ mono until the engine goes stereo (PENDING).
 3. **Noise reduction:** engine learn, profile, spectral gating, derived
    buffers, commands and events, plus its UI (Learn room button, auto-learn,
    a per-layer toggle in Track details and on layer chips) and tests.
+
+## Noise reduction status (slice 3, 2026-11-19)
+
+**Built** (engine, Tauri, TS, UI, tests):
+
+- **DSP** — `crates/voiceloop-analysis/src/denoise.rs`, written from the
+  general technique (no code from Audacity or other GPL tools):
+  - `learn_noise`: mean STFT magnitude per bin (Hann, hop N/4), with optional
+    transient rejection.
+  - `spectral_gate` is circular, so loop seams get no edge artefacts. It
+    compares magnitudes averaged over a time × frequency neighbourhood with
+    `profile × 10^(sensitivity/20)`; a bin is either kept (gain 1) or turned
+    down by `amountDb`. The gate is then dilated and averaged (radii from
+    `smoothing`) and resynthesised by weighted overlap-add.
+  - `amountDb = 0` returns the input bit-exact; unity gains reconstruct it to
+    about 1e-4.
+- **Swapping layer content while audio plays** (`looper/transfer.rs`):
+  - New jobs `Probe` and `Swap`. `LayerFetch` copies one finished layer
+    (probe → read → probe again).
+  - `LayerSwap` sends a full-size buffer allocated on the control thread. The
+    audio thread checks the buffer address and 16 probe samples, swaps the
+    boxes in O(1), restarts the layer's summary scan (the waveform updates),
+    and hands the old buffer back to be dropped off the audio thread. The pool
+    size is unchanged.
+  - The only change in `processor.rs` is in `service_jobs` (two match arms and
+    two helpers). The render paths are untouched.
+- **Control glue** (`crates/voiceloop-engine/src/noise.rs`): profiles, a job
+  queue (fetch → render on a `voiceloop-denoise` thread → swap, retried up to 4
+  times), the per-layer table, Learn room, before-take learning and
+  auto-apply.
+  - **Layer identity:** entries follow undo, redo, clear, remove and duplicate,
+    and are reconciled with every snapshot. Each entry keeps a hash of the
+    content it put in the looper. Content that no longer matches is treated as
+    a new raw layer, so a misaligned entry never re-renders the wrong audio.
+  - **Raw is always kept:** off restores the raw recording bit-exact (tested
+    end to end through a real `LooperCore`), and changing the amount re-renders
+    from the raw recording.
+- **Learning:**
+  - Mic reason `noise` (engine-owned); the click is muted while listening and
+    restored afterwards. Audio is recorded by a tap on the analysis thread
+    (`NoiseTap`).
+  - **Before a take:** recording starts at record/overdub and stops at the
+    first *voiced* pitch frame minus `noise.onsetMarginMs`, at the end of the
+    take, or at `noise.autoMaxSeconds`. It is used if it lasts at least
+    `noise.minAutoMs`. It refreshes a single "Before take" profile, which then
+    becomes the newest.
+  - **Click bleed:** both behaviours are built behind `noise.clickBleed`.
+    `rejectTransients` (the default) skips STFT frames more than
+    `noise.transientRejectDb` above the median frame. `clickOffOnly` learns
+    before takes only while the metronome is off. The first voiced frame is
+    used rather than the first onset because clicks trigger onsets.
+- **Persistence** (`voiceloop-project`):
+  - `ProjectDoc.noiseProfiles` holds the profiles.
+  - `LayerDoc.noiseReduction` holds the per-layer settings.
+  - `LayerDoc.derivedFrom` gives the raw layer's id, with that layer listed in
+    `TrackDoc.rawLayers`.
+  - All are serde defaults, so older projects open unchanged.
+  - Save attaches raw audio only to layers whose captured content matches the
+    hash. Open hands the state to the glue, and rate conversion resamples raw
+    layers too.
+- **Commands:**
+  - `noise_learn {seconds}` and `noise_cancel_learn`
+  - `noise_profiles`, `noise_delete_profile {id}` and
+    `noise_rename_profile {id, name}`
+  - `set_layer_noise_reduction {track, layer, settings | null}`
+  - `set_noise_config {config}` and `noise_layers`
+- **Events:**
+  - `noiseProfile` — `{reason, profile, profiles}`
+  - `noiseLearn` — `{state, fraction, secondsLeft, message, profileId}`
+  - `noiseLayers` — the whole per-track, per-layer table
+    `{settings, status: processing|applied|off|failed, error}`
+  - Per-layer status is a **separate event**, not part of `TrackSnapshot`, so
+    the realtime snapshot stays fixed-size.
+- **UI:**
+  - **Learn room** sits in the Studio view row, with a countdown and progress
+    while listening and a Cancel button.
+  - **Noise (n)** opens a pop-up with the profiles (rename inline, delete with
+    confirmation, a small spectrum curve) and the advanced `noise.*` settings.
+  - **Track details** gets a per-layer Noise reduction toggle, an Amount slider
+    (committed on release), a profile picker when there are several profiles,
+    a status line and Reset.
+  - An "NR" badge marks layers and track cards (`noise.layerIndicator`).
+  - `useNoiseConfigSync` (App) sends the registry values to the engine.
+- **Tests:**
+  - DSP: the noise floor drops by at least the amount, the tone stays within
+    ±0.5 dB, SNR improves, `amountDb = 0` is bit-exact, results are
+    deterministic, and white-noise and click-rejection profiles are learned
+    correctly.
+  - Project round trip with raw layers and settings.
+  - Fetch/swap while playing, then swap back bit-exact.
+  - Glue: entries stay aligned, docs attach only to matching content, and the
+    end-to-end auto-apply → re-render → off → reset sequence restores the raw
+    bit-exact.
+  - UI with the mock: Learn room, rename/delete, toggle/amount/off/reset,
+    badges, auto-apply and config sync.
+
+**PENDING / limits:**
+
+- Noise reduction applies to active layers only. Undone (redo) layers keep
+  their entries but cannot be changed until redone.
+- Processed layers made at another rate (a project reopened at a different
+  rate) keep their settings. The next change re-renders from the resampled raw
+  layer.
+- A new project clears the profiles, because they are project data. Keeping
+  them across New is a possible setting.
+- RNNoise as an optional mode (see the caveat above).
+- Profiles are learned at the input rate and mapped by frequency onto the
+  looper rate. The STFT size is the profile's own size.
+- The PRODUCE inspector does not show per-layer noise state yet.
+- Tested without hardware: the native app build compiles, but Learn room and
+  before-take learning need a real mic to check by ear.
