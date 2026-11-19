@@ -52,6 +52,8 @@ interface UndoEntry {
   after: Arrangement;
   selectionBefore: Selection;
   selectionAfter: Selection;
+  coalesce?: string;
+  at?: number;
 }
 
 const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -64,6 +66,8 @@ export class ArrangementStore {
   private version = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private inflight: Promise<void> | null = null;
+  /** Set by the timeline: its visible width (px) and a way to scroll it (not reactive). */
+  readonly viewport = { width: 0, scrollToFrame: (_frame: number) => {} };
 
   constructor(
     private readonly client: EngineClient,
@@ -150,7 +154,11 @@ export class ArrangementStore {
   // ---- Editing -------------------------------------------------------------------
 
   /** Apply an edit: local first, on the undo stack, then synced (debounced). */
-  apply(label: string, fn: (a: Arrangement) => Arrangement, selection?: Partial<Selection>): void {
+  /**
+   * With `coalesce`, consecutive edits with the same key within a second
+   * (a slider being dragged, a color being picked) are one undo step.
+   */
+  apply(label: string, fn: (a: Arrangement) => Arrangement, selection?: Partial<Selection>, coalesce?: string): void {
     const before = this.state.doc.arrangement;
     const after = fn(before);
     const selectionBefore = this.state.selection;
@@ -159,7 +167,16 @@ export class ArrangementStore {
       this.set({ draft: null, selection: selectionAfter });
       return;
     }
-    this.undoStack.push({ label, before, after, selectionBefore, selectionAfter });
+    const last = this.undoStack[this.undoStack.length - 1];
+    const now = Date.now();
+    if (coalesce && last && last.coalesce === coalesce && now - (last.at ?? 0) < 1000 && this.redoStack.length === 0) {
+      last.after = after;
+      last.selectionAfter = selectionAfter;
+      last.at = now;
+      this.replace(after, selectionAfter);
+      return;
+    }
+    this.undoStack.push({ label, before, after, selectionBefore, selectionAfter, coalesce, at: now });
     const depth = Math.max(1, getAppSetting("produce.undoDepth"));
     if (this.undoStack.length > depth) this.undoStack.splice(0, this.undoStack.length - depth);
     this.redoStack = [];
