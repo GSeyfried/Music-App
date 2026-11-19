@@ -17,6 +17,7 @@ import {
 import { DEFAULT_AUDIO_CONFIG, LAYER_SUMMARY_BINS } from "./protocol";
 import { MockPractice } from "../practice/mockPractice";
 import { MockArrangement, resamplePeaks } from "../produce/mockArrangement";
+import { MockNoise } from "../noise/mockNoise";
 import { emptyChain, normalizeChain, validateChain, type EffectChain } from "../effects/types";
 import type { OpKind, OpResult, ProjectInfo, ProjectRequest } from "../project/types";
 import type {
@@ -397,7 +398,22 @@ export class MockEngine implements EngineTransport {
     emit: (e) => this.emit(e),
   });
 
+  /** Simulated noise reduction (src/noise/mockNoise.ts). */
+  readonly noise: MockNoise;
+  /** Tracks with a take in progress and their layer count before it (noise auto-apply). */
+  private noiseTakes = new Map<number, number>();
+
   constructor(options: MockOptions = {}) {
+    this.noise = new MockNoise({
+      realtime: options.realtime ?? true,
+      sampleRate: () => this.sampleRate,
+      audioOn: () => this.capturing,
+      layerCount: (track) => this.tracks[track]?.layers ?? 0,
+      markUnsaved: () => {
+        this.project = { ...this.project, unsavedChanges: true };
+      },
+      emit: (e) => this.emit(e),
+    });
     this.sampleRate = options.sampleRate ?? 48_000;
     this.realtime = options.realtime ?? true;
     this.rand = mulberry32(options.seed ?? 7);
@@ -479,6 +495,9 @@ export class MockEngine implements EngineTransport {
           return result;
         }
         if (command.startsWith("practice_")) return this.practice.invoke(command, args);
+        if (command.startsWith("noise_") || command === "set_layer_noise_reduction" || command === "set_noise_config") {
+          return this.noise.invoke(command, args);
+        }
         throw { kind: "invalid", message: `the simulated engine has no command "${command}"` } satisfies EngineError;
     }
   }
@@ -1028,8 +1047,11 @@ export class MockEngine implements EngineTransport {
     }
     // The looper and arrangement transports are exclusive: starting one stops the other.
     if (["play", "resume", "restart", "record", "overdub"].includes(cmd.type)) this.arrangement.stop();
+    const before = "track" in cmd ? this.tracks[cmd.track]?.layers : undefined;
     const rejected = this.apply(cmd);
     if (rejected) this.notice({ kind: "rejected", reason: rejected });
+    else if ((cmd.type === "record" || cmd.type === "overdub") && before !== undefined) this.noiseTakes.set(cmd.track, before);
+    else if (["undo", "redo", "clear", "clearAll", "removeTrack"].includes(cmd.type)) this.noise.reconcile(this.tracks.length);
     this.emit({ type: "looper", payload: this.looperState() });
   }
 
@@ -1717,6 +1739,12 @@ export class MockEngine implements EngineTransport {
   }
 
   looperState(): LooperState {
+    for (const [track, before] of this.noiseTakes) {
+      const tr = this.tracks[track];
+      if (!tr || tr.rec) continue;
+      this.noiseTakes.delete(track);
+      if (tr.layers > before) this.noise.layerRecorded(track, tr.layers - 1);
+    }
     let loopCycle = 0;
     let loopPhase = 0;
     if (this.period !== null && this.period > 0) {

@@ -12,7 +12,17 @@
 //!  Restore{plan} ──────────────────────▶  releases all layers, takes zeroed ones, enters "loading"
 //!  Write{slot, offset, buf} ×N ────────▶  copies buf into the layer
 //!  Finish ─────────────────────────────▶  leaves "loading"
+//!  Probe{slot} ────────────────────────▶  identity (buffer address), length, complete?
+//!  Swap{slot, expect, buf} ────────────▶  O(1) pointer swap of one finished layer (noise reduction)
 //! ```
+//!
+//! **Swap** replaces the samples of one complete layer while audio plays
+//! (derived buffers such as noise reduction). The control thread sends a
+//! full-size buffer it allocated; the audio thread checks the layer is still
+//! the one the control thread rendered from (same buffer address and a few
+//! probe samples), swaps the two boxes, restarts that layer's summary scan,
+//! and returns the old buffer to be dropped on the control thread. The pool
+//! keeps its size: one buffer leaves circulation and one joins it.
 //!
 //! - **No allocation, freeing, or locking on the audio thread.** Every buffer
 //!   is allocated by the control thread and returned to it to be dropped.
@@ -169,6 +179,35 @@ pub struct Chunk {
     pub result: Option<Result<(), RejectReason>>,
 }
 
+/// Identity of one layer buffer, answered by the audio thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerIdentity {
+    /// Address of the layer buffer (stable while the layer exists).
+    pub ptr: usize,
+    /// Buffer length (`max_frames`).
+    pub len: usize,
+    /// Frames of the track's loop (what holds audio).
+    pub frames: usize,
+    /// The layer is finished (not recording): its samples no longer change.
+    pub complete: bool,
+}
+
+/// Probe samples a swap checks before replacing a layer.
+pub const SWAP_PROBES: usize = 16;
+
+#[derive(Debug)]
+pub struct SwapJob {
+    pub track: u8,
+    pub slot: LayerSlot,
+    /// The layer must still be this buffer...
+    pub expect_ptr: usize,
+    /// ...holding these samples (frame, value).
+    pub probes: [(u32, f32); SWAP_PROBES],
+    /// New content, `len` frames (the pool buffer length). Comes back holding the old content.
+    pub buf: Box<[f32]>,
+    pub result: Option<Result<(), RejectReason>>,
+}
+
 #[derive(Debug)]
 pub enum JobKind {
     Describe(Option<Inventory>),
@@ -176,6 +215,8 @@ pub enum JobKind {
     Restore(RestorePlan, Option<Result<(), RejectReason>>),
     Write(Chunk),
     Finish(Option<Result<(), RejectReason>>),
+    Probe { track: u8, slot: LayerSlot, answer: Option<Result<LayerIdentity, RejectReason>> },
+    Swap(Box<SwapJob>),
 }
 
 /// One request; the same value comes back with its result filled in.
@@ -527,6 +568,165 @@ impl Importer {
                 _ => {}
             }
             self.pipe.pump(&mut h.jobs);
+        }
+        if self.pipe.stalled() {
+            return Poll::Ready(Err(TransferError::Stalled));
+        }
+        Poll::Pending
+    }
+}
+
+/// A finished layer copied out of the looper.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FetchedLayer {
+    pub identity: LayerIdentity,
+    /// `identity.frames` samples.
+    pub samples: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchStage {
+    Probing,
+    Reading,
+    Confirming,
+}
+
+/// Copies one finished layer out of a (possibly playing) looper: probe,
+/// read in chunks, probe again. Finished layers are immutable, so the same
+/// buffer before and after the copy proves the copy is consistent.
+pub struct LayerFetch {
+    pipe: Pipe,
+    track: u8,
+    slot: LayerSlot,
+    stage: FetchStage,
+    identity: Option<LayerIdentity>,
+    samples: Vec<f32>,
+    remaining: usize,
+}
+
+impl LayerFetch {
+    pub fn new(track: u8, slot: LayerSlot) -> Self {
+        let mut pipe = Pipe::new();
+        pipe.queue.push_back(JobKind::Probe { track, slot, answer: None });
+        Self { pipe, track, slot, stage: FetchStage::Probing, identity: None, samples: Vec::new(), remaining: 0 }
+    }
+
+    pub fn poll(&mut self, h: &mut LooperHandles) -> Poll<FetchedLayer> {
+        self.pipe.pump(&mut h.jobs);
+        while let Some(kind) = self.pipe.recv(&mut h.job_results) {
+            match (self.stage, kind) {
+                (FetchStage::Probing, JobKind::Probe { answer, .. }) => {
+                    let id = match answer {
+                        Some(Ok(id)) => id,
+                        Some(Err(r)) => return Poll::Ready(Err(TransferError::Rejected(r))),
+                        None => return Poll::Ready(Err(TransferError::Stalled)),
+                    };
+                    if !id.complete {
+                        return Poll::Ready(Err(TransferError::Busy("the layer is still recording")));
+                    }
+                    self.identity = Some(id);
+                    self.samples = vec![0.0; id.frames];
+                    let mut offset = 0;
+                    while offset < id.frames {
+                        let len = CHUNK_FRAMES.min(id.frames - offset);
+                        self.pipe.queue.push_back(JobKind::Read(Chunk {
+                            track: self.track,
+                            slot: self.slot,
+                            offset,
+                            buf: vec![0.0; len].into_boxed_slice(),
+                            epoch: 0,
+                            result: None,
+                        }));
+                        self.remaining += 1;
+                        offset += len;
+                    }
+                    self.stage = FetchStage::Reading;
+                    if self.remaining == 0 {
+                        self.stage = FetchStage::Confirming;
+                        self.pipe.queue.push_back(JobKind::Probe { track: self.track, slot: self.slot, answer: None });
+                    }
+                }
+                (FetchStage::Reading, JobKind::Read(chunk)) => {
+                    if let Some(Err(r)) = chunk.result {
+                        return Poll::Ready(Err(TransferError::Rejected(r)));
+                    }
+                    self.samples[chunk.offset..chunk.offset + chunk.buf.len()].copy_from_slice(&chunk.buf);
+                    self.remaining -= 1;
+                    if self.remaining == 0 {
+                        self.stage = FetchStage::Confirming;
+                        self.pipe.queue.push_back(JobKind::Probe { track: self.track, slot: self.slot, answer: None });
+                    }
+                }
+                (FetchStage::Confirming, JobKind::Probe { answer, .. }) => {
+                    let same = matches!(answer, Some(Ok(id)) if Some(id) == self.identity);
+                    return Poll::Ready(match (same, self.identity) {
+                        (true, Some(identity)) => {
+                            Ok(FetchedLayer { identity, samples: std::mem::take(&mut self.samples) })
+                        }
+                        _ => Err(TransferError::Busy("the layer changed while it was being copied")),
+                    });
+                }
+                _ => {}
+            }
+            self.pipe.pump(&mut h.jobs);
+        }
+        if self.pipe.stalled() {
+            return Poll::Ready(Err(TransferError::Stalled));
+        }
+        Poll::Pending
+    }
+}
+
+/// Probe positions spread over `samples` and their values.
+pub fn swap_probes(samples: &[f32]) -> [(u32, f32); SWAP_PROBES] {
+    let mut out = [(0u32, 0.0f32); SWAP_PROBES];
+    if samples.is_empty() {
+        return out;
+    }
+    for (i, slot) in out.iter_mut().enumerate() {
+        let at = ((2 * i + 1) * samples.len() / (2 * SWAP_PROBES)).min(samples.len() - 1);
+        *slot = (at as u32, samples[at]);
+    }
+    out
+}
+
+/// Replaces one finished layer's samples (see the module docs). Ready with
+/// the new buffer's address (its identity from now on).
+pub struct LayerSwap {
+    pipe: Pipe,
+    new_ptr: usize,
+}
+
+impl LayerSwap {
+    /// `content` is padded with zeros to `buf_len` (the pool buffer length).
+    pub fn new(
+        track: u8,
+        slot: LayerSlot,
+        expect_ptr: usize,
+        probes: [(u32, f32); SWAP_PROBES],
+        content: &[f32],
+        buf_len: usize,
+    ) -> Self {
+        let mut buf = vec![0.0f32; buf_len.max(content.len())];
+        buf[..content.len()].copy_from_slice(content);
+        let buf = buf.into_boxed_slice();
+        let new_ptr = buf.as_ptr() as usize;
+        let mut pipe = Pipe::new();
+        pipe.queue.push_back(JobKind::Swap(Box::new(SwapJob { track, slot, expect_ptr, probes, buf, result: None })));
+        Self { pipe, new_ptr }
+    }
+
+    pub fn poll(&mut self, h: &mut LooperHandles) -> Poll<usize> {
+        self.pipe.pump(&mut h.jobs);
+        while let Some(kind) = self.pipe.recv(&mut h.job_results) {
+            if let JobKind::Swap(job) = kind {
+                // `job.buf` now holds the old layer (or our unused buffer); it drops here.
+                return Poll::Ready(match job.result {
+                    Some(Ok(())) => Ok(self.new_ptr),
+                    Some(Err(r)) => Err(TransferError::Rejected(r)),
+                    None => Err(TransferError::Stalled),
+                });
+            }
         }
         if self.pipe.stalled() {
             return Poll::Ready(Err(TransferError::Stalled));

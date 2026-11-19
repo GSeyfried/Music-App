@@ -19,7 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::doc::{self, LayerDoc, ProjectDoc};
+use crate::doc::{self, LayerDoc, NoiseReductionDoc, ProjectDoc};
 use crate::error::{ProjectError, Result};
 use crate::util;
 use crate::wav::{self, Bext, SampleFormat, WavSpec, WriteOptions};
@@ -43,6 +43,13 @@ pub struct TrackAudio {
     pub redo: Vec<Samples>,
     pub layer_offsets: Vec<i64>,
     pub redo_offsets: Vec<i64>,
+    /// Per active layer: the raw recording when the layer plays a derived
+    /// (noise-reduced) buffer. Missing entries mean `None`.
+    pub layer_raw: Vec<Option<Samples>>,
+    pub redo_raw: Vec<Option<Samples>>,
+    /// Per active layer: noise reduction settings (missing = none).
+    pub layer_noise: Vec<Option<NoiseReductionDoc>>,
+    pub redo_noise: Vec<Option<NoiseReductionDoc>>,
 }
 
 impl PartialEq for TrackAudio {
@@ -51,7 +58,19 @@ impl PartialEq for TrackAudio {
             && self.redo == other.redo
             && offsets_equal(&self.layer_offsets, &other.layer_offsets, self.layers.len())
             && offsets_equal(&self.redo_offsets, &other.redo_offsets, self.redo.len())
+            && options_equal(&self.layer_raw, &other.layer_raw, self.layers.len())
+            && options_equal(&self.redo_raw, &other.redo_raw, self.redo.len())
+            && options_equal(&self.layer_noise, &other.layer_noise, self.layers.len())
+            && options_equal(&self.redo_noise, &other.redo_noise, self.redo.len())
     }
+}
+
+/// Per-layer optional data where a missing entry means `None`.
+fn options_equal<T: PartialEq>(left: &[Option<T>], right: &[Option<T>], layer_count: usize) -> bool {
+    fn at<T>(v: &[Option<T>], i: usize) -> Option<&T> {
+        v.get(i).and_then(Option::as_ref)
+    }
+    (0..layer_count.max(left.len()).max(right.len())).all(|i| at(left, i) == at(right, i))
 }
 
 /// Older callers omit zero-valued nudge arrays, while loaded packages contain
@@ -186,45 +205,73 @@ pub fn save_package(
     let mut done = 0usize;
     for (ti, track_audio) in audio.iter().enumerate() {
         let track = &mut out.tracks[ti];
-        let old: Vec<LayerDoc> = track.layers.iter().chain(&track.redo_layers).cloned().collect();
-        let mut build = |set: &[Samples], offsets: &[i64], redo: bool| -> Result<Vec<LayerDoc>> {
+        let old: Vec<LayerDoc> =
+            track.layers.iter().chain(&track.redo_layers).chain(&track.raw_layers).cloned().collect();
+        let mut raw_docs: Vec<LayerDoc> = Vec::new();
+        let new_doc = |file: String, sum: String, frames: usize, offset: i64| -> LayerDoc {
+            let mut l = old.iter().find(|l| l.checksum == sum).cloned().unwrap_or_else(|| LayerDoc {
+                id: util::new_id(),
+                file: String::new(),
+                frames: 0,
+                channels: 1,
+                start_frame: 0,
+                nudge_frames: 0,
+                loop_period_frames: period,
+                checksum: String::new(),
+                derived_from: None,
+                noise_reduction: None,
+                extra: Default::default(),
+            });
+            l.file = file;
+            l.checksum = sum;
+            l.frames = frames as u64;
+            l.channels = 1;
+            l.loop_period_frames = period;
+            l.nudge_frames = offset;
+            l
+        };
+        let mut build = |set: &[Samples],
+                         offsets: &[i64],
+                         raws: &[Option<Samples>],
+                         noise: &[Option<NoiseReductionDoc>],
+                         redo: bool|
+         -> Result<Vec<LayerDoc>> {
             let mut docs = Vec::with_capacity(set.len());
             for (li, samples) in set.iter().enumerate() {
                 let what = format!("{} {} {}", track.name, if redo { "undone layer" } else { "layer" }, li + 1);
                 let (file, sum) = write_layer(dir, samples, doc.sample_rate, &what)?;
-                let reused = old.iter().find(|l| l.checksum == sum).cloned();
-                let mut l = reused.unwrap_or_else(|| LayerDoc {
-                    id: util::new_id(),
-                    file: String::new(),
-                    frames: 0,
-                    channels: 1,
-                    start_frame: 0,
-                    nudge_frames: 0,
-                    loop_period_frames: period,
-                    checksum: String::new(),
-                    derived_from: None,
-                    extra: Default::default(),
-                });
-                l.file = file;
-                l.checksum = sum;
-                l.frames = samples.len() as u64;
-                l.channels = 1;
-                l.loop_period_frames = period;
-                l.nudge_frames = offsets.get(li).copied().unwrap_or(0);
+                let offset = offsets.get(li).copied().unwrap_or(0);
+                let mut l = new_doc(file, sum, samples.len(), offset);
+                l.derived_from = None;
+                if let Some(raw) = raws.get(li).and_then(Option::as_ref) {
+                    let (file, sum) = write_layer(dir, raw, doc.sample_rate, &format!("{what} (raw)"))?;
+                    let mut r = new_doc(file, sum, raw.len(), offset);
+                    r.derived_from = None;
+                    r.noise_reduction = None;
+                    if r.id == l.id || raw_docs.iter().any(|d| d.id == r.id) {
+                        r.id = util::new_id(); // identical content shared by two entries
+                    }
+                    l.derived_from = Some(r.id.clone());
+                    raw_docs.push(r);
+                }
+                l.noise_reduction = noise.get(li).cloned().flatten();
                 docs.push(l);
                 done += 1;
                 progress(0.9 * done as f32 / total as f32);
             }
             Ok(docs)
         };
-        let layers = build(&track_audio.layers, &track_audio.layer_offsets, false)?;
-        let redo = build(&track_audio.redo, &track_audio.redo_offsets, true)?;
+        let ta = track_audio;
+        let layers = build(&ta.layers, &ta.layer_offsets, &ta.layer_raw, &ta.layer_noise, false)?;
+        let redo = build(&ta.redo, &ta.redo_offsets, &ta.redo_raw, &ta.redo_noise, true)?;
         track.layers = layers;
         track.redo_layers = redo;
+        track.raw_layers = raw_docs;
     }
     for track in out.tracks.iter_mut().skip(audio.len()) {
         track.layers.clear();
         track.redo_layers.clear();
+        track.raw_layers.clear();
     }
     for asset in out.assets.iter_mut() {
         let samples = &assets[&asset.id];
@@ -403,13 +450,22 @@ pub fn load_audio(dir: &Path, doc: &ProjectDoc, progress: Progress) -> Result<Ve
     let mut out = Vec::with_capacity(doc.tracks.len());
     for track in &doc.tracks {
         let mut ta = TrackAudio::default();
-        for (set, dst, offsets) in [
-            (&track.layers, &mut ta.layers, &mut ta.layer_offsets),
-            (&track.redo_layers, &mut ta.redo, &mut ta.redo_offsets),
+        for (set, dst, offsets, raws, noise) in [
+            (&track.layers, &mut ta.layers, &mut ta.layer_offsets, &mut ta.layer_raw, &mut ta.layer_noise),
+            (&track.redo_layers, &mut ta.redo, &mut ta.redo_offsets, &mut ta.redo_raw, &mut ta.redo_noise),
         ] {
             for layer in set.iter() {
                 dst.push(load_layer(dir, doc, layer)?);
                 offsets.push(layer.nudge_frames);
+                let raw = layer.derived_from.as_ref().and_then(|id| track.raw_layers.iter().find(|r| &r.id == id));
+                raws.push(match raw {
+                    Some(r) => {
+                        done += 1;
+                        Some(load_layer(dir, doc, r)?)
+                    }
+                    None => None,
+                });
+                noise.push(layer.noise_reduction.clone());
                 done += 1;
                 progress(done as f32 / total as f32);
             }
@@ -439,6 +495,7 @@ mod tests {
                 redo: vec![layer(4_800, 2.0)],
                 layer_offsets: vec![120, -30],
                 redo_offsets: vec![45],
+                ..TrackAudio::default()
             },
             TrackAudio { layers: vec![layer(4_800, 3.0)], ..TrackAudio::default() },
         ];
@@ -489,6 +546,47 @@ mod tests {
         assert!(saved.referenced_files().all(|f| f.starts_with("audio/layer-")));
         // Opening by the project.json path works too.
         assert_eq!(open_package(&dir.join(PROJECT_FILE)).unwrap().doc, saved);
+    }
+
+    #[test]
+    fn derived_layers_keep_their_raw_source_and_settings() {
+        let dir = crate::test_dir("pkg-derived").join("d.voiceloop");
+        let (d, mut audio) = project();
+        let settings = NoiseReductionDoc {
+            enabled: true,
+            profile_id: "n1".into(),
+            amount_db: 18.0,
+            sensitivity: 6.0,
+            smoothing: 0.5,
+            extra: Default::default(),
+        };
+        let raw = audio[0].layers[1].clone();
+        audio[0].layers[1] = layer(4_800, 7.0); // the processed buffer
+        audio[0].layer_raw = vec![None, Some(raw.clone())];
+        audio[0].layer_noise = vec![None, Some(settings.clone())];
+        let saved = save_package(&dir, &d, &audio, &AssetAudio::new(), None, &mut |_| {}).unwrap();
+        let t = &saved.tracks[0];
+        assert_eq!(t.raw_layers.len(), 1);
+        assert_eq!(t.layers[1].derived_from.as_deref(), Some(t.raw_layers[0].id.as_str()));
+        assert_eq!(t.layers[1].noise_reduction.as_ref(), Some(&settings));
+        assert!(t.layers[0].derived_from.is_none());
+        assert_eq!(files(&dir).len(), 5, "raw file written next to the processed one");
+        let opened = open_package(&dir).unwrap();
+        let back = load_audio(&dir, &opened.doc, &mut |_| {}).unwrap();
+        assert_eq!(back, audio, "processed, raw and settings round-trip");
+        assert_eq!(back[0].layer_raw[1].as_deref(), Some(&raw[..]), "raw bit-exact");
+
+        // Turning it off: the raw plays again, no derived file is kept.
+        audio[0].layers[1] = raw;
+        audio[0].layer_raw = vec![];
+        audio[0].layer_noise = vec![];
+        let second = save_package(&dir, &saved, &audio, &AssetAudio::new(), None, &mut |_| {}).unwrap();
+        assert!(second.tracks[0].raw_layers.is_empty());
+        assert!(
+            second.tracks[0].layers[1].derived_from.is_none() && second.tracks[0].layers[1].noise_reduction.is_none()
+        );
+        save_package(&dir, &second, &audio, &AssetAudio::new(), None, &mut |_| {}).unwrap();
+        assert_eq!(files(&dir).len(), 4);
     }
 
     #[test]

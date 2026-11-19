@@ -39,6 +39,9 @@ use crate::meter::{amplitude_to_db, MeterFrame};
 use crate::mic::{self, InputNeeds, InputReason, InputStatus, MicAction, MicDemand, MicState, MicWaiting};
 use crate::midi_in::{MidiBatch, MidiPortInfo};
 use crate::model::AudioDevice;
+use crate::noise::{
+    NoiseEvent, NoiseGlue, NoiseLayersView, NoiseLearnStatus, NoiseProfileEvent, NoiseReply, NoiseRequest,
+};
 use crate::platform::{self, MicPermission, SessionEvent, SessionInfo, SessionRequest};
 use crate::practice::{self, Practice, PracticeIo, PracticeProgress, PracticeStatus, PracticeTakeEvent, TransportMap};
 use crate::preview::{PreviewRequest, PreviewStarted, SampleBank};
@@ -152,6 +155,12 @@ pub enum EngineEvent {
     PracticeTake(Box<PracticeTakeEvent>),
     /// PRODUCE playhead: ~30 Hz while the arrangement plays, once more when it stops.
     ArrangementPosition(ArrangementPosition),
+    /// A noise profile was learned, renamed, deleted, or a project's profiles loaded.
+    NoiseProfile(NoiseProfileEvent),
+    /// "Learn room" progress (~10 Hz while listening) and its outcome.
+    NoiseLearn(NoiseLearnStatus),
+    /// Per-layer noise reduction settings and status changed (the whole table).
+    NoiseLayers(NoiseLayersView),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -214,6 +223,7 @@ enum Command {
     PreviewStop(Reply<()>),
     Arrangement(ArrangementRequest, Reply<ArrangementReply>),
     SetInputNeeds(InputNeeds, Reply<EngineStatus>),
+    Noise(NoiseRequest, Reply<NoiseReply>),
     Shutdown,
 }
 
@@ -412,6 +422,13 @@ impl Engine {
         self.request(|r| Command::SetInputNeeds(needs, r))
     }
 
+    /// Background noise reduction: learn room noise, manage profiles, set a
+    /// layer's noise reduction (`noise.rs`). Long work reports through
+    /// `noiseLearn`, `noiseProfile` and `noiseLayers` events.
+    pub fn noise(&self, request: NoiseRequest) -> Result<NoiseReply, EngineError> {
+        self.request(|r| Command::Noise(request, r))
+    }
+
     /// Stop audio, release devices and buffers, and join the control thread.
     pub fn shutdown(&self) {
         let _ = self.inner.tx.send(Command::Shutdown);
@@ -466,6 +483,8 @@ struct ControlLoop {
     practice_grace_until: Option<Instant>,
     /// Input state last sent in a `status` event.
     last_input: Option<InputStatus>,
+    /// Background noise reduction (`noise.rs`).
+    noise: NoiseGlue,
 }
 
 /// How long a forwarded record/overdub (or a refused Practice start) holds the mic
@@ -505,6 +524,7 @@ impl ControlLoop {
             record_grace_until: None,
             practice_grace_until: None,
             last_input: None,
+            noise: NoiseGlue::new(),
         }
     }
 
@@ -531,7 +551,8 @@ impl ControlLoop {
                 Duration::from_millis(250)
             };
             let timeout = self.hw.poll_interval(timeout);
-            let timeout = if self.project.is_active() { timeout.min(crate::project::ACTIVE_POLL) } else { timeout };
+            let busy = self.project.is_active() || self.noise.is_busy();
+            let timeout = if busy { timeout.min(crate::project::ACTIVE_POLL) } else { timeout };
             match rx.recv_timeout(timeout) {
                 Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                 Ok(cmd) => self.handle(cmd),
@@ -546,7 +567,13 @@ impl ControlLoop {
                 p.arrangement.collect(); // and finished arrangement schedules
             }
             let epoch = self.latest_snapshot.map(|s| s.epoch);
-            self.project.poll(self.playback.as_mut(), epoch, self.practice.library(), &self.hw.config, &*self.sink);
+            // A noise-reduction layer transfer owns the transfer rings until it ends.
+            if !self.noise.transfer_active() {
+                self.project.poll(self.playback.as_mut(), epoch, self.practice.library(), &self.hw.config, &*self.sink);
+            }
+            if let Some(docs) = self.project.take_noise_import() {
+                self.noise.import(docs); // a project was opened or created
+            }
             if let Some(library) = self.project.take_practice_import() {
                 // A project was opened or created: its Practice Lab library replaces the current one.
                 let io = practice_io!(self);
@@ -557,6 +584,7 @@ impl ControlLoop {
                 self.flush_practice();
             }
             self.drain_analysis();
+            self.tick_noise();
             self.tick_practice();
             self.update_mic();
             if self.audio_on && self.last_emit.elapsed() >= LEVEL_EVENT_INTERVAL {
@@ -734,6 +762,8 @@ impl ControlLoop {
                 let _ = reply.send(result);
             }
             Command::Project(request, reply) => {
+                self.noise
+                    .finish_transfer_blocking(self.playback.as_mut().map(|p| &mut p.handles), Duration::from_secs(3));
                 let _ = reply.send(self.project.request(request, self.playback.as_mut(), self.practice.library()));
             }
             Command::Practice(request, reply) => {
@@ -786,6 +816,8 @@ impl ControlLoop {
                         }
                     }
                 }
+                self.noise
+                    .finish_transfer_blocking(self.playback.as_mut().map(|p| &mut p.handles), Duration::from_secs(3));
                 let answer = Box::new(move |r| {
                     let _ = reply.send(r);
                 });
@@ -798,6 +830,34 @@ impl ControlLoop {
                 self.mic_error_reported = false;
                 self.update_mic();
                 let _ = reply.send(Ok(self.status()));
+            }
+            Command::Noise(request, reply) => {
+                let result = match request {
+                    NoiseRequest::Learn { seconds } => {
+                        if self.audio_on {
+                            self.noise.learn(seconds).map(|()| NoiseReply::None)
+                        } else {
+                            Err(EngineError::Invalid("start audio before learning the room".into()))
+                        }
+                    }
+                    NoiseRequest::CancelLearn => {
+                        self.noise.cancel_learn();
+                        Ok(NoiseReply::None)
+                    }
+                    NoiseRequest::Profiles => Ok(NoiseReply::Profiles(self.noise.profile_infos())),
+                    NoiseRequest::DeleteProfile { id } => self.noise.delete_profile(&id).map(|()| NoiseReply::None),
+                    NoiseRequest::RenameProfile { id, name } => {
+                        self.noise.rename_profile(&id, &name).map(|()| NoiseReply::None)
+                    }
+                    NoiseRequest::SetLayer { track, layer, settings } => {
+                        self.noise.set_layer(track, layer, settings).map(|()| NoiseReply::None)
+                    }
+                    NoiseRequest::SetConfig { config } => self.noise.set_config(config).map(|()| NoiseReply::None),
+                    NoiseRequest::Layers => Ok(NoiseReply::Layers(self.noise.view())),
+                };
+                let _ = reply.send(result);
+                self.tick_noise();
+                self.update_mic();
             }
             Command::Shutdown => unreachable!("handled in run loop"),
         }
@@ -846,6 +906,9 @@ impl ControlLoop {
         }
         if self.practice.is_active() || self.practice_grace_until.is_some_and(|t| now < t) {
             reasons.push(InputReason::Practice);
+        }
+        if self.noise.wants_mic() {
+            reasons.push(InputReason::Noise);
         }
         reasons
     }
@@ -954,6 +1017,7 @@ impl ControlLoop {
         }
         self.pitch_pending.clear();
         self.latest = None;
+        self.noise.input_stopped();
         // Input frames restart at 0 on the next open: the input→transport mapping starts over.
         self.practice.audio_stopped();
         self.flush_practice();
@@ -1018,6 +1082,7 @@ impl ControlLoop {
         };
         if result.is_ok() {
             self.project.track_command(&command); // track names follow addTrack / removeTrack
+            self.noise.on_command(&command); // per-layer noise entries follow undo, redo, clear, ...
         }
         result
     }
@@ -1078,6 +1143,7 @@ impl ControlLoop {
         if let Some(worker) = self.analysis.take() {
             worker.stop();
         }
+        self.noise.input_stopped();
         self.pitch_pending.clear();
         self.latest_snapshot = None;
         self.latest = None;
@@ -1232,13 +1298,54 @@ impl ControlLoop {
         while let Ok(timing) = p.handles.timings.pop() {
             (self.sink)(EngineEvent::LayerTiming(timing));
         }
+        let mut fresh = false;
         while let Ok(snapshot) = p.handles.snapshots.pop() {
             self.latest_snapshot = Some(snapshot);
+            fresh = true;
+        }
+        if let (true, Some(s)) = (fresh, self.latest_snapshot.as_ref()) {
+            self.noise.on_snapshot(s);
         }
         if let Some(s) = self.latest_snapshot.as_ref() {
             // Chains without DSP (after a duplicate, restore, or a lost race) get it now.
             p.handles.heal_effects(s);
             self.project.set_song_tempo(s.transport.bpm);
+        }
+    }
+
+    /// Drive noise learning and layer jobs; deliver their events and requests.
+    fn tick_noise(&mut self) {
+        if let Some(worker) = self.analysis.as_ref() {
+            while let Ok(audio) = worker.noise_audio.try_recv() {
+                self.noise.on_tap(audio);
+            }
+        }
+        let input_rate = self.analysis.as_ref().filter(|_| self.input_flowing()).map(|w| w.sample_rate);
+        let can_transfer = !self.project.is_active() && !self.project.restoring();
+        self.noise.tick(self.playback.as_mut().map(|p| &mut p.handles), input_rate, can_transfer);
+        let actions = self.noise.take_actions();
+        if let Some(worker) = self.analysis.as_ref() {
+            for request in actions.tap {
+                worker.noise_tap(request);
+            }
+        }
+        for command in actions.looper {
+            if let Err(e) = self.send_looper(command) {
+                (self.sink)(EngineEvent::Error(e));
+            }
+        }
+        if !actions.events.is_empty() {
+            self.project.set_noise(self.noise.docs());
+        }
+        if self.noise.take_dirty() {
+            self.project.mark_dirty();
+        }
+        for event in actions.events {
+            (self.sink)(match event {
+                NoiseEvent::Profile(e) => EngineEvent::NoiseProfile(e),
+                NoiseEvent::Learn(e) => EngineEvent::NoiseLearn(e),
+                NoiseEvent::Layers(e) => EngineEvent::NoiseLayers(e),
+            });
         }
     }
 

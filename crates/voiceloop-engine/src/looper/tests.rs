@@ -2243,4 +2243,80 @@ fn captured_lanes_render_exactly_the_looper_mix() {
     }
 }
 
+// ---- single-layer fetch and swap (noise reduction) ------------------------------
+
+use super::transfer::{swap_probes, FetchedLayer, LayerFetch, LayerSwap};
+
+fn fetch(r: &mut Rig, track: u8, layer: u8) -> Result<FetchedLayer, TransferError> {
+    let mut f = LayerFetch::new(track, LayerSlot::Active(layer));
+    for _ in 0..10_000 {
+        match f.poll(&mut r.h) {
+            Poll::Pending => r.silence(64),
+            Poll::Ready(x) => return x,
+        }
+    }
+    panic!("fetch did not finish");
+}
+
+fn swap(
+    r: &mut Rig,
+    layer: u8,
+    expect: usize,
+    probes_from: &[f32],
+    content: &[f32],
+    len: usize,
+) -> Result<usize, TransferError> {
+    let mut s = LayerSwap::new(0, LayerSlot::Active(layer), expect, swap_probes(probes_from), content, len);
+    for _ in 0..10_000 {
+        match s.poll(&mut r.h) {
+            Poll::Pending => r.silence(64),
+            Poll::Ready(x) => return x,
+        }
+    }
+    panic!("swap did not finish");
+}
+
+#[test]
+fn a_finished_layer_can_be_swapped_while_playing_and_swapped_back_bit_exact() {
+    let mut r = session_with_layers(transport(1_000, LoopMode::Free));
+    let before = render_from_start(&mut r, 3_000);
+    let free_before = r.snap().free_layers;
+    r.summaries();
+    r.send(C::Play);
+    r.silence(500);
+    let raw = fetch(&mut r, 0, 1).expect("fetch while playing");
+    assert!(raw.identity.complete && raw.samples.iter().any(|&v| v != 0.0));
+    assert_eq!(raw.samples.len(), raw.identity.frames);
+    // Replace with half-level content while the transport runs.
+    let half: Vec<f32> = raw.samples.iter().map(|v| v * 0.5).collect();
+    let new_ptr = swap(&mut r, 1, raw.identity.ptr, &raw.samples, &half, raw.identity.len).expect("swap");
+    assert_ne!(new_ptr, raw.identity.ptr);
+    // A stale identity is refused.
+    assert!(matches!(
+        swap(&mut r, 1, raw.identity.ptr, &raw.samples, &raw.samples, raw.identity.len),
+        Err(TransferError::Rejected(RejectReason::TrackBusy))
+    ));
+    let now = fetch(&mut r, 0, 1).unwrap();
+    assert_eq!(now.samples, half);
+    assert_eq!(now.identity.ptr, new_ptr);
+    r.send(C::Stop);
+    r.silence(10);
+    assert!(render_from_start(&mut r, 3_000) != before);
+    // Swap the raw back: playback is bit-identical to before, the pool kept its size.
+    swap(&mut r, 1, new_ptr, &half, &raw.samples, raw.identity.len).expect("restore");
+    assert!(render_from_start(&mut r, 3_000) == before);
+    assert_eq!(r.snap().free_layers, free_before);
+    let summaries = r.summaries();
+    assert!(summaries.iter().any(|s| s.track == 0 && s.layer == 1), "the swapped layer is re-summarised");
+}
+
+#[test]
+fn a_recording_layer_cannot_be_fetched() {
+    let mut r = Rig::new(config(0), transport(1_000, LoopMode::Free));
+    r.send(C::Record { track: 0 });
+    r.run(300, noise(1));
+    assert!(matches!(fetch(&mut r, 0, 0), Err(TransferError::Busy(_))));
+    assert!(matches!(fetch(&mut r, 1, 0), Err(TransferError::Rejected(RejectReason::TrackEmpty))));
+}
+
 mod effects;

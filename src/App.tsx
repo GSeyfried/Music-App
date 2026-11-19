@@ -3,6 +3,7 @@ import { onAppMenu } from "./engine/bridge";
 import { useThemeEffects } from "./settings/useThemeEffects";
 import { useAnalysisWhenNeeded } from "./settings/useAnalysisWhenNeeded";
 import { useMicWhenNeeded } from "./settings/useMicWhenNeeded";
+import { useNoiseConfigSync } from "./noise/useNoise";
 import { Alerts, EngineModeBanner, MicPermissionBanner, Toasts } from "./components/Alerts";
 import { MidiIndicator } from "./components/HardwarePanels";
 import { InputCluster } from "./components/InputControls";
@@ -66,6 +67,7 @@ function Shell() {
   useThemeEffects();
   useAnalysisWhenNeeded(workspace === "practice" || workspace === "games");
   useMicWhenNeeded(workspace);
+  useNoiseConfigSync();
   const { setOverlay } = ui;
   useEffect(() => onAppMenu((id) => id === "settings" && setOverlay("settings")), [setOverlay]);
   return (

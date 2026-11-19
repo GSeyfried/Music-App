@@ -22,14 +22,14 @@ pub struct SpectralPeak {
 }
 
 /// In-place iterative radix-2 complex FFT of a fixed power-of-two size.
-struct Fft {
+pub(crate) struct Fft {
     n: usize,
     /// `(cos, sin)` of `2πk/n` for `k < n/2`.
     twiddles: Vec<(f32, f32)>,
 }
 
 impl Fft {
-    fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         debug_assert!(n.is_power_of_two() && n >= 2);
         let twiddles = (0..n / 2)
             .map(|k| {
@@ -41,7 +41,7 @@ impl Fft {
     }
 
     /// Forward transform (`X[k] = Σ x[t]·e^(-2πikt/n)`) of `re + i·im`, in place.
-    fn forward(&self, re: &mut [f32], im: &mut [f32]) {
+    pub(crate) fn forward(&self, re: &mut [f32], im: &mut [f32]) {
         let n = self.n;
         debug_assert!(re.len() == n && im.len() == n);
         // Bit-reversal permutation.

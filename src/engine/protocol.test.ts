@@ -1,3 +1,4 @@
+import { NOISE_EVENT_TYPES } from "../noise/types";
 import { AUDIO_RESTARTED_TOAST, EngineStore } from "./store";
 import { describe, expect, it } from "vitest";
 import { defaultTransport } from "../models/domain";
@@ -119,6 +120,7 @@ describe("engine events parse from the Rust JSON", () => {
         "project",
         "arrangementPosition",
         ...PRACTICE_EVENT_TYPES,
+        ...NOISE_EVENT_TYPES,
       ].sort(),
     );
   });

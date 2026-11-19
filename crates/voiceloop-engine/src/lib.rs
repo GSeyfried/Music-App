@@ -27,6 +27,7 @@
 //! - [`practice`]  Practice Lab: reference/attempt takes, input→transport clock mapping, scoring
 //! - [`hardware`]  control-thread side of devices, MIDI, diagnostics
 //! - [`mic`]       "mic only when needed": input reasons, hold timer, requests waiting for input
+//! - [`noise`]     background noise reduction: learning profiles, per-layer spectral gating, derived buffers
 //! - [`platform`]  audio session (iOS AVAudioSession; desktop no-ops)
 //! - [`calibration`] loopback latency test signal and detector
 
@@ -44,6 +45,7 @@ pub mod meter;
 pub mod mic;
 pub mod midi_in;
 pub mod model;
+pub mod noise;
 pub mod platform;
 pub mod practice;
 pub mod preview;

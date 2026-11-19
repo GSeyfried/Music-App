@@ -421,6 +421,9 @@ pub struct AnalysisWorker {
     stop: Arc<AtomicBool>,
     config_tx: mpsc::Sender<AnalysisConfig>,
     pub results: mpsc::Receiver<AnalysisOutput>,
+    /// Noise learning: record room audio on this thread (see `noise.rs`).
+    noise_tx: mpsc::Sender<crate::noise::TapRequest>,
+    pub noise_audio: mpsc::Receiver<crate::noise::TapResult>,
     pub dropped: Arc<AtomicU64>,
     pub sample_rate: u32,
 }
@@ -443,6 +446,8 @@ impl AnalysisWorker {
         let stop = Arc::new(AtomicBool::new(false));
         let (config_tx, config_rx) = mpsc::channel::<AnalysisConfig>();
         let (results_tx, results) = mpsc::channel();
+        let (noise_tx, noise_rx) = mpsc::channel::<crate::noise::TapRequest>();
+        let (noise_audio_tx, noise_audio) = mpsc::channel();
         let stop_flag = stop.clone();
         let dropped_counter = dropped.clone();
 
@@ -454,7 +459,13 @@ impl AnalysisWorker {
                 // Input-clock frame of the next sample to be read.
                 let mut position = 0u64;
                 let mut gaps = GapPlacer::default();
+                let mut tap = crate::noise::NoiseTap::default();
                 while !stop_flag.load(Ordering::Relaxed) {
+                    while let Ok(r) = noise_rx.try_recv() {
+                        if let Some(done) = tap.request(r, position, sample_rate) {
+                            let _ = noise_audio_tx.send(done);
+                        }
+                    }
                     while let Ok(new) = config_rx.try_recv() {
                         // A bad configuration keeps the previous analyzer running.
                         if let Ok(mut fresh) = Analyzer::new(&new, sample_rate) {
@@ -487,17 +498,32 @@ impl AnalysisWorker {
                     scratch[..a.len()].copy_from_slice(a);
                     scratch[a.len()..n].copy_from_slice(b);
                     chunk.commit_all();
+                    if tap.is_active() {
+                        if let Some(done) = tap.push(&scratch[..n], sample_rate) {
+                            let _ = noise_audio_tx.send(done);
+                        }
+                    }
                     if enabled {
+                        let mut voiced = None;
                         analyzer.process(&scratch[..n], |out| {
+                            if let AnalysisOutput::Pitch(PitchFrame { frame, hz: Some(_), .. }) = &out {
+                                voiced = voiced.or(Some(*frame));
+                            }
                             let _ = results_tx.send(out);
                         });
+                        // A pre-take room recording ends at the first sung (voiced) frame.
+                        if let Some(frame) = voiced.filter(|_| tap.is_active()) {
+                            if let Some(done) = tap.voiced(frame, sample_rate) {
+                                let _ = noise_audio_tx.send(done);
+                            }
+                        }
                     }
                     position += n as u64;
                 }
             })
             .map_err(|e| EngineError::Backend(format!("could not start the analysis thread: {e}")))?;
 
-        Ok(Self { thread: Some(thread), stop, config_tx, results, dropped, sample_rate })
+        Ok(Self { thread: Some(thread), stop, config_tx, results, noise_tx, noise_audio, dropped, sample_rate })
     }
 
     /// Apply a new configuration without interrupting capture. Validated here
@@ -505,6 +531,11 @@ impl AnalysisWorker {
     pub fn reconfigure(&self, config: AnalysisConfig) -> Result<(), EngineError> {
         Analyzer::new(&config, self.sample_rate)?;
         self.config_tx.send(config).map_err(|_| EngineError::Backend("the analysis thread has stopped".into()))
+    }
+
+    /// Send a request to the noise tap (ignored if the thread has stopped).
+    pub fn noise_tap(&self, request: crate::noise::TapRequest) {
+        let _ = self.noise_tx.send(request);
     }
 
     pub fn stop(mut self) {
