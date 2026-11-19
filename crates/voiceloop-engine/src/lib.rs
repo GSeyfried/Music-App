@@ -31,6 +31,7 @@
 //! - [`calibration`] loopback latency test signal and detector
 
 pub mod analysis;
+pub mod arrangement;
 pub mod calibration;
 pub mod capture;
 pub mod clock;
