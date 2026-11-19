@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 use serde::{Deserialize, Serialize};
-use voiceloop_project::arrangement::{audible_gain, region_envelope, region_source, scale_frames};
+use voiceloop_project::arrangement::{audible_gain, region_envelope, region_source, scale_frames, RangeRenderer};
 pub use voiceloop_project::arrangement::{ArrangementDoc, AudioAssetDoc};
 use voiceloop_project::package::{AssetAudio, Samples};
 use voiceloop_project::resample;
@@ -112,6 +112,8 @@ pub struct ArrangementState {
     pub doc: ArrangementDoc,
     pub assets: Vec<AudioAssetDoc>,
     pub audio: AssetAudio,
+    /// Song tempo for synced effect times (set by the engine; 0 = unsynced).
+    pub bpm: f64,
 }
 
 impl ArrangementState {
@@ -121,7 +123,7 @@ impl ArrangementState {
         if arr.sample_rate == 0 {
             arr.sample_rate = doc.sample_rate;
         }
-        Self { doc: arr, assets: std::mem::take(&mut doc.assets), audio }
+        Self { doc: arr, assets: std::mem::take(&mut doc.assets), audio, bpm: doc.transport.bpm }
     }
 
     /// An empty arrangement at `rate`.
@@ -189,10 +191,19 @@ impl ArrangementState {
         scale_frames(&mut self.doc, from, rate, &|id| frames.get(id).copied());
     }
 
-    /// Mix of `[start, end)` as heard, through the output limiter.
+    /// Mix of `[start, end)` as heard (effects starting at `start`), through the output limiter.
     pub fn render(&self, start: u64, end: u64) -> Vec<f32> {
+        self.render_with(&mut self.renderer(), start, end)
+    }
+
+    /// Lane effects carried across consecutive [`Self::render_with`] calls (a bounce in chunks).
+    pub fn renderer(&self) -> RangeRenderer {
+        RangeRenderer::new(&self.doc, self.bpm)
+    }
+
+    pub fn render_with(&self, r: &mut RangeRenderer, start: u64, end: u64) -> Vec<f32> {
         let look = |id: &str| self.audio.get(id).map(|s| &s[..]);
-        voiceloop_project::arrangement::render_range(&self.doc, &look, start, end, soft_limit)
+        r.render(&self.doc, &look, start, end, soft_limit)
     }
 
     /// A playback schedule for the realtime player.

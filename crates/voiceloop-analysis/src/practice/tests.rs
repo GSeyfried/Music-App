@@ -542,7 +542,12 @@ fn free_started_takes_align_by_notes_but_still_report_grid_errors() {
 #[test]
 fn legato_slide_pieces_are_merged_into_the_note_they_lead_to() {
     // Reference: C D E F, 450 ms each.
-    let reference = synthetic_take(&[(0, 450, 60.0, 0.95), (450, 450, 62.0, 0.95), (900, 450, 64.0, 0.95), (1_350, 450, 65.0, 0.95)]);
+    let reference = synthetic_take(&[
+        (0, 450, 60.0, 0.95),
+        (450, 450, 62.0, 0.95),
+        (900, 450, 64.0, 0.95),
+        (1_350, 450, 65.0, 0.95),
+    ]);
     // Sung: on C, then for each next note a 100 ms slide piece, 20 ms gap, then the held note.
     let attempt = synthetic_take(&[
         (0, 430, 60.0, 0.95),

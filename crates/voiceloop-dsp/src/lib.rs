@@ -17,6 +17,6 @@ mod tests;
 
 pub use chain::{render, ChainDsp, BYPASS_RAMP_MS, PARAM_SMOOTH_MS};
 pub use spec::{
-    lenient_chain, params_of, ChainSpec, EffectId, EffectKind, EffectSpec, LayerScope, ParamDef, ParamRange,
-    MAX_EFFECTS_PER_TRACK, MAX_PARAMS,
+    default_mix, lenient_chain, params_of, ChainSpec, EffectId, EffectKind, EffectSpec, LayerScope, ParamDef,
+    ParamRange, MAX_EFFECTS_PER_TRACK, MAX_PARAMS,
 };

@@ -14,6 +14,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 voiceloop-analysis = { path = "../voiceloop-analysis" }
+voiceloop-dsp = { path = "../voiceloop-dsp" }
 voiceloop-project = { path = "../voiceloop-project" }
 
 # iOS audio session (platform/ios.rs). All already in the tree through CPAL;

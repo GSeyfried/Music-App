@@ -278,6 +278,18 @@ const TREMOLO: &[ParamDef] = &[
 ];
 const RING_MOD: &[ParamDef] = &[cont!("freqHz", 1.0, 4_000.0, 220.0)];
 
+/// Dry/wet a new effect of `kind` starts with, and what a missing `mix`
+/// means (`effects.<kind>.mix` in the settings registry; mirrors the UI table
+/// in `src/effects/types.ts`).
+pub fn default_mix(kind: EffectKind) -> f32 {
+    match kind {
+        EffectKind::Delay => 0.35,
+        EffectKind::Reverb => 0.3,
+        EffectKind::Chorus | EffectKind::Flanger | EffectKind::Phaser => 0.5,
+        _ => 1.0,
+    }
+}
+
 /// The parameter table of `kind`, in storage order.
 pub fn params_of(kind: EffectKind) -> &'static [ParamDef] {
     match kind {
@@ -343,13 +355,13 @@ pub struct EffectSpec {
 }
 
 impl EffectSpec {
-    /// An enabled, fully wet effect with default params.
+    /// An enabled effect with default params and the kind's [`default_mix`].
     pub fn new(id: &str, kind: EffectKind) -> Self {
         let mut params = [0.0; MAX_PARAMS];
         for (p, d) in params.iter_mut().zip(params_of(kind)) {
             *p = d.default;
         }
-        Self { id: EffectId::new(id).unwrap_or(EffectId::EMPTY), kind, enabled: true, mix: 1.0, params }
+        Self { id: EffectId::new(id).unwrap_or(EffectId::EMPTY), kind, enabled: true, mix: default_mix(kind), params }
     }
 
     pub fn defs(&self) -> &'static [ParamDef] {
@@ -496,7 +508,7 @@ struct EffectIn {
     kind: String,
     #[serde(default = "yes")]
     enabled: bool,
-    #[serde(default = "one")]
+    #[serde(default)]
     mix: Value,
     #[serde(default)]
     params: Map<String, Value>,
@@ -516,9 +528,6 @@ struct ChainIn {
 fn yes() -> bool {
     true
 }
-fn one() -> Value {
-    Value::from(1.0)
-}
 
 fn read_effect(v: Value) -> Result<EffectSpec, String> {
     let e: EffectIn = serde_json::from_value(v).map_err(|e| e.to_string())?;
@@ -529,7 +538,7 @@ fn read_effect(v: Value) -> Result<EffectSpec, String> {
     spec.enabled = e.enabled;
     spec.mix = match e.mix.as_f64() {
         Some(m) if m.is_finite() => (m as f32).clamp(0.0, 1.0),
-        _ => 1.0,
+        _ => default_mix(kind),
     };
     for (i, d) in params_of(kind).iter().enumerate() {
         if let Some(v) = e.params.get(d.name).and_then(|v| d.read(v)) {
@@ -676,6 +685,8 @@ mod tests {
         assert_eq!(f.param("cutoffHz"), Some(20_000.0));
         assert_eq!(f.param("q"), Some(0.707), "missing → default");
         assert_eq!(c.effects()[1].param("stages"), Some(6.0), "nearest step");
+        assert_eq!(c.effects()[1].mix, 0.5, "missing mix → the kind's default");
+        assert_eq!(c.effects()[2].mix, 0.35);
         assert_eq!(c.effects()[2].choice("sync"), Some("1/8d"));
         assert_eq!(c.effects()[2].param("feedback"), Some(0.5));
         let out = serde_json::to_value(c).unwrap();

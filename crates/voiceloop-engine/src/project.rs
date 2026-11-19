@@ -72,11 +72,14 @@ pub struct RenderOptions {
     pub loops: u32,
     /// Mixdown only: write two identical channels instead of one.
     pub stereo: bool,
+    /// Stems only: include each track's effects (`export.stemsWet`; the
+    /// mixdown always does). Absent means wet.
+    pub wet: bool,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        Self { depth: BitDepth::Int24, loops: 1, stereo: false }
+        Self { depth: BitDepth::Int24, loops: 1, stereo: false, wet: true }
     }
 }
 
@@ -1447,6 +1450,7 @@ impl ProjectGlue {
                     meter_denominator: t.time_signature.denominator as u16,
                     is_loop: true,
                 });
+                let bpm = t.bpm;
                 let rx = spawn_worker(move |progress| {
                     let tracks: Vec<RenderTrack> = doc
                         .tracks
@@ -1459,6 +1463,7 @@ impl ProjectGlue {
                             muted: d.muted,
                             solo: d.solo,
                             playing: d.playing,
+                            effects: d.effects,
                         })
                         .collect();
                     let mut job = RenderJob {
@@ -1469,6 +1474,8 @@ impl ProjectGlue {
                         depth: BitDepth::Int24,
                         tempo,
                         project_name: doc.name.clone(),
+                        bpm,
+                        stems_wet: true,
                     };
                     match after {
                         AfterExport::Mixdown { path, options } => {
@@ -1484,6 +1491,7 @@ impl ProjectGlue {
                         AfterExport::Stems { dir, options, per_layer } => {
                             job.loops = options.loops.max(1);
                             job.depth = options.depth;
+                            job.stems_wet = options.wet;
                             if let Some(a) = job.tempo.as_mut() {
                                 a.beats = a.beats.saturating_mul(job.loops);
                             }
@@ -1941,6 +1949,8 @@ fn write_reaper(
             muted: false,
             solo: false,
             playing: true,
+            // REAPER gets the raw layers; effects are not translated (PENDING).
+            effects: voiceloop_dsp::ChainSpec::EMPTY,
         })
         .collect();
     let loops = options.loops.max(1);
@@ -1952,6 +1962,8 @@ fn write_reaper(
         depth: options.depth,
         tempo: None,
         project_name: doc.name.clone(),
+        bpm: doc.transport.bpm,
+        stems_wet: false,
     };
     let stems = render::write_stems(&dir.join("Audio"), &doc.name, &job, StemKind::Tracks, progress)?;
     // write_stems skips tracks without layers, in track order.
@@ -2036,9 +2048,10 @@ fn bounce(
     let spec = wav::WavSpec { sample_rate: arr.rate(), channels: 1, format: BitDepth::Int24.into() };
     let mut w = wav::WavWriter::create(path, spec, wav::WriteOptions::default())?;
     let mut at = start;
+    let mut renderer = arr.renderer();
     while at < end {
         let to = (at + BOUNCE_CHUNK).min(end);
-        w.write_interleaved(&arr.render(at, to))?;
+        w.write_interleaved(&arr.render_with(&mut renderer, at, to))?;
         at = to;
         progress((at - start) as f32 / (end - start) as f32);
     }

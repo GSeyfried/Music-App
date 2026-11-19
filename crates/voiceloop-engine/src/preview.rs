@@ -106,7 +106,9 @@ impl SampleBank {
     fn nearest(&self, midi: f32) -> Option<usize> {
         let i = self.zones.partition_point(|z| z.root < midi);
         match (i.checked_sub(1), (i < self.zones.len()).then_some(i)) {
-            (Some(lo), Some(hi)) => Some(if midi - self.zones[lo].root <= self.zones[hi].root - midi { lo } else { hi }),
+            (Some(lo), Some(hi)) => {
+                Some(if midi - self.zones[lo].root <= self.zones[hi].root - midi { lo } else { hi })
+            }
             (Some(lo), None) => Some(lo),
             (None, hi) => hi,
         }
@@ -483,7 +485,10 @@ mod tests {
 
     fn request(notes: &[(f32, f64, f64)]) -> PreviewRequest {
         PreviewRequest {
-            notes: notes.iter().map(|&(midi, start, duration)| PreviewNote { midi, start, duration, velocity: Some(1.0) }).collect(),
+            notes: notes
+                .iter()
+                .map(|&(midi, start, duration)| PreviewNote { midi, start, duration, velocity: Some(1.0) })
+                .collect(),
             gain: 1.0,
             tuning_a4: None,
         }

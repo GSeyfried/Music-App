@@ -125,7 +125,11 @@ impl Engine {
     /// take), the Practice config and `extra` (app settings from the UI) to a
     /// JSON file for debugging or backup. Runs on the calling thread; the
     /// control thread only hands over the data.
-    pub fn practice_export_file(&self, path: &Path, extra: serde_json::Value) -> Result<PracticeExportSummary, EngineError> {
+    pub fn practice_export_file(
+        &self,
+        path: &Path,
+        extra: serde_json::Value,
+    ) -> Result<PracticeExportSummary, EngineError> {
         let library = self.practice_export_library()?;
         let config = self.practice_get_config()?;
         let summary = PracticeExportSummary {
@@ -144,7 +148,8 @@ impl Engine {
             extra,
         };
         let json = serde_json::to_vec_pretty(&file).map_err(|e| EngineError::Backend(e.to_string()))?;
-        std::fs::write(path, json).map_err(|e| EngineError::Invalid(format!("cannot write {}: {e}", path.display())))?;
+        std::fs::write(path, json)
+            .map_err(|e| EngineError::Invalid(format!("cannot write {}: {e}", path.display())))?;
         Ok(summary)
     }
 

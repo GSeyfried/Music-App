@@ -13,6 +13,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use voiceloop_dsp::ChainSpec;
+
 use crate::arrangement::{ArrangementDoc, AudioAssetDoc};
 use crate::error::{ProjectError, Result};
 
@@ -257,6 +259,10 @@ pub struct TrackDoc {
     pub midi_clips: Vec<MidiClip>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_signature: Option<TimeSignatureDoc>,
+    /// The track's effect chain (docs/projects/effects/README.md). Older
+    /// files have none; effects this version cannot read are dropped.
+    #[serde(default, deserialize_with = "voiceloop_dsp::lenient_chain", skip_serializing_if = "no_effects")]
+    pub effects: ChainSpec,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -267,6 +273,11 @@ fn unity() -> f32 {
 
 fn yes() -> bool {
     true
+}
+
+/// `skip_serializing_if` for effect chains: an empty, enabled, all-layers chain is not written.
+pub fn no_effects(c: &ChainSpec) -> bool {
+    *c == ChainSpec::EMPTY
 }
 
 impl TrackDoc {
@@ -283,6 +294,7 @@ impl TrackDoc {
             redo_layers: Vec::new(),
             midi_clips: Vec::new(),
             time_signature: None,
+            effects: ChainSpec::EMPTY,
             extra: Extra::new(),
         }
     }
@@ -556,6 +568,32 @@ mod tests {
             assert!(text.contains(key), "{key} in {text}");
         }
         assert_eq!(parse_project(&bytes, Path::new("p")).unwrap(), d);
+    }
+
+    #[test]
+    fn effect_chains_round_trip_and_older_files_have_none() {
+        use voiceloop_dsp::{EffectKind, EffectSpec, LayerScope};
+        let mut d = sample();
+        let text = String::from_utf8(to_json(&d).unwrap()).unwrap();
+        assert!(!text.contains("\"effects\""), "an empty chain is not written");
+        let mut f = EffectSpec::new("fx-1", EffectKind::Filter);
+        f.set_choice("type", "highpass").set("cutoffHz", 250.0);
+        f.mix = 0.4;
+        let mut chain = ChainSpec::with(&[f, EffectSpec::new("fx-2", EffectKind::Reverb)]);
+        chain.layers = LayerScope::Layers(0b10);
+        d.tracks[0].effects = chain;
+        let mut lane = crate::arrangement::ArrangementTrackDoc::new("Lane");
+        lane.effects = ChainSpec::with(&[EffectSpec::new("fx-3", EffectKind::Delay)]);
+        d.arrangement.tracks.push(lane);
+        let bytes = to_json(&d).unwrap();
+        let back = parse_project(&bytes, Path::new("p")).unwrap();
+        assert_eq!(back, d);
+        assert_eq!(back.tracks[1].effects, ChainSpec::EMPTY);
+        // Effects a newer version added are dropped, the rest kept.
+        let mut v: Value = serde_json::from_slice(&bytes).unwrap();
+        v["tracks"][0]["effects"]["effects"][1]["kind"] = Value::from("granularCloud");
+        let lenient = parse_project(&serde_json::to_vec(&v).unwrap(), Path::new("p")).unwrap();
+        assert_eq!(lenient.tracks[0].effects.effects().len(), 1);
     }
 
     #[test]

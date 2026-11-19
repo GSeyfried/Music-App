@@ -28,6 +28,7 @@ fn response_db(spec: &ChainSpec, freq: f32) -> f32 {
 
 fn one(kind: EffectKind, f: impl FnOnce(&mut EffectSpec)) -> ChainSpec {
     let mut e = EffectSpec::new("e", kind);
+    e.mix = 1.0;
     f(&mut e);
     ChainSpec::with(&[e])
 }

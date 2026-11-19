@@ -43,7 +43,12 @@ fn main() {
                 for n in &new.notes {
                     println!(
                         "      {:?} ref {:?} target {:?} sung {:?} err {:?} onset {:?}",
-                        n.status, n.reference_index, n.target_midi, n.sung_midi, n.pitch_error_cents.map(|c| c.round()), n.onset_error_ms.map(|m| m.round())
+                        n.status,
+                        n.reference_index,
+                        n.target_midi,
+                        n.sung_midi,
+                        n.pitch_error_cents.map(|c| c.round()),
+                        n.onset_error_ms.map(|m| m.round())
                     );
                 }
             }

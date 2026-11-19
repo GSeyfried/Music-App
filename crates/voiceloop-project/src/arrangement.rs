@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
+use voiceloop_dsp::{ChainDsp, ChainSpec};
 
 use crate::doc::{check_relative_path, Extra};
 use crate::error::{ProjectError, Result};
@@ -111,6 +112,13 @@ pub struct ArrangementTrackDoc {
     pub solo: bool,
     #[serde(default)]
     pub regions: Vec<RegionDoc>,
+    /// The lane's effect chain (its `layers` scope is ignored: a lane is one signal).
+    #[serde(
+        default,
+        deserialize_with = "voiceloop_dsp::lenient_chain",
+        skip_serializing_if = "crate::doc::no_effects"
+    )]
+    pub effects: ChainSpec,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -127,6 +135,7 @@ impl ArrangementTrackDoc {
             muted: false,
             solo: false,
             regions: Vec::new(),
+            effects: ChainSpec::EMPTY,
             extra: Extra::new(),
         }
     }
@@ -386,38 +395,101 @@ pub fn audible_gain(arr: &ArrangementDoc, track: &ArrangementTrackDoc) -> f32 {
 }
 
 /// Mix of the arrangement over `[start, end)` as heard (regions summed,
-/// track gain/mute/solo applied), each sample through `limiter`.
-/// `asset` looks up samples by asset id.
+/// track effects, then track gain/mute/solo), each sample through `limiter`.
+/// `asset` looks up samples by asset id. Effects start from silence at
+/// `start`, as playback started there does; `bpm` drives synced times.
 pub fn render_range<'a>(
     arr: &ArrangementDoc,
     asset: &dyn Fn(&str) -> Option<&'a [f32]>,
     start: u64,
     end: u64,
+    bpm: f64,
     limiter: fn(f32) -> f32,
 ) -> Vec<f32> {
-    let mut out = vec![0.0f32; end.saturating_sub(start) as usize];
-    for t in &arr.tracks {
-        let tg = audible_gain(arr, t);
-        if tg == 0.0 {
-            continue;
+    RangeRenderer::new(arr, bpm).render(arr, asset, start, end, limiter)
+}
+
+/// Renders consecutive ranges of one arrangement (a bounce in chunks) with
+/// each lane's effects carried from one range to the next.
+pub struct RangeRenderer {
+    chains: Vec<Option<ChainDsp>>,
+    next: Option<u64>,
+    lane: Vec<f32>,
+}
+
+impl RangeRenderer {
+    /// Effects for each lane of `arr` (which must not change between ranges).
+    pub fn new(arr: &ArrangementDoc, bpm: f64) -> Self {
+        let rate = if arr.sample_rate == 0 { 48_000 } else { arr.sample_rate };
+        let chains = arr
+            .tracks
+            .iter()
+            .map(|t| (!t.effects.is_empty()).then(|| ChainDsp::new(&t.effects.all_layers(), rate, bpm)))
+            .collect();
+        Self { chains, next: None, lane: Vec::new() }
+    }
+
+    /// `[start, end)`. Effects continue when `start` is where the last range
+    /// ended, and restart from silence otherwise.
+    pub fn render<'a>(
+        &mut self,
+        arr: &ArrangementDoc,
+        asset: &dyn Fn(&str) -> Option<&'a [f32]>,
+        start: u64,
+        end: u64,
+        limiter: fn(f32) -> f32,
+    ) -> Vec<f32> {
+        if self.next != Some(start) {
+            for c in self.chains.iter_mut().flatten() {
+                c.reset();
+            }
         }
-        for r in t.regions.iter().filter(|r| !r.muted) {
-            let Some(data) = asset(&r.asset_id) else { continue };
-            let from = r.start_frame.max(start);
-            let to = r.end_frame().min(end);
-            for f in from..to {
-                let k = f - r.start_frame;
-                if let Some(i) = region_source(r.source_offset_frames, r.repeat, data.len() as u64, k) {
-                    let env = region_envelope(r.length_frames, r.fade_in_frames, r.fade_out_frames, k);
-                    out[(f - start) as usize] += data[i as usize] * r.gain * env * tg;
+        self.next = Some(end);
+        let len = end.saturating_sub(start) as usize;
+        let mut out = vec![0.0f32; len];
+        self.lane.resize(len, 0.0);
+        for (ti, t) in arr.tracks.iter().enumerate() {
+            let tg = audible_gain(arr, t);
+            let chain = self.chains.get_mut(ti).and_then(|c| c.as_mut());
+            if tg == 0.0 && chain.is_none() {
+                continue;
+            }
+            let lane = &mut self.lane[..len];
+            lane.fill(0.0);
+            // Without effects the gain folds into each region as before (bit-identical).
+            let pre = if chain.is_some() { 1.0 } else { tg };
+            for r in t.regions.iter().filter(|r| !r.muted) {
+                let Some(data) = asset(&r.asset_id) else { continue };
+                let from = r.start_frame.max(start);
+                let to = r.end_frame().min(end);
+                for f in from..to {
+                    let k = f - r.start_frame;
+                    if let Some(i) = region_source(r.source_offset_frames, r.repeat, data.len() as u64, k) {
+                        let env = region_envelope(r.length_frames, r.fade_in_frames, r.fade_out_frames, k);
+                        lane[(f - start) as usize] += data[i as usize] * r.gain * env * pre;
+                    }
+                }
+            }
+            match chain {
+                // A muted lane's effects keep running (silently), as in playback.
+                Some(c) => {
+                    c.process_block(lane);
+                    for (o, v) in out.iter_mut().zip(lane.iter()) {
+                        *o += v * tg;
+                    }
+                }
+                None => {
+                    for (o, v) in out.iter_mut().zip(lane.iter()) {
+                        *o += v;
+                    }
                 }
             }
         }
+        for v in &mut out {
+            *v = limiter(*v);
+        }
+        out
     }
-    for v in &mut out {
-        *v = limiter(*v);
-    }
-    out
 }
 
 /// Scale every frame value of `arr` from `from` Hz to `to` Hz (assets are
@@ -598,15 +670,15 @@ mod tests {
         t2.gain = 2.0;
         a.tracks.push(t2);
         let look = |id: &str| (id == "a1").then_some(&data[..]);
-        let out = render_range(&a, &look, 50, 250, |v| v);
+        let out = render_range(&a, &look, 50, 250, 120.0, |v| v);
         assert_eq!(out.len(), 200);
         assert_eq!(out[0], 0.5, "track two only before frame 100");
         assert_eq!(out[60], 0.75, "both");
         assert_eq!(out[160], 0.25, "track one only after 200");
         a.tracks[0].solo = true;
-        assert_eq!(render_range(&a, &look, 50, 250, |v| v)[0], 0.0, "solo silences the other lane");
+        assert_eq!(render_range(&a, &look, 50, 250, 120.0, |v| v)[0], 0.0, "solo silences the other lane");
         a.tracks[0].regions[0].muted = true;
-        assert!(render_range(&a, &look, 0, 2_000, |v| v).iter().all(|&v| v == 0.0));
+        assert!(render_range(&a, &look, 0, 2_000, 120.0, |v| v).iter().all(|&v| v == 0.0));
     }
 
     #[test]

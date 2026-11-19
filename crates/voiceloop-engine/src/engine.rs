@@ -737,7 +737,8 @@ impl ControlLoop {
                 let _ = reply.send(self.project.request(request, self.playback.as_mut(), self.practice.library()));
             }
             Command::Practice(request, reply) => {
-                let starts = matches!(request, practice::Request::StartReference(_) | practice::Request::StartAttempt { .. });
+                let starts =
+                    matches!(request, practice::Request::StartReference(_) | practice::Request::StartAttempt { .. });
                 if starts && self.audio_on && self.mic_state() != MicState::On {
                     // Takes are timed on the input clock: the mic must already run.
                     self.practice_grace_until = Some(Instant::now() + mic::START_TIMEOUT);
@@ -829,9 +830,10 @@ impl ControlLoop {
         }
         let looper_records = self.playback.is_some()
             && self.latest_snapshot.is_some_and(|s| {
-                s.tracks.iter().take(s.track_count as usize).any(|t| {
-                    matches!(t.state, TrackState::Armed | TrackState::Recording | TrackState::Overdubbing)
-                })
+                s.tracks
+                    .iter()
+                    .take(s.track_count as usize)
+                    .any(|t| matches!(t.state, TrackState::Armed | TrackState::Recording | TrackState::Overdubbing))
             });
         if looper_records || self.mic_waiting.has_looper() || self.record_grace_until.is_some_and(|t| now < t) {
             reasons.push(InputReason::Record);
