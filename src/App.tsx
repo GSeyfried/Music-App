@@ -23,15 +23,17 @@ import { Studio } from "./workspaces/Studio";
 import { Produce } from "./produce/Produce";
 import { ProjectProvider, useProject } from "./project/ProjectContext";
 import { ProjectPanel } from "./project/ProjectPanel";
+import { PocketWorkspace } from "./pocket/PocketWorkspace";
 
 // Internal ids stay as they were (saved layouts and settings keep working);
 // only the labels changed (docs/projects/produce/README.md "Tabs"). The tab
 // text is drawn in capitals by CSS (.tab), so the accessible names stay
 // readable words ("Play", not "P-L-A-Y").
-type WorkspaceId = "studio" | "produce" | "practice" | "games";
+type WorkspaceId = "studio" | "pocket" | "produce" | "practice" | "games";
 
 const WORKSPACES: { id: WorkspaceId; label: string }[] = [
   { id: "studio", label: "Play" },
+  { id: "pocket", label: "Pocket" },
   { id: "produce", label: "Produce" },
   { id: "practice", label: "Assess" },
   { id: "games", label: "Games" },
@@ -127,6 +129,8 @@ function Shell() {
       <main>
         {workspace === "studio" ? (
           <Studio />
+        ) : workspace === "pocket" ? (
+          <PocketWorkspace />
         ) : workspace === "produce" ? (
           <Produce onOpenPlay={() => selectWorkspace("studio")} />
         ) : workspace === "practice" ? (

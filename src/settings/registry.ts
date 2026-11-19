@@ -37,6 +37,7 @@ export type GameSpeed = "slow" | "normal" | "fast";
 export type GrooveDifficulty = "easy" | "medium" | "hard";
 export type GrooveInputMode = "pads" | "microphone" | "midi";
 export type GrooveMode = "echo" | "freePlay";
+export type PocketSubdivision = "1/4" | "1/8" | "1/8T" | "1/16";
 export type PitchCatcherOctaves = "single" | "range";
 // PRODUCE (docs/projects/produce/README.md)
 export type ProduceSnap = "off" | "bar" | "beat" | "1/8" | "1/16";
@@ -102,6 +103,12 @@ export type EffectsControlStyle = "knob" | "slider";
 
 /** Values owned by the frontend ("app" source), with their types. */
 export interface AppSettings extends EffectParamSettings {
+  "keyboard.octave": number;
+  "keyboard.noteLabels": boolean;
+  "pocket.songBpm": number;
+  "pocket.quantizeSubdivision": PocketSubdivision;
+  /** 0 keeps natural timing; 1 moves events fully to the selected grid. */
+  "pocket.quantizeStrength": number;
   "practice.difficulty": Difficulty;
   "practice.stopStudioOnEnter": boolean;
   /** Octave of the tonic for generated scale exercises (4 = middle C's octave). */
@@ -269,6 +276,11 @@ export type AppSettingId = keyof AppSettings;
 
 
 export const APP_DEFAULTS: AppSettings = {
+  "keyboard.octave": 4,
+  "keyboard.noteLabels": true,
+  "pocket.songBpm": 100,
+  "pocket.quantizeSubdivision": "1/8",
+  "pocket.quantizeStrength": 0.65,
   "practice.difficulty": "medium",
   "practice.stopStudioOnEnter": true,
   "practice.scale.octave": 4,
@@ -471,6 +483,33 @@ export const sameTrackLoop = (a: TrackLoop, b: TrackLoop) =>
   a.loopFit === b.loopFit;
 
 export const SETTINGS: SettingDef[] = [
+  // ---- Pocket touch song sketcher ------------------------------------------
+  {
+    id: "keyboard.octave", source: "app", kind: "number", min: 1, max: 7, step: 1,
+    label: "Pocket piano octave", description: "Lowest C on the one-octave Pocket piano. Recorded notes do not move when this changes.",
+    category: "Pocket", tier: "daily", scope: "project",
+  },
+  {
+    id: "keyboard.noteLabels", source: "app", kind: "bool",
+    label: "Piano note labels", description: "Show note names on the Pocket piano. Accessible key names remain available when this is off.",
+    category: "Pocket", tier: "preferences", scope: "app",
+  },
+  {
+    id: "pocket.songBpm", source: "app", kind: "number", min: 40, max: 240, step: 1,
+    label: "Pocket song tempo", description: "Established beat grid used to place Pocket notes and hits.",
+    category: "Pocket", tier: "daily", scope: "project",
+  },
+  {
+    id: "pocket.quantizeSubdivision", source: "app", kind: "choice",
+    label: "Pocket beat grid", description: "Nearest rhythmic division used by Pocket timing correction.",
+    category: "Pocket", tier: "daily", scope: "project",
+    options: [{ value: "1/4", label: "Quarter" }, { value: "1/8", label: "Eighth" }, { value: "1/8T", label: "Triplet" }, { value: "1/16", label: "Sixteenth" }],
+  },
+  {
+    id: "pocket.quantizeStrength", source: "app", kind: "number", min: 0, max: 1, step: 0.05,
+    label: "Pocket tightness", description: "Blend notes toward the beat grid without replacing their original performance times.",
+    category: "Pocket", tier: "daily", scope: "project",
+  },
   // ---- Looper ---------------------------------------------------------------
   {
     id: "transport.overdubStart",

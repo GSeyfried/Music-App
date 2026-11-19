@@ -37,10 +37,10 @@ describe("PRODUCE workspace", () => {
     setAppSetting("produce.syncDebounceMs", 0);
   });
 
-  it("names the tabs PLAY, PRODUCE, ASSESS, GAMES (drawn in capitals)", () => {
+  it("names the tabs PLAY, POCKET, PRODUCE, ASSESS, GAMES (drawn in capitals)", () => {
     render(<App client={createEngine(new MockEngine({ realtime: false }))} />);
     const tabs = screen.getAllByRole("tab").map((t) => t.textContent);
-    expect(tabs).toEqual(["Play", "Produce", "Assess", "Games"]);
+    expect(tabs).toEqual(["Play", "Pocket", "Produce", "Assess", "Games"]);
     fireEvent.click(screen.getByRole("tab", { name: "Produce" }));
     expect(screen.getByRole("toolbar", { name: "Arrangement" })).toBeTruthy();
     expect(screen.getByText(/No lanes yet/)).toBeTruthy();
