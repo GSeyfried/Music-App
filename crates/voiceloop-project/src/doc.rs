@@ -193,8 +193,53 @@ pub struct LayerDoc {
     pub loop_period_frames: f64,
     /// `fnv1a64:<16 hex>` over the samples, to detect damaged or swapped files.
     pub checksum: String,
+    /// This file is derived from another (e.g. noise-reduced): the id of the
+    /// source layer, listed in the track's `rawLayers`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derived_from: Option<String>,
+    /// Background noise reduction applied to this layer (absent = off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noise_reduction: Option<NoiseReductionDoc>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// Per-layer noise reduction settings (`docs/projects/effects/README.md`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoiseReductionDoc {
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// `ProjectDoc::noise_profiles` entry used.
+    pub profile_id: String,
+    /// How far noise is turned down (dB).
+    pub amount_db: f32,
+    /// How far above the profile a bin must be to count as signal (dB).
+    pub sensitivity: f32,
+    /// 0..1 smoothing of the gate over time and frequency.
+    pub smoothing: f32,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// A learned room-noise profile: mean STFT magnitude per bin.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoiseProfileDoc {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub created_at: String,
+    pub fft_size: u32,
+    pub sample_rate: u32,
+    /// `fftSize / 2 + 1` magnitudes.
+    pub magnitudes: Vec<f32>,
+    /// STFT frames averaged.
+    #[serde(default)]
+    pub frames: u32,
+    /// How it was learned: `button` (Learn room) or `beforeTake` (auto).
+    #[serde(default)]
+    pub source: String,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -253,6 +298,10 @@ pub struct TrackDoc {
     /// Undone layers, oldest first (Redo restores the last one).
     #[serde(default)]
     pub redo_layers: Vec<LayerDoc>,
+    /// Source recordings of derived layers (`LayerDoc::derived_from`), kept
+    /// so processing can be changed or undone. Never played directly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_layers: Vec<LayerDoc>,
     #[serde(default)]
     pub midi_clips: Vec<MidiClip>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,6 +330,7 @@ impl TrackDoc {
             playing: true,
             layers: Vec::new(),
             redo_layers: Vec::new(),
+            raw_layers: Vec::new(),
             midi_clips: Vec::new(),
             time_signature: None,
             extra: Extra::new(),
@@ -350,6 +400,9 @@ pub struct ProjectDoc {
     /// Immutable audio the arrangement's regions play.
     #[serde(default)]
     pub assets: Vec<AudioAssetDoc>,
+    /// Learned room-noise profiles, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub noise_profiles: Vec<NoiseProfileDoc>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -379,6 +432,7 @@ impl ProjectDoc {
             devices: DeviceHints::default(),
             arrangement: ArrangementDoc::default(),
             assets: Vec::new(),
+            noise_profiles: Vec::new(),
             extra: Extra::new(),
         }
     }
@@ -387,7 +441,7 @@ impl ProjectDoc {
     pub fn referenced_files(&self) -> impl Iterator<Item = &str> {
         self.tracks
             .iter()
-            .flat_map(|t| t.layers.iter().chain(t.redo_layers.iter()))
+            .flat_map(|t| t.layers.iter().chain(t.redo_layers.iter()).chain(t.raw_layers.iter()))
             .map(|l| l.file.as_str())
             .chain(self.assets.iter().map(|a| a.file.as_str()))
             .chain(self.practice.library.as_deref())
@@ -431,7 +485,7 @@ impl ProjectDoc {
             if has_audio && self.loop_.is_none() && t.mode == LoopMode::Free {
                 return inv(format!("track {} has layers but the project has no loop", ti + 1));
             }
-            for layer in track.layers.iter().chain(&track.redo_layers) {
+            for layer in track.layers.iter().chain(&track.redo_layers).chain(&track.raw_layers) {
                 check_relative_path(&layer.file)?;
                 if layer.channels == 0 || layer.frames > (1u64 << 40) {
                     return inv(format!("layer {} has {} channels, {} frames", layer.id, layer.channels, layer.frames));
@@ -444,6 +498,16 @@ impl ProjectDoc {
                 if clip.notes.iter().any(|n| n.pitch > 127 || n.velocity > 127 || n.channel > 15) {
                     return inv(format!("MIDI clip {} has out-of-range notes", clip.id));
                 }
+            }
+        }
+        for p in &self.noise_profiles {
+            let size = p.fft_size as usize;
+            if !size.is_power_of_two()
+                || p.magnitudes.len() != size / 2 + 1
+                || p.sample_rate == 0
+                || p.magnitudes.iter().any(|m| !m.is_finite() || *m < 0.0)
+            {
+                return inv(format!("noise profile {} is malformed", p.id));
             }
         }
         Ok(())
@@ -542,6 +606,7 @@ mod tests {
             loop_period_frames: 96_000.5,
             checksum: "fnv1a64:0000000000000001".into(),
             derived_from: None,
+            noise_reduction: None,
             extra: Extra::new(),
         });
         d
@@ -627,6 +692,47 @@ mod tests {
         let mut v: Value = serde_json::from_slice(&bytes).unwrap();
         v["tracks"] = Value::from("nope");
         assert!(matches!(parse_project(&serde_json::to_vec(&v).unwrap(), p), Err(ProjectError::Corrupt { .. })));
+    }
+
+    #[test]
+    fn noise_profiles_and_layer_settings_round_trip() {
+        let mut d = sample();
+        d.noise_profiles.push(NoiseProfileDoc {
+            id: "n1".into(),
+            name: "Room".into(),
+            created_at: "2026-11-18T00:00:00Z".into(),
+            fft_size: 4,
+            sample_rate: 48_000,
+            magnitudes: vec![0.1, 0.2, 0.3],
+            frames: 9,
+            source: "button".into(),
+            extra: Extra::new(),
+        });
+        let mut raw = d.tracks[0].layers[0].clone();
+        raw.id = "raw1".into();
+        raw.file = "audio/layer-0000000000000002.wav".into();
+        d.tracks[0].raw_layers.push(raw);
+        d.tracks[0].layers[0].derived_from = Some("raw1".into());
+        d.tracks[0].layers[0].noise_reduction = Some(NoiseReductionDoc {
+            enabled: true,
+            profile_id: "n1".into(),
+            amount_db: 12.0,
+            sensitivity: 6.0,
+            smoothing: 0.5,
+            extra: Extra::new(),
+        });
+        let bytes = to_json(&d).unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        for key in ["\"noiseProfiles\"", "\"rawLayers\"", "\"derivedFrom\": \"raw1\"", "\"amountDb\": 12.0"] {
+            assert!(text.contains(key), "{key}");
+        }
+        assert_eq!(parse_project(&bytes, Path::new("p")).unwrap(), d);
+        assert!(d.referenced_files().any(|f| f.ends_with("0002.wav")));
+        // Older files without these fields open with none.
+        assert!(sample().noise_profiles.is_empty() && !to_json(&sample()).unwrap().windows(9).any(|w| w == b"rawLayers"));
+        // A malformed profile is refused.
+        d.noise_profiles[0].magnitudes.pop();
+        assert!(d.validate().is_err());
     }
 
     #[test]

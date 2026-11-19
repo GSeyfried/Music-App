@@ -462,6 +462,7 @@ fn doc_from_captured(base: &ProjectDoc, cap: Captured, config: Option<&AudioConf
             redo: tr.redo.into_iter().map(Arc::from).collect(),
             layer_offsets: tr.plan.layer_offsets[..tr.plan.layers as usize].to_vec(),
             redo_offsets: tr.plan.redo_offsets[..tr.plan.redo as usize].to_vec(),
+            ..TrackAudio::default()
         });
     }
     (doc, audio)
