@@ -30,6 +30,11 @@ if it is never exposed as a user setting. Skip it only for values that truly
 don't matter. Whether and where it becomes a visible setting is decided
 separately. See `docs/projects/settings/README.md`.
 
+When there's a question about how something should work (two reasonable
+behaviours), build both behind a setting with a sensible default instead of
+picking one or asking. The exception is when doing both would roughly triple
+the work; then build one, record the other as `PENDING`, and say so.
+
 ## Checks
 
 On the Mac: `npm run engine:test`, `npm run typecheck`, `cargo build -p voiceloop`, `npm run refs:verify`.
