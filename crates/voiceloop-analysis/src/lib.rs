@@ -24,11 +24,13 @@
 //! - [`theory`]   intervals, scales, key estimation, chord identification
 //! - [`chord`]    chord recognition from mixed audio: chroma, template matching, multi-note, smoothing
 //! - [`spectrum`] Hann-windowed FFT magnitude spectrum and spectral peaks
+//! - [`denoise`]  noise profiles and offline spectral gating (background noise reduction)
 //! - [`midi`]     MIDI-compatible events and Standard MIDI File export
 //! - [`note`]     frequency ↔ note arithmetic
 //! - [`signal`]   deterministic synthetic signals for tests and benchmarks
 
 pub mod chord;
+pub mod denoise;
 pub mod melody;
 pub mod midi;
 pub mod note;

@@ -1,0 +1,98 @@
+/* Noise reduction controls (src/noise/NoiseControls.tsx). */
+
+.noise-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.noise-learning {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.noise-progress {
+  display: inline-block;
+  width: 72px;
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, currentColor 18%, transparent);
+  overflow: hidden;
+}
+
+.noise-progress > span {
+  display: block;
+  height: 100%;
+  background: var(--accent, currentColor);
+  transition: width 100ms linear;
+}
+
+.noise-error {
+  color: var(--danger, #c33);
+  font-size: 0.85em;
+}
+
+.noise-profiles {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s-2);
+}
+
+.noise-profile {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.noise-profile-name {
+  min-width: 8em;
+  flex: 1 1 8em;
+}
+
+.noise-profile-meta {
+  opacity: 0.75;
+  font-size: 0.85em;
+}
+
+.noise-curve {
+  opacity: 0.7;
+}
+
+.layer-noise {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  margin-top: var(--s-1);
+}
+
+.layer-noise-amount {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.layer-noise-status.status-failed {
+  color: var(--danger, #c33);
+}
+
+.noise-badge {
+  display: inline-block;
+  margin-inline-start: var(--s-1);
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 0.7em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border: 1px solid currentColor;
+  opacity: 0.8;
+}
+
+.noise-badge[data-status="processing"] {
+  opacity: 0.45;
+}

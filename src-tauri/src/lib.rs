@@ -405,6 +405,71 @@ async fn arrangement_bounce(
     }
 }
 
+// --- Background noise reduction (docs/projects/effects/README.md "Noise reduction") ---
+
+use voiceloop_engine::noise::{
+    LayerNoiseSettings, NoiseConfig, NoiseLayersView, NoiseProfileInfo, NoiseReply, NoiseRequest,
+};
+
+fn noise(engine: &Engine, request: NoiseRequest) -> Result<NoiseReply, EngineError> {
+    engine.noise(request)
+}
+
+/// Record the room for `seconds` (default `noise.learnSeconds`) with the click
+/// muted; progress arrives as `noiseLearn` events, the profile as `noiseProfile`.
+#[tauri::command]
+fn noise_learn(engine: State<'_, Engine>, seconds: Option<f32>) -> Result<(), EngineError> {
+    noise(&engine, NoiseRequest::Learn { seconds }).map(|_| ())
+}
+
+#[tauri::command]
+fn noise_cancel_learn(engine: State<'_, Engine>) -> Result<(), EngineError> {
+    noise(&engine, NoiseRequest::CancelLearn).map(|_| ())
+}
+
+#[tauri::command]
+fn noise_profiles(engine: State<'_, Engine>) -> Result<Vec<NoiseProfileInfo>, EngineError> {
+    match noise(&engine, NoiseRequest::Profiles)? {
+        NoiseReply::Profiles(p) => Ok(p),
+        _ => Err(EngineError::Backend("unexpected reply".into())),
+    }
+}
+
+#[tauri::command]
+fn noise_delete_profile(engine: State<'_, Engine>, id: String) -> Result<(), EngineError> {
+    noise(&engine, NoiseRequest::DeleteProfile { id }).map(|_| ())
+}
+
+#[tauri::command]
+fn noise_rename_profile(engine: State<'_, Engine>, id: String, name: String) -> Result<(), EngineError> {
+    noise(&engine, NoiseRequest::RenameProfile { id, name }).map(|_| ())
+}
+
+/// `settings: null` turns it off and restores the raw layer. Rendering runs in
+/// the background; status arrives as `noiseLayers` events.
+#[tauri::command]
+fn set_layer_noise_reduction(
+    engine: State<'_, Engine>,
+    track: u8,
+    layer: u8,
+    settings: Option<LayerNoiseSettings>,
+) -> Result<(), EngineError> {
+    noise(&engine, NoiseRequest::SetLayer { track, layer, settings }).map(|_| ())
+}
+
+#[tauri::command]
+fn set_noise_config(engine: State<'_, Engine>, config: NoiseConfig) -> Result<(), EngineError> {
+    noise(&engine, NoiseRequest::SetConfig { config }).map(|_| ())
+}
+
+#[tauri::command]
+fn noise_layers(engine: State<'_, Engine>) -> Result<NoiseLayersView, EngineError> {
+    match noise(&engine, NoiseRequest::Layers)? {
+        NoiseReply::Layers(v) => Ok(v),
+        _ => Err(EngineError::Backend("unexpected reply".into())),
+    }
+}
+
 /// Menu actions forwarded to the frontend as `app://menu` with the item id.
 pub const MENU_EVENT: &str = "app://menu";
 const MENU_SETTINGS: &str = "settings";
@@ -503,7 +568,15 @@ pub fn run() {
             arrangement_send_to_looper,
             arrangement_play,
             arrangement_stop,
-            arrangement_bounce
+            arrangement_bounce,
+            noise_learn,
+            noise_cancel_learn,
+            noise_profiles,
+            noise_delete_profile,
+            noise_rename_profile,
+            set_layer_noise_reduction,
+            set_noise_config,
+            noise_layers
         ])
         .build(tauri::generate_context!())
         .expect("error while building VoiceLoop");

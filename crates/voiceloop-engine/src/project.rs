@@ -462,6 +462,7 @@ fn doc_from_captured(base: &ProjectDoc, cap: Captured, config: Option<&AudioConf
             redo: tr.redo.into_iter().map(Arc::from).collect(),
             layer_offsets: tr.plan.layer_offsets[..tr.plan.layers as usize].to_vec(),
             redo_offsets: tr.plan.redo_offsets[..tr.plan.redo as usize].to_vec(),
+            ..TrackAudio::default()
         });
     }
     (doc, audio)
@@ -511,6 +512,13 @@ fn convert_rate_with_clocks(
         let target = own.or(scaled).map_or(0, |p| p.ceil() as usize);
         for set in [&mut t.layers, &mut t.redo] {
             for layer in set.iter_mut() {
+                let mut v = resample::resample(layer, from, rate);
+                v.resize(target.max(1), 0.0);
+                *layer = Arc::from(v);
+            }
+        }
+        for set in [&mut t.layer_raw, &mut t.redo_raw] {
+            for layer in set.iter_mut().flatten() {
                 let mut v = resample::resample(layer, from, rate);
                 v.resize(target.max(1), 0.0);
                 *layer = Arc::from(v);
@@ -624,6 +632,8 @@ fn fit_layer(mut samples: Vec<f32>, period: f64, fit: FitMode) -> Result<(Vec<f3
 
 // ---- background work --------------------------------------------------------------
 
+// Sent once per operation; boxing would only add noise.
+#[allow(clippy::large_enum_variant)]
 enum Work {
     Saved(ProjectDoc, PathBuf),
     Opened {
@@ -787,6 +797,10 @@ pub struct ProjectGlue {
     arr_revision: u64,
     /// The playing arrangement schedule must be rebuilt.
     player_stale: bool,
+    /// Noise profiles, raw layers and settings to write on save (kept current by the engine).
+    noise: crate::noise::NoiseDocs,
+    /// Noise state of a project just opened or created; taken by the engine.
+    noise_import: Option<crate::noise::NoiseDocs>,
 }
 
 impl Default for ProjectGlue {
@@ -826,6 +840,8 @@ impl ProjectGlue {
             arr: ArrangementState::empty(48_000),
             arr_revision: 0,
             player_stale: false,
+            noise: Default::default(),
+            noise_import: None,
         }
     }
 
@@ -854,6 +870,21 @@ impl ProjectGlue {
             self.practice_fp = None; // re-baseline on the next poll: loading is not an edit
         }
         lib
+    }
+
+    /// The noise state a save writes (see `noise.rs`).
+    pub fn set_noise(&mut self, docs: crate::noise::NoiseDocs) {
+        self.noise = docs;
+    }
+
+    /// Noise profiles or layer settings changed: unsaved work.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// The noise state of a project that was opened or created (load it into `NoiseGlue`).
+    pub fn take_noise_import(&mut self) -> Option<crate::noise::NoiseDocs> {
+        self.noise_import.take()
     }
 
     /// Keep track names aligned with the looper: call after `addTrack` /
@@ -912,7 +943,8 @@ impl ProjectGlue {
         }
         let cap = p.into_captured();
         let clocks = clocks_of(&cap);
-        let (doc, audio) = doc_from_captured(&self.doc, cap, Some(config));
+        let (mut doc, mut audio) = doc_from_captured(&self.doc, cap, Some(config));
+        crate::noise::attach(&mut doc, &mut audio, &self.noise);
         self.doc = doc.clone();
         self.pending = Some(PendingLoad {
             doc,
@@ -1027,6 +1059,7 @@ impl ProjectGlue {
             }
             ProjectRequest::New { name } => {
                 self.practice_import = Some(PracticeLibrary::default()); // a new project starts with an empty library
+                self.noise_import = Some(Default::default());
                 let mut doc =
                     ProjectDoc::new(&name, rate.unwrap_or(self.doc.sample_rate), self.doc.tracks.len().max(2));
                 doc.transport = self.doc.transport.clone();
@@ -1418,7 +1451,8 @@ impl ProjectGlue {
         match after {
             AfterExport::Save { path } => {
                 let epoch = Some(inv.epoch);
-                let (doc, audio) = doc_from_captured(&self.doc, cap, Some(config));
+                let (mut doc, mut audio) = doc_from_captured(&self.doc, cap, Some(config));
+                crate::noise::attach(&mut doc, &mut audio, &self.noise);
                 let rx = spawn_save(path, doc, audio, self.arr.clone(), self.practice.clone());
                 Ok(Next::Continue(Stage::Work(rx, AfterWork::Saved { epoch, revision: self.arr_revision })))
             }
@@ -1432,7 +1466,8 @@ impl ProjectGlue {
                 Ok(Next::Continue(Stage::Work(rx, AfterWork::Exported)))
             }
             AfterExport::Autosave { dir } => {
-                let (doc, audio) = doc_from_captured(&self.doc, cap, Some(config));
+                let (mut doc, mut audio) = doc_from_captured(&self.doc, cap, Some(config));
+                crate::noise::attach(&mut doc, &mut audio, &self.noise);
                 let rx = spawn_autosave(dir, doc, audio, self.arr.clone(), self.practice.clone(), self.path.clone());
                 Ok(Next::Continue(Stage::Work(rx, AfterWork::Autosaved)))
             }
@@ -1813,6 +1848,8 @@ impl ProjectGlue {
                 if !parked {
                     // Practice Lab does not need audio: load its library now. Same for PRODUCE.
                     self.practice_import = practice;
+                    // Noise profiles and per-layer settings (layers as they will be in the looper).
+                    self.noise_import = Some(crate::noise::docs_from_project(&doc, &audio));
                 }
                 if let Some(a) = arrangement {
                     self.arr = a;

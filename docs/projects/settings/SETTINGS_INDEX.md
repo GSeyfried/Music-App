@@ -26,6 +26,27 @@ Scopes: app / project / track / session.
 | (engine) `mic::START_TIMEOUT` | Mic start timeout | A record, overdub or calibration waiting for the microphone is cancelled (with an error) if input is not flowing after this long. Not user-facing. | 5 s | app | `crates/voiceloop-engine/src/mic.rs` | internal |
 | (engine) `mic::RETRY_AFTER` | Mic retry delay | After the microphone failed to open, wait this long before trying again. Not user-facing. | 3 s | app | `crates/voiceloop-engine/src/mic.rs` | internal |
 
+## Noise reduction (wired: `src/noise`, `crates/voiceloop-engine/src/noise.rs`, `voiceloop-analysis/src/denoise.rs`)
+
+All `noise.*` values are sent to the engine together with `set_noise_config` (`useNoiseConfigSync`). Profiles and per-layer settings are project data (`noiseProfiles`, `LayerDoc.noiseReduction`), not settings.
+
+| ID | Label | Description | Default | Scope | Connected element | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `noise.learnMode` | Learn the room's noise | How the app learns background noise: the Learn room button, the quiet moment before each take (between record and the first sung note), or both. | Both | app | Advanced options › Noise reduction; Learn room button (Studio input area) | wired |
+| `noise.learnSeconds` | Learn room length | Seconds Learn room records (click muted meanwhile). | 3 s | app | Advanced options › Noise reduction; Learn room countdown | wired |
+| `noise.autoApply` | Auto-apply to new layers | Once a profile exists, new layers get noise reduction with the newest profile (raw kept). | On | app | Advanced options › Noise reduction; noise pop-up | wired |
+| `noise.defaultAmountDb` | Default reduction | dB that noise is turned down when a layer's noise reduction is switched on. | 12 dB | app | Advanced options › Noise reduction; Track details layer list | wired |
+| `noise.defaultSensitivity` | Default sensitivity | dB above the learned noise a sound must be to count as wanted. Higher removes more. | 6 dB | app | Advanced options › Noise reduction | wired |
+| `noise.defaultSmoothing` | Default smoothing | 0..1 smoothing of the reduction over time and frequency (fewer artefacts). | 0.5 | app | Advanced options › Noise reduction | wired |
+| `noise.clickBleed` | Before-take learning with the click | Skip clicks and knocks (frames far above the median) or learn before takes only while the metronome is off. | Skip clicks and knocks | app | Advanced options › Noise reduction | wired |
+| `noise.minAutoMs` | Shortest before-take sample | Room sound before a take shorter than this is not used. | 500 ms | app | internal | internal |
+| `noise.autoMaxSeconds` | Longest before-take sample | At most this much room sound before a take is used. | 8 s | app | internal | internal |
+| `noise.onsetMarginMs` | Margin before the first note | Room sound this close to the first voiced frame is left out. | 60 ms | app | internal | internal |
+| `noise.transientRejectDb` | Click rejection threshold | Frames this far above the median frame are skipped (before-take learning). | 6 dB | app | internal | internal |
+| `noise.fftSize` | Analysis size | STFT size (hop 1/4, Hann) for learning; a layer is processed at its profile's size. | 2048 | app | internal | internal |
+| `noise.layerIndicator` | Show noise reduction on layer chips | NR badge on layers that play a noise-reduced buffer. | On | app | Advanced options › Noise reduction; Track details layer chips | wired |
+| (engine) `noise::PRETAKE_WAIT`, `MAX_ATTEMPTS` | Auto-apply wait, retries | How long auto-apply waits for a before-take profile (2 s); fetch/swap retries before a layer job fails (4). Not user-facing. | 2 s / 4 | app | `crates/voiceloop-engine/src/noise.rs` | internal |
+
 ## Transport and metronome (exists: `transport.rs`)
 
 | ID | Label | Description | Default | Scope | Connected element | Status |

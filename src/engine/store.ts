@@ -9,6 +9,7 @@
 //             full looper clock/counters). Never triggers React. Visualisers
 //             read it from a requestAnimationFrame callback (lib/useFrame.ts).
 
+import { EMPTY_NOISE, type NoiseState } from "../noise/types";
 import type { AudioDevice, TransportState } from "../models/domain";
 import type { PracticeProgress, PracticeStatus, PracticeTakeEvent } from "../practice/types";
 import type { TransportKind } from "./client";
@@ -189,6 +190,8 @@ export interface EngineSnapshot {
   chord: ChordEvent | null;
   /** PRODUCE: whether the arrangement transport is playing (changes rarely; the frame is in `live.arrangement`). */
   arrangementPlaying: boolean;
+  /** Noise reduction: profiles, Learn room progress, per-layer settings and status. */
+  noise: NoiseState;
 }
 
 export interface LiveData {
@@ -300,6 +303,7 @@ export class EngineStore {
       micPermission: null,
       sessionInfo: null,
       arrangementPlaying: false,
+      noise: EMPTY_NOISE,
     };
   }
 
@@ -458,6 +462,15 @@ export class EngineStore {
         return;
       case "audioDiagnostics":
         live.audioDiagnostics = event.payload;
+        return;
+      case "noiseProfile":
+        this.set({ noise: { ...this.snapshot.noise, profiles: event.payload.profiles } });
+        return;
+      case "noiseLearn":
+        this.set({ noise: { ...this.snapshot.noise, learn: event.payload } });
+        return;
+      case "noiseLayers":
+        this.set({ noise: { ...this.snapshot.noise, layers: event.payload } });
         return;
       default: {
         // Adding an EngineEvent member without a case above fails the typecheck here.

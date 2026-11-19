@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use super::click::{accent_for, db_to_gain, ClickVoice};
 use super::pool::{self, LayerBuf, LayerRecycler, LayerSource};
 use super::transfer::{
-    Chunk, Inventory, JobKind, LayerJob, LayerSlot, ParkedLooper, ParkedTrack, RestorePlan, TrackClock, TrackPlan,
+    Chunk, Inventory, JobKind, LayerIdentity, LayerJob, LayerSlot, ParkedLooper, ParkedTrack, RestorePlan, SwapJob, TrackClock, TrackPlan,
     CHUNK_FRAMES, JOBS_PER_BLOCK, JOB_CAPACITY,
 };
 use super::{
@@ -2083,6 +2083,13 @@ impl LooperCore {
                     self.touch();
                     JobKind::Finish(Some(Ok(())))
                 }
+                JobKind::Probe { track, slot, .. } => {
+                    JobKind::Probe { track, slot, answer: Some(self.probe_layer(track, slot)) }
+                }
+                JobKind::Swap(mut swap) => {
+                    swap.result = Some(self.swap_layer(&mut swap));
+                    JobKind::Swap(swap)
+                }
             };
             if let Err(rtrb::PushError::Full(job)) = self.job_tx.push(job) {
                 // Unreachable: the control side keeps at most JOB_CAPACITY jobs
@@ -2143,6 +2150,44 @@ impl LooperCore {
         let layer = self.layer(c).ok_or(RejectReason::TrackEmpty)?;
         let src = layer.get(c.offset..c.offset + c.buf.len()).ok_or(RejectReason::LoopTooLong)?;
         c.buf.copy_from_slice(src);
+        Ok(())
+    }
+
+    fn probe_layer(&self, track: u8, slot: LayerSlot) -> Result<LayerIdentity, RejectReason> {
+        let tr = self.tracks.get(track as usize).ok_or(RejectReason::NoSuchTrack)?;
+        let (buf, summary) = match slot {
+            LayerSlot::Active(i) => (tr.layers.get(i as usize), tr.summaries.get(i as usize)),
+            LayerSlot::Redo(i) => (tr.redo.get(i as usize), tr.redo_summaries.get(i as usize)),
+        };
+        let buf = buf.ok_or(RejectReason::TrackEmpty)?;
+        let frames = tr.clock.map_or(0, |m| (m.period.ceil().max(0.0) as usize).min(buf.len()));
+        let complete = !self.loading && !tr.filling && !matches!(summary, Some(SummaryState::Recording) | None);
+        Ok(LayerIdentity { ptr: buf.as_ptr() as usize, len: buf.len(), frames, complete })
+    }
+
+    /// Swap one finished layer's buffer for `job.buf` (O(1); see `transfer.rs`).
+    fn swap_layer(&mut self, job: &mut SwapJob) -> Result<(), RejectReason> {
+        if self.loading {
+            return Err(RejectReason::TrackBusy);
+        }
+        let tr = self.tracks.get_mut(job.track as usize).ok_or(RejectReason::NoSuchTrack)?;
+        if tr.filling {
+            return Err(RejectReason::TrackBusy);
+        }
+        let (layer, summary) = match job.slot {
+            LayerSlot::Active(i) => (tr.layers.get_mut(i as usize), tr.summaries.get_mut(i as usize)),
+            LayerSlot::Redo(i) => (tr.redo.get_mut(i as usize), tr.redo_summaries.get_mut(i as usize)),
+        };
+        let (Some(layer), Some(summary)) = (layer, summary) else { return Err(RejectReason::TrackEmpty) };
+        let same = layer.as_ptr() as usize == job.expect_ptr
+            && layer.len() == job.buf.len()
+            && job.probes.iter().all(|&(at, v)| layer.get(at as usize).is_some_and(|x| x.to_bits() == v.to_bits()));
+        if !same || matches!(summary, SummaryState::Recording) {
+            return Err(RejectReason::TrackBusy);
+        }
+        std::mem::swap(layer, &mut job.buf);
+        *summary = SummaryState::Scanning { cursor: 0, bins: [0.0; LAYER_SUMMARY_BINS], timing: TimingScan::EMPTY };
+        self.touch();
         Ok(())
     }
 

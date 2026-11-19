@@ -50,12 +50,14 @@ pub enum InputReason {
     Monitor,
     /// Engine: a loopback latency calibration runs or waits.
     Calibration,
+    /// Engine: "Learn room" is recording the room's noise.
+    Noise,
 }
 
 impl InputReason {
     /// Reasons only the engine sets (ignored when the frontend sends them).
     pub fn engine_owned(self) -> bool {
-        matches!(self, Self::Record | Self::Monitor | Self::Calibration)
+        matches!(self, Self::Record | Self::Monitor | Self::Calibration | Self::Noise)
     }
 }
 

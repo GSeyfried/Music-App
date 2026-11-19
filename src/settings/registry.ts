@@ -19,6 +19,7 @@ import {
   type TransportState,
 } from "../models/domain";
 import { DEFAULT_NOTE_COLORS } from "./noteColors";
+import { DEFAULT_NOISE_CONFIG, type NoiseClickBleed, type NoiseLearnMode } from "../noise/types";
 import { EFFECT_DEFS, MAX_EFFECTS_PER_TRACK, effectParamSettingId, effectTableDefaults, type EffectKind, type EffectPreset } from "../effects/types";
 
 /** day-to-day controls are shown in place; the rest live in the advanced pop-up or Preferences. */
@@ -172,6 +173,21 @@ export interface AppSettings extends EffectParamSettings {
   /** Mic only when needed: "whenNeeded" opens the microphone only for recording, tuner, live pitch, Practice. */
   "audio.micMode": "whenNeeded" | "alwaysOn";
   "audio.micIdleCloseSeconds": number;
+  // ---- Noise reduction (src/noise, crates/voiceloop-engine/src/noise.rs) ----
+  "noise.learnMode": NoiseLearnMode;
+  "noise.learnSeconds": number;
+  "noise.autoApply": boolean;
+  "noise.defaultAmountDb": number;
+  "noise.defaultSensitivity": number;
+  "noise.defaultSmoothing": number;
+  "noise.clickBleed": NoiseClickBleed;
+  "noise.minAutoMs": number;
+  "noise.autoMaxSeconds": number;
+  "noise.onsetMarginMs": number;
+  "noise.transientRejectDb": number;
+  /** STFT size as a string ("1024" | "2048" | "4096"). */
+  "noise.fftSize": string;
+  "noise.layerIndicator": boolean;
   /** Hidden dashboard widgets, as "<workspace>:<widget id>". */
   "widgets.hidden": string[];
   "theme.mode": ThemeMode;
@@ -314,6 +330,19 @@ export const APP_DEFAULTS: AppSettings = {
   "audio.previewThroughEngine": true,
   "audio.micMode": "whenNeeded",
   "audio.micIdleCloseSeconds": 10,
+  "noise.learnMode": DEFAULT_NOISE_CONFIG.learnMode,
+  "noise.learnSeconds": DEFAULT_NOISE_CONFIG.learnSeconds,
+  "noise.autoApply": DEFAULT_NOISE_CONFIG.autoApply,
+  "noise.defaultAmountDb": DEFAULT_NOISE_CONFIG.defaultAmountDb,
+  "noise.defaultSensitivity": DEFAULT_NOISE_CONFIG.defaultSensitivity,
+  "noise.defaultSmoothing": DEFAULT_NOISE_CONFIG.defaultSmoothing,
+  "noise.clickBleed": DEFAULT_NOISE_CONFIG.clickBleed,
+  "noise.minAutoMs": DEFAULT_NOISE_CONFIG.minAutoMs,
+  "noise.autoMaxSeconds": DEFAULT_NOISE_CONFIG.autoMaxSeconds,
+  "noise.onsetMarginMs": DEFAULT_NOISE_CONFIG.onsetMarginMs,
+  "noise.transientRejectDb": DEFAULT_NOISE_CONFIG.transientRejectDb,
+  "noise.fftSize": String(DEFAULT_NOISE_CONFIG.fftSize),
+  "noise.layerIndicator": true,
   "theme.mode": "system",
   "theme.pitchReactive": false,
   "theme.pitchReactiveStrength": 0.35,
@@ -1433,6 +1462,180 @@ export const SETTINGS: SettingDef[] = [
     description:
       "Seconds the microphone stays open after the last thing that needed it ends, so it is ready again right away. 0 closes it at once.",
     category: "Audio input",
+    tier: "advanced",
+    scope: "app",
+  },
+  // ---- Noise reduction (docs/projects/effects/README.md "Noise reduction") ----
+  {
+    id: "noise.learnMode",
+    source: "app",
+    kind: "choice",
+    options: [
+      { value: "both", label: "Button and before each take" },
+      { value: "button", label: "Learn room button only" },
+      { value: "beforeTake", label: "Before each take only" },
+    ],
+    label: "Learn the room's noise",
+    description:
+      "How the app learns your room's background noise. Learn room records a few seconds of silence when you press it. Before each take uses the quiet moment between pressing record and your first sung note.",
+    category: "Noise reduction",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "noise.learnSeconds",
+    source: "app",
+    kind: "number",
+    min: 1,
+    max: 10,
+    step: 0.5,
+    label: "Learn room length",
+    description: "Seconds of room sound Learn room records (stay quiet; the click is muted meanwhile).",
+    category: "Noise reduction",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "noise.autoApply",
+    source: "app",
+    kind: "bool",
+    label: "Auto-apply to new layers",
+    description:
+      "Once a noise profile exists, every newly recorded layer gets noise reduction with the newest profile. The raw recording is kept and you can turn it off per layer.",
+    category: "Noise reduction",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "noise.defaultAmountDb",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 40,
+    step: 1,
+    label: "Default reduction",
+    description: "How far noise is turned down (dB) when noise reduction is switched on for a layer.",
+    category: "Noise reduction",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "noise.defaultSensitivity",
+    source: "app",
+    kind: "number",
+    min: -6,
+    max: 24,
+    step: 1,
+    label: "Default sensitivity",
+    description:
+      "How far above the learned noise a sound must be to count as wanted (dB). Higher removes more, but may thin quiet singing.",
+    category: "Noise reduction",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "noise.defaultSmoothing",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 1,
+    step: 0.05,
+    label: "Default smoothing",
+    description: "Smooths the reduction over time and pitch: fewer watery artefacts, softer edges.",
+    category: "Noise reduction",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "noise.clickBleed",
+    source: "app",
+    kind: "choice",
+    options: [
+      { value: "rejectTransients", label: "Skip clicks and knocks" },
+      { value: "clickOffOnly", label: "Only when the click is off" },
+    ],
+    label: "Before-take learning with the click",
+    description:
+      "The metronome can leak into the mic before a take. Skip clicks and knocks ignores short loud moments; the other choice only learns before takes while the click is off.",
+    category: "Noise reduction",
+    tier: "advanced",
+    scope: "app",
+  },
+  {
+    id: "noise.minAutoMs",
+    source: "app",
+    kind: "number",
+    min: 100,
+    max: 5000,
+    step: 50,
+    label: "Shortest before-take sample",
+    description: "Room sound before a take shorter than this (ms) is not used to learn the noise.",
+    category: "Noise reduction",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "noise.autoMaxSeconds",
+    source: "app",
+    kind: "number",
+    min: 1,
+    max: 30,
+    step: 1,
+    label: "Longest before-take sample",
+    description: "At most this many seconds before a take are used to learn the noise.",
+    category: "Noise reduction",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "noise.onsetMarginMs",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 500,
+    step: 10,
+    label: "Margin before the first note",
+    description: "Room sound this close (ms) to the first sung note is left out of the before-take sample.",
+    category: "Noise reduction",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "noise.transientRejectDb",
+    source: "app",
+    kind: "number",
+    min: 3,
+    max: 24,
+    step: 1,
+    label: "Click rejection threshold",
+    description: "Moments this much louder (dB) than the typical room level are skipped when learning before a take.",
+    category: "Noise reduction",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "noise.fftSize",
+    source: "app",
+    kind: "choice",
+    options: [
+      { value: "1024", label: "1024" },
+      { value: "2048", label: "2048" },
+      { value: "4096", label: "4096" },
+    ],
+    label: "Analysis size",
+    description:
+      "STFT size for learning and reduction. Larger separates hum and tones more finely but smears short sounds. Profiles keep the size they were learned with.",
+    category: "Noise reduction",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "noise.layerIndicator",
+    source: "app",
+    kind: "bool",
+    label: "Show noise reduction on layer chips",
+    description: "Mark layers that play a noise-reduced version with a small NR badge.",
+    category: "Noise reduction",
     tier: "advanced",
     scope: "app",
   },
