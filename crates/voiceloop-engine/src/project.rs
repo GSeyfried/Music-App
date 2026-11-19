@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use voiceloop_analysis::midi::{notes_to_midi, MidiMessage, MidiOptions};
 use voiceloop_analysis::NoteEvent;
+use voiceloop_project::arrangement::{render_region, ArrangementTrackDoc, RegionDoc, RegionOrigin};
 use voiceloop_project::doc::{
     DeviceHints, LoopDoc, LoopMode, MidiClip, MidiNote, ProjectDoc, TimeSignatureDoc, TrackDoc, TransportDoc,
 };
@@ -34,6 +35,7 @@ use voiceloop_project::render::{self, RenderJob, RenderTrack, StemKind};
 use voiceloop_project::wav::{self, Acid, BitDepth};
 use voiceloop_project::{resample, rpp, smf, ProjectError};
 
+use crate::arrangement::{looper_track_audio, ArrangementReply, ArrangementRequest, ArrangementState, FrameRange};
 use crate::engine::EngineEvent;
 use crate::error::EngineError;
 use crate::looper::io::LooperPlayback;
@@ -43,7 +45,7 @@ use crate::looper::transfer::{
 use crate::looper::{soft_limit, MAX_TRACKS};
 use crate::practice::PracticeLibrary;
 use crate::routing::AudioConfig;
-use crate::transport::{LoopLength, MetronomeSettings, TimeSignature, TransportState};
+use crate::transport::{LoopLength, MetronomeSettings, TimeSignature, TrackLoop, TrackLoopMode, TransportState};
 
 /// Poll interval while an operation is active.
 pub const ACTIVE_POLL: Duration = Duration::from_millis(5);
@@ -218,6 +220,12 @@ pub enum OpKind {
     Restore,
     ImportMidi,
     Autosave,
+    /// PRODUCE: render looper tracks into arrangement lanes.
+    ArrangementCapture,
+    /// PRODUCE: load a region into a looper track.
+    ArrangementSendToLooper,
+    /// PRODUCE: offline render of the arrangement to a WAV file.
+    ArrangementBounce,
 }
 
 /// Typed file error for the UI: `kind` is one of `io`, `notFound`,
@@ -292,6 +300,14 @@ pub enum OpResult {
     Restored {
         resampled_from: Option<u32>,
         loaded_into_looper: bool,
+    },
+    /// Lanes were added to the arrangement (the whole arrangement and assets).
+    ArrangementCaptured {
+        arrangement: crate::arrangement::ArrangementView,
+    },
+    /// A region was loaded into a looper track as its base layer.
+    SentToLooper {
+        looper_track: u32,
     },
 }
 
@@ -528,17 +544,20 @@ fn loadable(
             muted: d.muted,
             solo: d.solo,
             playing: d.playing,
+            // The audio's own offsets (captured or loaded) win over the document's,
+            // which can be stale for tracks edited since the last open.
             layer_offsets: {
                 let mut values = [0; crate::looper::MAX_LAYERS_PER_TRACK];
-                for (slot, layer) in values.iter_mut().zip(d.layers.iter()) {
-                    *slot = layer.nudge_frames;
+                for (i, slot) in values.iter_mut().enumerate().take(a.layers.len()) {
+                    *slot = a.layer_offsets.get(i).copied().or(d.layers.get(i).map(|l| l.nudge_frames)).unwrap_or(0);
                 }
                 values
             },
             redo_offsets: {
                 let mut values = [0; crate::looper::MAX_LAYERS_PER_TRACK];
-                for (slot, layer) in values.iter_mut().zip(d.redo_layers.iter()) {
-                    *slot = layer.nudge_frames;
+                for (i, slot) in values.iter_mut().enumerate().take(a.redo.len()) {
+                    *slot =
+                        a.redo_offsets.get(i).copied().or(d.redo_layers.get(i).map(|l| l.nudge_frames)).unwrap_or(0);
                 }
                 values
             },
@@ -617,6 +636,8 @@ enum Work {
         resampled_from: Option<u32>,
         /// The project's Practice Lab library (open only; `None` for parked content).
         practice: Option<PracticeLibrary>,
+        /// The project's arrangement and its assets (open only).
+        arrangement: Option<ArrangementState>,
     },
     Files(Vec<PathBuf>, u64),
     Audio {
@@ -670,12 +691,16 @@ enum AfterExport {
     Mixdown { path: PathBuf, options: RenderOptions },
     Stems { dir: PathBuf, options: RenderOptions, per_layer: bool },
     AddLayer { track: u8, samples: Vec<f32>, fit: FitMode, resampled_from: Option<u32> },
+    Capture { tracks: Vec<u32>, per_layer: bool, repeats: u32, start: u64 },
+    SendToLooper { samples: Vec<f32>, track: Option<u32>, name: String },
 }
 
 enum AfterWork {
     /// `epoch`: the looper content epoch the save captured (None: not from the looper).
     Saved {
         epoch: Option<u64>,
+        /// Arrangement revision the save wrote.
+        revision: u64,
     },
     Opened,
     Exported,
@@ -695,6 +720,7 @@ enum AfterImport {
     Opened { pending: Box<PendingLoad> },
     Created { doc: Box<ProjectDoc> },
     LayerAdded { track: u8, report: FitReport, resampled_from: Option<u32> },
+    SentToLooper { track: u32, name: String },
 }
 
 enum Stage {
@@ -703,11 +729,15 @@ enum Stage {
     Import(Importer, AfterImport),
 }
 
+/// Called once with an operation's outcome (synchronous arrangement replies).
+pub type Waiter = Box<dyn FnOnce(Result<OpResult, FileError>) + Send>;
+
 struct Op {
     id: u64,
     kind: OpKind,
     stage: Stage,
     last_progress: Instant,
+    waiter: Option<Waiter>,
 }
 
 /// Content waiting for a running looper: a project opened while audio was
@@ -751,6 +781,12 @@ pub struct ProjectGlue {
     practice_fp: Option<(usize, u64, u64)>,
     /// A library to load into Practice Lab (after open / new); taken by the engine.
     practice_import: Option<PracticeLibrary>,
+    /// PRODUCE arrangement (kept apart from `doc`; written into it on save).
+    arr: ArrangementState,
+    /// Bumped on every arrangement change (unsaved-work tracking across saves).
+    arr_revision: u64,
+    /// The playing arrangement schedule must be rebuilt.
+    player_stale: bool,
 }
 
 impl Default for ProjectGlue {
@@ -787,6 +823,9 @@ impl ProjectGlue {
             practice: None,
             practice_fp: None,
             practice_import: None,
+            arr: ArrangementState::empty(48_000),
+            arr_revision: 0,
+            player_stale: false,
         }
     }
 
@@ -941,7 +980,7 @@ impl ProjectGlue {
     fn start(&mut self, kind: OpKind, stage: Stage) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.op = Some(Op { id, kind, stage, last_progress: Instant::now() });
+        self.op = Some(Op { id, kind, stage, last_progress: Instant::now(), waiter: None });
         id
     }
 
@@ -992,6 +1031,8 @@ impl ProjectGlue {
                     ProjectDoc::new(&name, rate.unwrap_or(self.doc.sample_rate), self.doc.tracks.len().max(2));
                 doc.transport = self.doc.transport.clone();
                 self.pending = None;
+                self.arr = ArrangementState::empty(doc.sample_rate);
+                self.player_stale = true;
                 if looper {
                     let empty = loadable(&doc, &[], &[], None, rate.unwrap_or(doc.sample_rate)).map_err(to_engine)?;
                     let importer = Importer::new(empty.plan, empty.layers);
@@ -1019,7 +1060,9 @@ impl ProjectGlue {
                 let target = rate;
                 let rx = spawn_worker(move |progress| {
                     let mut opened = package::open_package(&path)?;
-                    let audio = package::load_audio(&opened.path, &opened.doc, &mut |p| progress(p * 0.8))?;
+                    let audio = package::load_audio(&opened.path, &opened.doc, &mut |p| progress(p * 0.7))?;
+                    let assets = package::load_assets(&opened.path, &opened.doc)?;
+                    let mut arrangement = ArrangementState::from_doc(&mut opened.doc, assets);
                     let practice = match package::load_practice(&opened.path, &opened.doc) {
                         Ok(Some(bytes)) => match serde_json::from_slice::<PracticeLibrary>(&bytes) {
                             Ok(lib) => Some(lib),
@@ -1035,9 +1078,12 @@ impl ProjectGlue {
                         }
                     };
                     let rate = target.unwrap_or(opened.doc.sample_rate);
+                    arrangement.ensure_rate(rate);
+                    progress(0.8);
                     let mut work = converted(opened, audio, Vec::new(), rate, false, progress);
-                    if let Work::Opened { practice: p, .. } = &mut work {
+                    if let Work::Opened { practice: p, arrangement: a, .. } = &mut work {
                         *p = practice;
+                        *a = Some(arrangement);
                     }
                     Ok(work)
                 });
@@ -1155,8 +1201,8 @@ impl ProjectGlue {
             Some(p) => (p.doc.clone(), p.audio.clone()),
             None => (self.doc.clone(), Vec::new()),
         };
-        let rx = spawn_save(path, doc, audio, self.practice.clone());
-        self.start(OpKind::Save, Stage::Work(rx, AfterWork::Saved { epoch: None }))
+        let rx = spawn_save(path, doc, audio, self.arr.clone(), self.practice.clone());
+        self.start(OpKind::Save, Stage::Work(rx, AfterWork::Saved { epoch: None, revision: self.arr_revision }))
     }
 
     fn begin_autosave(&mut self, dir: PathBuf, looper: bool) -> u64 {
@@ -1168,7 +1214,7 @@ impl ProjectGlue {
             Some(p) => (p.doc.clone(), p.audio.clone()),
             None => (self.doc.clone(), Vec::new()),
         };
-        let rx = spawn_autosave(dir, doc, audio, self.practice.clone(), self.path.clone());
+        let rx = spawn_autosave(dir, doc, audio, self.arr.clone(), self.practice.clone(), self.path.clone());
         self.start(OpKind::Autosave, Stage::Work(rx, AfterWork::Autosaved))
     }
 
@@ -1183,9 +1229,13 @@ impl ProjectGlue {
         config: &AudioConfig,
         sink: Sink,
     ) {
+        let mut playback = playback;
         let rate = rate_of(playback.as_deref());
         self.observe(epoch);
         self.sync_practice(practice);
+        if let Some(p) = playback.as_deref_mut() {
+            self.refresh_player(p, sink);
+        }
         if self.op.is_none() {
             let auto_pending = self.pending.as_ref().is_some_and(|p| p.auto);
             if let (true, Some(rate)) = (auto_pending, rate) {
@@ -1253,7 +1303,7 @@ impl ProjectGlue {
             self.op = Some(op);
             return;
         };
-        let (id, kind) = (op.id, op.kind);
+        let (id, kind, waiter) = (op.id, op.kind, op.waiter.take());
         if let Err(e) = &outcome {
             // Never lose content that was on its way into the looper.
             if let Stage::Import(_, AfterImport::Opened { pending }) = op.stage {
@@ -1265,14 +1315,24 @@ impl ProjectGlue {
         }
         let next = outcome.and_then(|step| self.advance(op.stage, step, rate, config));
         match next {
-            Ok(Next::Continue(stage)) => self.op = Some(Op { id, kind, stage, last_progress: op.last_progress }),
-            Ok(Next::Finished(result)) => sink(EngineEvent::Project(ProjectEvent::Done {
-                op_id: id,
-                op: kind,
-                result,
-                project: Box::new(self.info()),
-            })),
+            Ok(Next::Continue(stage)) => {
+                self.op = Some(Op { id, kind, stage, last_progress: op.last_progress, waiter })
+            }
+            Ok(Next::Finished(result)) => {
+                if let Some(w) = waiter {
+                    w(Ok(result.clone()));
+                }
+                sink(EngineEvent::Project(ProjectEvent::Done {
+                    op_id: id,
+                    op: kind,
+                    result,
+                    project: Box::new(self.info()),
+                }))
+            }
             Err(error) => {
+                if let Some(w) = waiter {
+                    w(Err(error.clone()));
+                }
                 // A busy looper (recording) only postpones an autosave: retry in about 5 s.
                 if kind == OpKind::Autosave && error.kind == "busy" {
                     if let Some(every) = self.autosave_every {
@@ -1327,6 +1387,16 @@ impl ProjectGlue {
                     self.rebaseline_until = Some(Instant::now() + Duration::from_millis(100));
                     OpResult::Created
                 }
+                AfterImport::SentToLooper { track, name } => {
+                    self.dirty = true;
+                    self.rebaseline_until = Some(Instant::now() + Duration::from_millis(100));
+                    while self.doc.tracks.len() <= track as usize {
+                        let n = self.doc.tracks.len();
+                        self.doc.tracks.push(TrackDoc::new(n));
+                    }
+                    self.doc.tracks[track as usize].name = name;
+                    OpResult::SentToLooper { looper_track: track }
+                }
                 AfterImport::LayerAdded { track, report, resampled_from } => {
                     self.dirty = true;
                     self.rebaseline_until = Some(Instant::now() + Duration::from_millis(100));
@@ -1349,8 +1419,8 @@ impl ProjectGlue {
             AfterExport::Save { path } => {
                 let epoch = Some(inv.epoch);
                 let (doc, audio) = doc_from_captured(&self.doc, cap, Some(config));
-                let rx = spawn_save(path, doc, audio, self.practice.clone());
-                Ok(Next::Continue(Stage::Work(rx, AfterWork::Saved { epoch })))
+                let rx = spawn_save(path, doc, audio, self.arr.clone(), self.practice.clone());
+                Ok(Next::Continue(Stage::Work(rx, AfterWork::Saved { epoch, revision: self.arr_revision })))
             }
             AfterExport::Reaper { dir, options } => {
                 let period = inv.period.ok_or_else(|| file_error("invalid", "there is no loop to export yet"))?;
@@ -1363,7 +1433,7 @@ impl ProjectGlue {
             }
             AfterExport::Autosave { dir } => {
                 let (doc, audio) = doc_from_captured(&self.doc, cap, Some(config));
-                let rx = spawn_autosave(dir, doc, audio, self.practice.clone(), self.path.clone());
+                let rx = spawn_autosave(dir, doc, audio, self.arr.clone(), self.practice.clone(), self.path.clone());
                 Ok(Next::Continue(Stage::Work(rx, AfterWork::Autosaved)))
             }
             AfterExport::Mixdown { .. } | AfterExport::Stems { .. } => {
@@ -1457,17 +1527,267 @@ impl ProjectGlue {
                 let importer = Importer::new(load.plan, load.layers);
                 Ok(Next::Continue(Stage::Import(importer, AfterImport::LayerAdded { track, report, resampled_from })))
             }
+            AfterExport::Capture { tracks, per_layer, repeats, start } => {
+                self.capture_into_arrangement(&cap, &tracks, per_layer, repeats, start)?;
+                Ok(Next::Finished(OpResult::ArrangementCaptured { arrangement: self.arr.view() }))
+            }
+            AfterExport::SendToLooper { samples, track, name } => {
+                if inv.busy || inv.run != crate::looper::RunState::Stopped {
+                    return Err(file_error("busy", "stop the looper transport before sending a region to it"));
+                }
+                let t = match track {
+                    Some(t) if t >= inv.track_count as u32 => {
+                        return Err(file_error("doesNotFit", format!("there is no looper track {}", t + 1)));
+                    }
+                    Some(t) => {
+                        let plan = &inv.tracks[t as usize];
+                        if plan.layers > 0 || plan.redo > 0 {
+                            return Err(file_error("doesNotFit", format!("looper track {} is not empty", t + 1)));
+                        }
+                        t
+                    }
+                    None if inv.track_count >= inv.track_capacity => {
+                        return Err(file_error("doesNotFit", "the looper has no room for another track"));
+                    }
+                    None => inv.track_count as u32,
+                };
+                if samples.len() > inv.max_frames {
+                    let why = format!(
+                        "the region is {} frames; a loop holds at most {} (raise maxLoopSeconds)",
+                        samples.len(),
+                        inv.max_frames
+                    );
+                    return Err(file_error("doesNotFit", why));
+                }
+                let ti = t as usize;
+                let len = samples.len();
+                let mut clocks = clocks_of(&cap);
+                let (mut doc, mut audio) = doc_from_captured(&self.doc, cap, Some(config));
+                while doc.tracks.len() <= ti {
+                    let n = doc.tracks.len();
+                    doc.tracks.push(TrackDoc::new(n));
+                }
+                doc.tracks[ti].name = name.clone();
+                doc.tracks[ti].layers.clear();
+                doc.tracks[ti].redo_layers.clear();
+                audio.resize_with(doc.tracks.len(), TrackAudio::default);
+                audio[ti] = TrackAudio { layers: vec![Arc::from(samples)], ..TrackAudio::default() };
+                clocks.resize(doc.tracks.len(), crate::looper::transfer::TrackClock::SONG);
+                // Its own Free loop of exactly the region's length (PER_TRACK_LOOPS.md).
+                clocks[ti] = crate::looper::transfer::TrackClock {
+                    track_loop: TrackLoop { mode: TrackLoopMode::Free, ..clocks[ti].track_loop },
+                    period: Some(len as f64),
+                    base: None,
+                };
+                let load = loadable(&doc, &audio, &clocks, inv.period, inv.transport.sample_rate)?;
+                let importer = Importer::new(load.plan, load.layers);
+                Ok(Next::Continue(Stage::Import(importer, AfterImport::SentToLooper { track: t, name })))
+            }
+        }
+    }
+
+    /// Render the chosen looper tracks into new assets and lanes (one region
+    /// of `repeats` loop cycles at `start` each).
+    fn capture_into_arrangement(
+        &mut self,
+        cap: &Captured,
+        tracks: &[u32],
+        per_layer: bool,
+        repeats: u32,
+        start: u64,
+    ) -> Result<(), FileError> {
+        let inv = &cap.inventory;
+        let mut next = self.arr.clone();
+        next.ensure_rate(inv.transport.sample_rate);
+        for &t in tracks {
+            let Some(track) = cap.tracks.get(t as usize).filter(|_| t < inv.track_count as u32) else {
+                return Err(file_error("invalid", format!("there is no looper track {}", t + 1)));
+            };
+            if track.layers.is_empty() {
+                return Err(file_error("invalid", format!("looper track {} is empty", t + 1)));
+            }
+            let frames = inv.track_frames(&track.plan);
+            let period = match track.plan.clock.track_loop.mode {
+                TrackLoopMode::Song => inv.period,
+                _ => track.plan.clock.period,
+            }
+            .unwrap_or(frames as f64);
+            let name = self.doc.tracks.get(t as usize).map_or_else(|| format!("Track {}", t + 1), |d| d.name.clone());
+            let length = (repeats.clamp(1, 1_024) as f64 * period).round().max(1.0) as u64;
+            for (layer, samples) in looper_track_audio(track, frames, per_layer) {
+                let label = layer.map_or_else(|| name.clone(), |l| format!("{name} layer {}", l + 1));
+                let asset_id = next.add_asset(&label, samples);
+                let mut lane = ArrangementTrackDoc::new(&label);
+                lane.gain = track.plan.gain;
+                lane.muted = track.plan.muted || !track.plan.playing;
+                lane.regions.push(RegionDoc {
+                    id: voiceloop_project::new_id(),
+                    name: label,
+                    asset_id,
+                    start_frame: start,
+                    source_offset_frames: 0,
+                    length_frames: length,
+                    repeat: true,
+                    gain: 1.0,
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
+                    muted: false,
+                    origin: Some(RegionOrigin { looper_track: t, layer }),
+                    extra: Default::default(),
+                });
+                next.doc.tracks.push(lane);
+            }
+        }
+        next.doc.validate(&next.assets, next.rate()).map_err(FileError::from)?;
+        self.arr = next;
+        self.arrangement_changed();
+        Ok(())
+    }
+
+    fn arrangement_changed(&mut self) {
+        self.arr_revision += 1;
+        self.dirty = true;
+        self.player_stale = true;
+    }
+
+    /// Rebuild a playing schedule after the arrangement changed.
+    fn refresh_player(&mut self, p: &mut LooperPlayback, sink: Sink) {
+        p.arrangement.collect();
+        if !std::mem::take(&mut self.player_stale) || !p.arrangement.is_playing() {
+            return;
+        }
+        let rate = p.output_info().sample_rate;
+        self.arr.ensure_rate(rate);
+        if let Err(e) = self.arr.schedule().and_then(|s| p.arrangement.update(s)) {
+            sink(EngineEvent::Error(e));
+        }
+    }
+
+    /// The current arrangement and its assets.
+    pub fn arrangement(&self) -> &ArrangementState {
+        &self.arr
+    }
+
+    /// PRODUCE requests. `reply` is called exactly once: at once for quick
+    /// requests, or when a capture / send / bounce operation finishes.
+    pub fn arrangement_request(
+        &mut self,
+        req: ArrangementRequest,
+        playback: Option<&mut LooperPlayback>,
+        reply: ArrangementReplyFn,
+    ) {
+        let rate = rate_of(playback.as_deref());
+        if let Some(r) = rate {
+            self.arr.ensure_rate(r);
+        }
+        let slow = matches!(
+            req,
+            ArrangementRequest::CaptureFromLooper { .. }
+                | ArrangementRequest::SendToLooper { .. }
+                | ArrangementRequest::Bounce { .. }
+        );
+        if slow && self.op.is_some() {
+            return reply(Err(busy()));
+        }
+        match req {
+            ArrangementRequest::Get => reply(Ok(ArrangementReply::View(self.arr.view()))),
+            ArrangementRequest::Set { arrangement } => {
+                let result = self.arr.set(arrangement).map(|()| {
+                    self.arrangement_changed();
+                    ArrangementReply::View(self.arr.view())
+                });
+                if let Some(p) = playback {
+                    self.refresh_player(p, &|_| {});
+                }
+                reply(result)
+            }
+            ArrangementRequest::Play { from_frame } => {
+                let result = match playback {
+                    None => Err(EngineError::Invalid("audio output is not running".into())),
+                    Some(p) => self.arr.schedule().and_then(|s| p.arrangement.play(s, from_frame)),
+                };
+                reply(result.map(|()| ArrangementReply::Done))
+            }
+            ArrangementRequest::Stop => {
+                let result = playback.map_or(Ok(()), |p| p.arrangement.stop());
+                reply(result.map(|()| ArrangementReply::Done))
+            }
+            ArrangementRequest::CaptureFromLooper { tracks, per_layer, repeats, start_frame } => {
+                if let Err(e) = self.need_looper(playback.is_some()) {
+                    return reply(Err(e));
+                }
+                if tracks.is_empty() {
+                    return reply(Err(EngineError::Invalid("choose at least one looper track".into())));
+                }
+                let after = AfterExport::Capture { tracks, per_layer, repeats, start: start_frame };
+                self.start(OpKind::ArrangementCapture, Stage::Export(Exporter::new(), after));
+                self.set_waiter(make_waiter(reply, |r| match r {
+                    OpResult::ArrangementCaptured { arrangement } => Some(ArrangementReply::View(arrangement)),
+                    _ => None,
+                }));
+            }
+            ArrangementRequest::SendToLooper { region_id, looper_track } => {
+                if let Err(e) = self.need_looper(playback.is_some()) {
+                    return reply(Err(e));
+                }
+                let Some((_, region)) = self.arr.doc.find_region(&region_id) else {
+                    return reply(Err(EngineError::Invalid(format!("no region {region_id}"))));
+                };
+                let Some(asset) = self.arr.audio.get(&region.asset_id) else {
+                    return reply(Err(EngineError::Invalid(format!("region {region_id} has no audio"))));
+                };
+                let samples = render_region(region, asset);
+                let name = if region.name.is_empty() { "From PRODUCE".to_string() } else { region.name.clone() };
+                let after = AfterExport::SendToLooper { samples, track: looper_track, name };
+                self.start(OpKind::ArrangementSendToLooper, Stage::Export(Exporter::new(), after));
+                self.set_waiter(make_waiter(reply, |r| match r {
+                    OpResult::SentToLooper { looper_track } => {
+                        Some(ArrangementReply::Sent(crate::arrangement::SentToLooper { looper_track }))
+                    }
+                    _ => None,
+                }));
+            }
+            ArrangementRequest::Bounce { path, range } => {
+                let (start, end) = match range {
+                    Some(FrameRange { start_frame, end_frame }) => (start_frame, end_frame),
+                    None => (0, self.arr.doc.end_frame()),
+                };
+                if end <= start || end - start > voiceloop_project::arrangement::MAX_ARRANGEMENT_FRAMES {
+                    return reply(Err(EngineError::Invalid("there is nothing to bounce in that range".into())));
+                }
+                let arr = self.arr.clone();
+                let rx = spawn_worker(move |progress| {
+                    let path = PathBuf::from(path);
+                    let frames = bounce(&arr, &path, start, end, progress)?;
+                    Ok(Work::Files(vec![path], frames))
+                });
+                self.start(OpKind::ArrangementBounce, Stage::Work(rx, AfterWork::Exported));
+                self.set_waiter(make_waiter(reply, |r| match r {
+                    OpResult::Exported { frames, .. } => {
+                        Some(ArrangementReply::Bounced(crate::arrangement::Bounced { frames }))
+                    }
+                    _ => None,
+                }));
+            }
+        }
+    }
+
+    fn set_waiter(&mut self, w: Waiter) {
+        if let Some(op) = self.op.as_mut() {
+            op.waiter = Some(w);
         }
     }
 
     fn after_work(&mut self, after: AfterWork, work: Work, rate: Option<u32>) -> Result<Next, FileError> {
         match (after, work) {
-            (AfterWork::Saved { epoch }, Work::Saved(doc, path)) => {
-                // Clean unless the looper changed after the content was captured.
+            (AfterWork::Saved { epoch, revision }, Work::Saved(mut doc, path)) => {
+                // Clean unless the looper or the arrangement changed after the content was captured.
                 self.dirty = match (epoch, self.observed_epoch) {
                     (Some(saved), Some(now)) => saved != now,
                     _ => false,
-                };
+                } || revision != self.arr_revision;
+                doc.arrangement = Default::default(); // owned by `self.arr`
+                doc.assets.clear();
                 self.doc = doc;
                 self.path = Some(path.clone());
                 if let Some(p) = self.pending.as_mut() {
@@ -1478,12 +1798,25 @@ impl ProjectGlue {
             }
             (
                 AfterWork::Opened,
-                Work::Opened { opened, audio, clocks, rate: loaded_rate, parked, resampled_from, practice },
+                Work::Opened {
+                    opened,
+                    audio,
+                    clocks,
+                    rate: loaded_rate,
+                    parked,
+                    resampled_from,
+                    practice,
+                    arrangement,
+                },
             ) => {
                 let Opened { path, doc, warnings } = opened;
                 if !parked {
-                    // Practice Lab does not need audio: load its library now.
+                    // Practice Lab does not need audio: load its library now. Same for PRODUCE.
                     self.practice_import = practice;
+                }
+                if let Some(a) = arrangement {
+                    self.arr = a;
+                    self.player_stale = true;
                 }
                 let saved = !path.as_os_str().is_empty();
                 let pending = PendingLoad {
@@ -1575,7 +1908,16 @@ fn converted(
     doc.sample_rate = rate;
     progress(1.0);
     let resampled_from = (from != rate).then_some(from);
-    Work::Opened { opened: Opened { path, doc, warnings }, audio, clocks, rate, parked, resampled_from, practice: None }
+    Work::Opened {
+        opened: Opened { path, doc, warnings },
+        audio,
+        clocks,
+        rate,
+        parked,
+        resampled_from,
+        practice: None,
+        arrangement: None,
+    }
 }
 
 /// Unity-gain stems in `<dir>/Audio/` and a `.rpp` that mixes them with the
@@ -1665,15 +2007,63 @@ fn practice_bytes(practice: &Option<Arc<PracticeLibrary>>) -> Result<Option<Vec<
         .transpose()
 }
 
+type ArrangementReplyFn = Box<dyn FnOnce(Result<ArrangementReply, EngineError>) + Send>;
+
+/// A [`Waiter`] that answers an arrangement request with `f(result)`.
+fn make_waiter(reply: ArrangementReplyFn, f: fn(OpResult) -> Option<ArrangementReply>) -> Waiter {
+    Box::new(move |r: Result<OpResult, FileError>| {
+        let r = r
+            .map_err(|e| match e.kind.as_str() {
+                "busy" => EngineError::Busy(e.message),
+                _ => EngineError::Invalid(e.message),
+            })
+            .and_then(|r| f(r).ok_or_else(|| EngineError::Invalid("internal: unexpected result".into())));
+        reply(r)
+    })
+}
+
+/// Frames rendered per bounce step.
+const BOUNCE_CHUNK: u64 = 1 << 16;
+
+/// Write the arrangement over `[start, end)` as heard (mono, 24-bit) to `path`.
+fn bounce(
+    arr: &ArrangementState,
+    path: &Path,
+    start: u64,
+    end: u64,
+    progress: &mut dyn FnMut(f32),
+) -> Result<u64, ProjectError> {
+    let spec = wav::WavSpec { sample_rate: arr.rate(), channels: 1, format: BitDepth::Int24.into() };
+    let mut w = wav::WavWriter::create(path, spec, wav::WriteOptions::default())?;
+    let mut at = start;
+    while at < end {
+        let to = (at + BOUNCE_CHUNK).min(end);
+        w.write_interleaved(&arr.render(at, to))?;
+        at = to;
+        progress((at - start) as f32 / (end - start) as f32);
+    }
+    w.finish()?;
+    Ok(end - start)
+}
+
+/// `doc` with the arrangement written into it (the glue keeps it apart).
+fn with_arrangement(mut doc: ProjectDoc, arr: &ArrangementState) -> ProjectDoc {
+    doc.arrangement = arr.doc.clone();
+    doc.assets = arr.assets.clone();
+    doc
+}
+
 fn spawn_save(
     path: PathBuf,
     doc: ProjectDoc,
     audio: Vec<TrackAudio>,
+    arr: ArrangementState,
     practice: Option<Arc<PracticeLibrary>>,
 ) -> mpsc::Receiver<WorkerMsg> {
     spawn_worker(move |progress| {
         let practice = practice_bytes(&practice)?;
-        let saved = package::save_package(&path, &doc, &audio, &Default::default(), practice.as_deref(), progress)?;
+        let doc = with_arrangement(doc, &arr);
+        let saved = package::save_package(&path, &doc, &audio, &arr.audio, practice.as_deref(), progress)?;
         Ok(Work::Saved(saved, path))
     })
 }
@@ -1682,12 +2072,15 @@ fn spawn_autosave(
     dir: PathBuf,
     doc: ProjectDoc,
     audio: Vec<TrackAudio>,
+    arr: ArrangementState,
     practice: Option<Arc<PracticeLibrary>>,
     original: Option<PathBuf>,
 ) -> mpsc::Receiver<WorkerMsg> {
     spawn_worker(move |progress| {
         let practice = practice_bytes(&practice)?;
-        let info = recovery::autosave(&dir, &doc, &audio, &Default::default(), practice.as_deref(), original.as_deref(), progress)?;
+        let doc = with_arrangement(doc, &arr);
+        let info =
+            recovery::autosave(&dir, &doc, &audio, &arr.audio, practice.as_deref(), original.as_deref(), progress)?;
         Ok(Work::Autosaved(info))
     })
 }
@@ -1814,6 +2207,214 @@ mod tests {
         ));
         assert!(fresh.take_practice_import().is_some());
         assert!(fresh.info().pending_load && !fresh.has_unsaved_changes());
+    }
+
+    // ---- PRODUCE arrangement ----------------------------------------------------------
+
+    use voiceloop_project::arrangement::{ArrangementDoc, LoopRangeDoc};
+
+    fn region(id: &str, asset: &str, start: u64, len: u64) -> RegionDoc {
+        RegionDoc {
+            id: id.into(),
+            name: "Riff".into(),
+            asset_id: asset.into(),
+            start_frame: start,
+            source_offset_frames: 0,
+            length_frames: len,
+            repeat: false,
+            gain: 1.0,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
+            muted: false,
+            origin: None,
+            extra: Default::default(),
+        }
+    }
+
+    /// An arrangement at 8 kHz: one lane, one region over a 3 000-frame asset.
+    fn arrangement_state() -> (ArrangementState, String) {
+        let mut st = ArrangementState::empty(8_000);
+        let id = st.add_asset("riff", (0..3_000).map(|i| (i as f32 * 0.013).sin() * 0.3).collect());
+        let mut doc = st.doc.clone();
+        let mut lane = ArrangementTrackDoc::new("Lane 1");
+        let mut r = region("r1", &id, 1_000, 4_000);
+        r.source_offset_frames = 500;
+        r.repeat = true;
+        r.gain = 0.5;
+        r.fade_in_frames = 100;
+        r.fade_out_frames = 200;
+        lane.regions.push(r);
+        doc.tracks.push(lane);
+        doc.loop_range = Some(LoopRangeDoc { start_frame: 0, end_frame: 8_000 });
+        st.set(doc).unwrap();
+        (st, id)
+    }
+
+    /// Answer of an arrangement request, after settling its operation.
+    fn ask(glue: &mut ProjectGlue, req: ArrangementRequest) -> Result<ArrangementReply, EngineError> {
+        let (tx, rx) = mpsc::channel();
+        glue.arrangement_request(req, None, Box::new(move |r| tx.send(r).unwrap()));
+        settle(glue, &RefCell::new(Vec::new()));
+        rx.try_recv().expect("answered")
+    }
+
+    #[test]
+    fn arrangement_is_saved_reopened_and_marks_unsaved_work() {
+        let (st, _) = arrangement_state();
+        let mut glue = ProjectGlue::new();
+        glue.doc.sample_rate = 8_000;
+        glue.arr = ArrangementState::empty(8_000);
+        let reply = ask(&mut glue, ArrangementRequest::Set { arrangement: st.doc.clone() });
+        assert!(matches!(reply, Err(EngineError::Invalid(_))), "the asset is unknown to this glue");
+        glue.arr.assets = st.assets.clone();
+        glue.arr.audio = st.audio.clone();
+        let Ok(ArrangementReply::View(view)) = ask(&mut glue, ArrangementRequest::Set { arrangement: st.doc.clone() })
+        else {
+            panic!("set")
+        };
+        assert_eq!(view.arrangement, st.doc);
+        assert!(glue.has_unsaved_changes());
+
+        let dir = test_dir("arrangement-save").join("Song");
+        let lib = PracticeLibrary::default();
+        glue.request(ProjectRequest::SaveAs { path: dir.to_string_lossy().into() }, None, &lib).unwrap();
+        settle(&mut glue, &RefCell::new(Vec::new()));
+        assert!(!glue.has_unsaved_changes());
+        assert!(glue.doc.arrangement.is_empty(), "the glue keeps the arrangement apart from its doc");
+
+        let mut fresh = ProjectGlue::new();
+        let path = package::package_path(&dir);
+        fresh.request(ProjectRequest::Open { path: path.to_string_lossy().into() }, None, &lib).unwrap();
+        settle(&mut fresh, &RefCell::new(Vec::new()));
+        assert_eq!(fresh.arrangement().doc, st.doc);
+        assert_eq!(fresh.arrangement().assets.len(), 1);
+        let id = &st.assets[0].id;
+        assert_eq!(fresh.arrangement().audio[id], st.audio[id], "asset samples are bit-identical");
+        let Ok(ArrangementReply::View(v)) = ask(&mut fresh, ArrangementRequest::Get) else { panic!("get") };
+        assert_eq!(v.assets[0].peaks.len(), 1_024);
+
+        // Removing every lane drops the asset; New starts empty.
+        let mut empty = st.doc.clone();
+        empty.tracks.clear();
+        ask(&mut fresh, ArrangementRequest::Set { arrangement: empty }).unwrap();
+        assert!(fresh.arrangement().assets.is_empty() && fresh.has_unsaved_changes());
+        fresh.request(ProjectRequest::New { name: "x".into() }, None, &lib).unwrap();
+        assert_eq!(fresh.arrangement().doc, ArrangementDoc { sample_rate: 8_000, ..Default::default() });
+    }
+
+    #[test]
+    fn bounce_writes_the_arrangement_as_heard() {
+        let (st, _) = arrangement_state();
+        let mut glue = ProjectGlue::new();
+        glue.arr = st.clone();
+        let path = test_dir("arrangement-bounce").join("mix.wav");
+        let reply = ask(&mut glue, ArrangementRequest::Bounce { path: path.to_string_lossy().into(), range: None });
+        assert_eq!(reply.unwrap(), ArrangementReply::Bounced(crate::arrangement::Bounced { frames: 5_000 }));
+        let (info, data) = wav::read_wav(&path).unwrap();
+        assert_eq!((info.spec.sample_rate, info.spec.channels, info.frames), (8_000, 1, 5_000));
+        let expected = st.render(0, 5_000);
+        let worst = data.iter().zip(&expected).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-4, "24-bit bounce matches the render: {worst}");
+        assert!(expected[1_000..1_100].iter().any(|&v| v != 0.0) && expected[..1_000].iter().all(|&v| v == 0.0));
+        // A range bounces only that part.
+        let reply = ask(
+            &mut glue,
+            ArrangementRequest::Bounce {
+                path: path.to_string_lossy().into(),
+                range: Some(FrameRange { start_frame: 2_000, end_frame: 2_500 }),
+            },
+        );
+        assert_eq!(reply.unwrap(), ArrangementReply::Bounced(crate::arrangement::Bounced { frames: 500 }));
+        let empty = ask(
+            &mut glue,
+            ArrangementRequest::Bounce {
+                path: path.to_string_lossy().into(),
+                range: Some(FrameRange { start_frame: 5, end_frame: 5 }),
+            },
+        );
+        assert!(empty.is_err());
+        // Capture and send need running audio.
+        assert!(ask(
+            &mut glue,
+            ArrangementRequest::CaptureFromLooper { tracks: vec![0], per_layer: false, repeats: 1, start_frame: 0 }
+        )
+        .is_err());
+    }
+
+    /// Drive a transfer state machine against a looper core until it finishes.
+    fn drive<T>(
+        core: &mut LooperCore,
+        h: &mut crate::looper::LooperHandles,
+        mut poll: impl FnMut(&mut crate::looper::LooperHandles) -> Poll<T>,
+    ) -> Result<T, TransferError> {
+        for _ in 0..10_000 {
+            match poll(h) {
+                Poll::Pending => {
+                    core.process(&[0.0; 64], &mut [0.0; 64]);
+                    h.recycler.service();
+                }
+                Poll::Ready(r) => return r,
+            }
+        }
+        panic!("transfer did not finish");
+    }
+
+    #[test]
+    fn send_to_looper_loads_the_rendered_region_as_a_free_loop() {
+        let (st, _) = arrangement_state();
+        let cfg =
+            LooperConfig { max_loop_seconds: 2.0, gain_smoothing_frames: 0, fade_frames: 0, ..Default::default() };
+        let mut t = TransportState { sample_rate: 8_000, ..Default::default() };
+        t.metronome.enabled = false;
+        let (mut core, mut h) = LooperCore::new(&cfg, t, 8_000).unwrap();
+        // Track 0 already has a loop of its own (1 000 frames).
+        h.commands.push(LooperCommand::Record { track: 0 }).unwrap();
+        core.process(&vec![0.2; 1_000], &mut vec![0.0; 1_000]);
+        h.commands.push(LooperCommand::StopRecording { track: 0 }).unwrap();
+        core.process(&[0.0; 4_000], &mut [0.0; 4_000]); // the take closes (capture tail)
+        h.commands.push(LooperCommand::Stop).unwrap();
+        core.process(&[0.0; 64], &mut [0.0; 64]);
+
+        let mut glue = ProjectGlue::new();
+        glue.arr = st.clone();
+        let (_, region) = st.doc.find_region("r1").unwrap();
+        let samples = render_region(region, &st.audio[&region.asset_id]);
+        assert_eq!(samples.len(), 4_000);
+
+        // Track 0 is not empty: refused.
+        let mut ex = Exporter::new();
+        let cap = drive(&mut core, &mut h, |h| ex.poll(h)).unwrap();
+        let after = AfterExport::SendToLooper { samples: samples.clone(), track: Some(0), name: "Riff".into() };
+        assert!(matches!(glue.after_export(after, cap, &AudioConfig::default()), Err(e) if e.kind == "doesNotFit"));
+
+        // A new track: the next free index, a Free loop of the region's length.
+        let mut ex = Exporter::new();
+        let cap = drive(&mut core, &mut h, |h| ex.poll(h)).unwrap();
+        let new_track = cap.inventory.track_count as u32;
+        let after = AfterExport::SendToLooper { samples: samples.clone(), track: None, name: "Riff".into() };
+        let Ok(Next::Continue(Stage::Import(mut im, AfterImport::SentToLooper { track, name }))) =
+            glue.after_export(after, cap, &AudioConfig::default())
+        else {
+            panic!("import stage")
+        };
+        assert_eq!((track, name.as_str()), (new_track, "Riff"));
+        drive(&mut core, &mut h, |h| im.poll(h)).unwrap();
+        let snap = core.snapshot();
+        let tr = &snap.tracks[track as usize];
+        assert_eq!(tr.layers, 1);
+        assert_eq!(tr.track_loop.mode, TrackLoopMode::Free);
+        assert_eq!(tr.loop_period, Some(4_000.0));
+        assert_eq!(snap.tracks[0].layers, 1, "the other track kept its loop");
+
+        // Solo the new track and play: exactly the rendered region, looping.
+        h.commands.push(LooperCommand::SetSolo { track: track as u8, solo: true }).unwrap();
+        h.commands.push(LooperCommand::Play).unwrap();
+        let mut out = vec![0.0f32; 9_000];
+        for b in out.chunks_mut(256) {
+            core.process(&vec![0.0; b.len()], b);
+        }
+        let worst = (0..9_000).map(|k| (out[k] - samples[k % 4_000]).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-6, "looper plays the region: {worst}");
     }
 
     #[test]

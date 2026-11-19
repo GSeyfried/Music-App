@@ -2190,3 +2190,55 @@ fn per_track_loops_survive_a_stream_restart() {
     let tracks = &c.snap().tracks[..3];
     assert!(tracks.iter().all(|t| t.track_loop.mode == TrackLoopMode::Song && t.loop_period == Some(2_000.0)));
 }
+
+// ---- PRODUCE capture (arrangement.rs) -----------------------------------------------
+
+/// Lanes captured from the looper (layers at their offsets, lane gain = track
+/// gain, one repeating region from frame 0) render exactly what the looper plays.
+#[test]
+fn captured_lanes_render_exactly_the_looper_mix() {
+    use crate::arrangement::{looper_track_audio, ArrangementState};
+    use voiceloop_project::arrangement::{ArrangementTrackDoc, RegionDoc};
+
+    let mut r = session_with_layers(transport(1_000, LoopMode::Free));
+    r.send(C::NudgeLayer { track: 0, layer: 1, frames: 37 });
+    r.send(C::NudgeLayer { track: 1, layer: 0, frames: -11 });
+    r.silence(1);
+    let cap = export(&mut r).expect("export");
+    let heard = render_from_start(&mut r, 5_000);
+
+    for per_layer in [false, true] {
+        let mut st = ArrangementState::empty(1_000);
+        let mut doc = st.doc.clone();
+        for (t, track) in cap.tracks.iter().enumerate().take(2) {
+            let frames = cap.inventory.track_frames(&track.plan);
+            for (layer, samples) in looper_track_audio(track, frames, per_layer) {
+                let id = st.add_asset("x", samples);
+                let mut lane = ArrangementTrackDoc::new("lane");
+                lane.gain = track.plan.gain;
+                lane.regions.push(RegionDoc {
+                    id: format!("r{t}-{layer:?}"),
+                    name: String::new(),
+                    asset_id: id,
+                    start_frame: 0,
+                    source_offset_frames: 0,
+                    length_frames: 5_000,
+                    repeat: true,
+                    gain: 1.0,
+                    fade_in_frames: 0,
+                    fade_out_frames: 0,
+                    muted: false,
+                    origin: None,
+                    extra: Default::default(),
+                });
+                doc.tracks.push(lane);
+            }
+        }
+        assert_eq!(doc.tracks.len(), if per_layer { 3 } else { 2 });
+        st.doc = doc; // 1 kHz test rate: below the range `set` validates
+        let rendered = st.render(0, 5_000);
+        let worst = heard.iter().zip(&rendered).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-5, "per_layer {per_layer}: max difference {worst}");
+        assert!(heard.iter().any(|&v| v.abs() > 0.1));
+    }
+}

@@ -23,6 +23,7 @@ use serde::Serialize;
 use voiceloop_analysis::{NoteEvent, Onset, PitchFrame};
 
 use crate::analysis::{AnalysisConfig, AnalysisOutput, AnalysisWorker, ChordEvent};
+use crate::arrangement::{ArrangementPosition, ArrangementReply, ArrangementRequest};
 use crate::capture::{CaptureInfo, InputCapture};
 use crate::devices;
 use crate::error::EngineError;
@@ -149,6 +150,8 @@ pub enum EngineEvent {
     PracticeProgress(PracticeProgress),
     /// A reference was saved or an attempt was scored.
     PracticeTake(Box<PracticeTakeEvent>),
+    /// PRODUCE playhead: ~30 Hz while the arrangement plays, once more when it stops.
+    ArrangementPosition(ArrangementPosition),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -209,6 +212,7 @@ enum Command {
     UsePreviewSamples(std::path::PathBuf, Reply<u32>),
     PreviewPlay(PreviewRequest, Reply<PreviewStarted>),
     PreviewStop(Reply<()>),
+    Arrangement(ArrangementRequest, Reply<ArrangementReply>),
     SetInputNeeds(InputNeeds, Reply<EngineStatus>),
     Shutdown,
 }
@@ -394,6 +398,12 @@ impl Engine {
         self.request(Command::PreviewStop)
     }
 
+    /// PRODUCE arrangement requests (`docs/projects/produce/README.md`).
+    /// Capture, send-to-looper and bounce block until their operation ends.
+    pub fn arrangement(&self, request: ArrangementRequest) -> Result<ArrangementReply, EngineError> {
+        self.request(|r| Command::Arrangement(request, r))
+    }
+
     /// What the frontend needs the microphone for (replaces the previous set)
     /// and how long to keep it open afterwards. The engine adds its own
     /// reasons (recording, monitoring, calibration, a Practice take); the mic
@@ -533,6 +543,7 @@ impl ControlLoop {
             self.drain_looper();
             if let Some(p) = self.playback.as_mut() {
                 p.preview.collect(); // drop finished previews off the audio thread
+                p.arrangement.collect(); // and finished arrangement schedules
             }
             let epoch = self.latest_snapshot.map(|s| s.epoch);
             self.project.poll(self.playback.as_mut(), epoch, self.practice.library(), &self.hw.config, &*self.sink);
@@ -552,6 +563,7 @@ impl ControlLoop {
                 self.last_emit = Instant::now();
                 self.emit_level();
                 self.emit_looper();
+                self.emit_arrangement_position();
                 self.emit_pitch();
                 self.practice.emit_progress();
                 self.flush_practice();
@@ -762,6 +774,22 @@ impl ControlLoop {
                 let result = self.playback.as_mut().map_or(Ok(()), |p| p.preview.stop());
                 let _ = reply.send(result);
             }
+            Command::Arrangement(request, reply) => {
+                if matches!(request, ArrangementRequest::Play { .. }) && self.playback.is_some() {
+                    // The looper transport and the arrangement transport exclude each other.
+                    let running = self.latest_snapshot.is_some_and(|s| s.run != crate::looper::RunState::Stopped);
+                    if running {
+                        if let Err(e) = self.send_looper(LooperCommand::Stop) {
+                            let _ = reply.send(Err(e));
+                            return;
+                        }
+                    }
+                }
+                let answer = Box::new(move |r| {
+                    let _ = reply.send(r);
+                });
+                self.project.arrangement_request(request, self.playback.as_mut(), answer);
+            }
             Command::SetInputNeeds(needs, reply) => {
                 self.mic.set_needs(&needs);
                 // A new request may try again at once, and report a failure again.
@@ -951,6 +979,19 @@ impl ControlLoop {
                 return Ok(());
             }
         }
+        let starts_looper = matches!(
+            command,
+            LooperCommand::Play
+                | LooperCommand::Resume
+                | LooperCommand::Restart
+                | LooperCommand::Record { .. }
+                | LooperCommand::Overdub { .. }
+        );
+        if let (true, Some(p)) = (starts_looper, self.playback.as_mut()) {
+            if p.arrangement.is_playing() {
+                let _ = p.arrangement.stop(); // starting the looper stops the arrangement
+            }
+        }
         if self.playback.is_some() {
             // Mic only when needed: a take waits ("arms") until input flows.
             if self.mic_waiting.on_command(&command) {
@@ -1021,6 +1062,10 @@ impl ControlLoop {
             cap.stop();
         }
         if let Some(mut p) = self.playback.take() {
+            if let Some(mut pos) = p.arrangement.position_event() {
+                pos.playing = false; // the player goes with the stream
+                (self.sink)(EngineEvent::ArrangementPosition(pos));
+            }
             // The looper parks its content as the stream drops; it is restored into the next stream.
             let parked = p.handles.parked.take();
             p.stop();
@@ -1038,6 +1083,12 @@ impl ControlLoop {
         self.practice_grace_until = None;
         self.practice.audio_stopped();
         self.flush_practice();
+    }
+
+    fn emit_arrangement_position(&mut self) {
+        if let Some(pos) = self.playback.as_mut().and_then(|p| p.arrangement.position_event()) {
+            (self.sink)(EngineEvent::ArrangementPosition(pos));
+        }
     }
 
     fn tick_practice(&mut self) {

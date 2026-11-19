@@ -28,6 +28,7 @@ use serde::Serialize;
 use super::bridge::{BridgeInfo, BridgeStats, InputBridge};
 use super::input_link::{input_link_pair, InputLink, InputLinkControl, InputPort};
 use super::{soft_limit, IoCounters, LooperConfig, LooperCore, LooperHandles, RunState};
+use crate::arrangement::{arrangement_pair, ArrangementControl, ArrangementPlayer};
 use crate::clock::{self, add_saturating, Anchor, StreamStats, XrunDetector};
 use crate::devices;
 use crate::error::EngineError;
@@ -148,6 +149,8 @@ pub struct LooperPlayback {
     calibration_rx: Consumer<CalibrationJob>,
     /// Reference/scale preview instrument, mixed into the output only.
     pub preview: PreviewControl,
+    /// PRODUCE arrangement playback, mixed into the output after the looper.
+    pub arrangement: ArrangementControl,
     /// Attach / detach the input stream while this output keeps running.
     pub input: InputLinkControl,
 }
@@ -194,11 +197,13 @@ impl LooperPlayback {
         let (calibration_tx, cal_in) = rtrb::RingBuffer::<CalibrationJob>::new(1);
         let (cal_out, calibration_rx) = rtrb::RingBuffer::<CalibrationJob>::new(1);
         let (preview, preview_player) = preview_pair(None, sample_rate); // the engine sets the bank
+        let (arrangement, arrangement_player) = arrangement_pair();
         let (input_control, input_port) = input_link_pair(sample_rate, input);
         clock::init_epoch();
 
         let parts = Parts {
             preview: preview_player,
+            arrangement: arrangement_player,
             input: input_port,
             bridge: bridge.clone(),
             cal_in,
@@ -252,6 +257,7 @@ impl LooperPlayback {
             calibration_tx,
             calibration_rx,
             preview,
+            arrangement,
             input: input_control,
         })
     }
@@ -308,6 +314,7 @@ impl LooperPlayback {
 
 struct Parts {
     preview: PreviewPlayer,
+    arrangement: ArrangementPlayer,
     /// Input from the attached input stream (silence while none is attached).
     input: InputPort,
     bridge: Arc<BridgeStats>,
@@ -352,6 +359,7 @@ where
 {
     let Parts {
         mut preview,
+        mut arrangement,
         mut input,
         bridge: bridge_stats,
         mut cal_in,
@@ -416,6 +424,7 @@ where
                 core.process(&in_buf[..n], &mut out_buf[..n]);
                 monitor_gain = mix_monitor(&mut out_buf[..n], &in_buf[..n], monitor_gain, monitor_target);
                 // After the looper: heard, never recorded.
+                arrangement.process(&mut out_buf[..n]);
                 preview.process(&mut out_buf[..n]);
                 if let Some(job) = calibration.as_mut() {
                     job.process(&mut out_buf[..n], &in_buf[..n]);
