@@ -1,6 +1,6 @@
 # VoiceLoop product roadmap
 
-Audit date: 2026-11-17
+Audit date: 2026-11-19
 
 This roadmap describes direction, not fixed commitments. The repository is the
 source of truth: a capability is user-complete only when its native processing,
@@ -18,7 +18,7 @@ workspaces share audio, MIDI, musical analysis, and project infrastructure:
 
 | Workspace | Direction | Current reality |
 | --- | --- | --- |
-| **Studio** | Multitrack recording, live looping, mixing, effects, automation and editing | Current primary workflow: looping, overdubbing, transport, basic track mixing, hardware settings and live pitch are UI-accessible. Advanced editing/effects are absent. |
+| **Studio** | Multitrack recording, live looping, mixing, effects, automation and editing | Looping, overdubbing, transport, mixing, filter chains, noise reduction, hardware settings and live pitch are UI-accessible. Stereo, buses, automation and deeper layer editing are absent. |
 | **Practice Lab** | Pitch, ear and rhythm training with real-time feedback and history | Live tuner/curve and reference, attempt, scoring, history and library workflows are accessible; real-voice validation remains. |
 | **Composition** | MIDI editing, notation, harmonic analysis, transcription and arrangement | Analysis, theory, MIDI-file and project-data foundations exist. There is no composition workspace, MIDI playback/editor, notation or MusicXML. |
 | **Live Performance** | Instrument routing, monitoring, looping and digital instruments | Audio routing, monitoring, looping and MIDI input management exist. Instruments, mappings and performance-safe hardware validation do not. |
@@ -49,10 +49,13 @@ verification, **M** manual/hardware verification still required.
 | REAPER project export | I | I | I | I | I | A for generation/UI; REAPER opening M |
 | Looper track/layer resource configuration | I, fixed pool | I | I | I | I | A; fixed 16-track capacity |
 | Dynamic Add Track and 10+ tracks | I | I | I | I | I | A up to 16; real-session stress M |
+| Realtime track filter chains, presets and freeze | I | I | I | I | I | A; native listening and stereo M |
+| Offline per-layer noise reduction | I | I | I | I | I | A; room-learning/voice listening M |
+| Audio arrangement lanes, regions, editing and bounce | I | I | I | I | I | A; native listening/export flow M |
 | Metronome gain/downbeat accent | I | I | I | I model | — | A below UI |
 | Theory/key/scale/chord/rhythm utilities | I library | P, some Practice use | — standalone | — | — | A on known notes; not mixed-audio chord recognition |
 | Internal instruments and percussion | Metronome click only | — | — | — | — | Not implemented |
-| Arrangement, MIDI editing and notation | P data foundations | P project data | P file commands | — | — | Not implemented as a workflow |
+| MIDI arrangement/editing and notation | P data foundations | P project data | P file commands | — | — | Not implemented as a workflow |
 | iOS/iPadOS application | P portability research | P compile-level engine | — on device | P responsive/touch foundation | — | Blocked on Xcode/device proof |
 | Hands-free mobile commands | — | — | — | — | — | Exploratory |
 
@@ -184,6 +187,13 @@ timing matrix in `projects/quality/TIMING_TEST_PLAN.md`.
    history in head and chest voice, edge-of-range exercises and milestones
    ([voice-progress](projects/voice-progress/README.md)).
 
+9. **Effects help and oscilloscope:**
+   - help text for every filter, from
+     [FILTER_GUIDE.md](projects/effects/FILTER_GUIDE.md) (already written,
+     with measured figures)
+   - later, a live oscilloscope/spectrum view of the input and the chain
+     output (PENDING; plan in the guide)
+
 ## Prioritized milestones
 
 Each milestone is intentionally a small vertical slice and includes its UI and
@@ -229,10 +239,10 @@ library with the project, and validate with annotated real voices.
 
 ### 4. Expand tracks and layer editing deliberately
 
-Design dynamic add/remove, raise the measured capacity to at least 10 tracks,
-and expose layer/take detail without flattening every overdub into a track.
-Then add nondestructive trim/arrangement primitives in independently testable
-slices. Do not combine this milestone with an effects system.
+Build on the implemented dynamic add/remove path and Track Details without
+flattening every overdub into a track. Measure at least 10 simultaneous tracks,
+then add nondestructive trim/comp/warp primitives in independently testable
+slices. Reuse the implemented effects and PRODUCE arrangement foundations.
 
 Target UI: GarageBand-style lanes, where each track and layer is its own item
 you can move, trim, stretch and warp directly. Lanes replace the interim
@@ -254,17 +264,23 @@ practice, colour customization and carefully smoothed optional reactive themes.
 
 Prove one polyphonic synth track from physical and virtual keyboards plus MIDI
 clip playback. This becomes the common foundation for composition and live
-performance rather than separate instrument systems.
+performance rather than separate instrument systems. Follow the incremental
+contract in [track-system](projects/track-system/README.md) rather than building
+a general graph before the second renderer is proven.
 
 ### 8. Add percussion on the instrument foundation
 
-Deliver a small licensed/local sample kit, velocity-sensitive pads, user sample
-import and a minimal step sequencer before broad instrument libraries.
+Deliver several coherent licensed/local drum kits, tambourine and cowbell
+articulations, velocity-sensitive pads, choke groups, round robins, user sample
+record/import and a minimal step sequencer. Use the asset, articulation,
+Ring/Linger and pack design in
+[sound-library](projects/sound-library/README.md) before broad instrument
+libraries or horn packs.
 
 ### 9. Grow composition and advanced production incrementally
 
-Sequence MIDI editing, harmonic tools, notation/MusicXML, arrangement,
-automation, effects, advanced pitch processing and transcription according to
+Sequence MIDI editing, harmonic tools, notation/MusicXML, automation, stereo
+routing/effects, advanced pitch processing and transcription according to
 validated dependencies. Prefer one complete workflow over several hidden
 backends.
 

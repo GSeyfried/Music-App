@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 320" width="760" height="320" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="12">
+<rect width="760" height="320" fill="#ffffff"/>
+<text x="64" y="22" font-size="14" font-weight="600" fill="#111827">Compressor: input level vs output level (threshold −18 dB, knee 6 dB)</text>
+<line x1="176.7" y1="40" x2="176.7" y2="274" stroke="#e5e7eb"/><text x="176.7" y="290" text-anchor="middle" fill="#4b5563">-40</text>
+<line x1="317.5" y1="40" x2="317.5" y2="274" stroke="#e5e7eb"/><text x="317.5" y="290" text-anchor="middle" fill="#4b5563">-30</text>
+<line x1="458.3" y1="40" x2="458.3" y2="274" stroke="#e5e7eb"/><text x="458.3" y="290" text-anchor="middle" fill="#4b5563">-20</text>
+<line x1="599.2" y1="40" x2="599.2" y2="274" stroke="#e5e7eb"/><text x="599.2" y="290" text-anchor="middle" fill="#4b5563">-10</text>
+<line x1="740.0" y1="40" x2="740.0" y2="274" stroke="#e5e7eb"/><text x="740.0" y="290" text-anchor="middle" fill="#4b5563">0</text>
+<line x1="64" y1="235.0" x2="740" y2="235.0" stroke="#e5e7eb"/><text x="58" y="239.0" text-anchor="end" fill="#4b5563">-40</text>
+<line x1="64" y1="186.2" x2="740" y2="186.2" stroke="#e5e7eb"/><text x="58" y="190.2" text-anchor="end" fill="#4b5563">-30</text>
+<line x1="64" y1="137.5" x2="740" y2="137.5" stroke="#e5e7eb"/><text x="58" y="141.5" text-anchor="end" fill="#4b5563">-20</text>
+<line x1="64" y1="88.8" x2="740" y2="88.8" stroke="#e5e7eb"/><text x="58" y="92.8" text-anchor="end" fill="#4b5563">-10</text>
+<line x1="64" y1="40.0" x2="740" y2="40.0" stroke="#e5e7eb"/><text x="58" y="44.0" text-anchor="end" fill="#4b5563">0</text>
+<rect x="64" y="40" width="676" height="234" fill="none" stroke="#9ca3af"/>
+<text x="402" y="312" text-anchor="middle" fill="#374151">Input level (dB)</text>
+<text transform="translate(16 157) rotate(-90)" text-anchor="middle" fill="#374151">Output level (dB)</text>
+<clipPath id="plot"><rect x="64" y="40" width="676" height="234"/></clipPath><g clip-path="url(#plot)" fill="none" stroke-linejoin="round">
+<polyline stroke="#9aa3ae" stroke-width="1" stroke-dasharray="5 4" points="64.0,274.0 740.0,40.0 "/>
+<polyline stroke="#2563eb" stroke-width="1.6" points="64.0,274.0 92.2,264.2 120.3,254.5 148.5,244.8 176.7,235.0 204.8,225.2 233.0,215.5 261.2,205.7 289.3,196.0 317.5,186.3 345.7,176.5 373.8,166.8 402.0,157.0 430.2,147.3 458.3,137.6 486.5,128.6 514.7,120.6 542.8,113.5 571.0,106.7 599.2,99.9 627.3,93.2 655.5,86.6 683.7,80.0 711.8,73.5 740.0,66.9 "/>
+<polyline stroke="#dc2626" stroke-width="1.6" points="64.0,274.0 92.2,264.2 120.3,254.5 148.5,244.8 176.7,235.0 204.8,225.2 233.0,215.5 261.2,205.7 289.3,196.0 317.5,186.3 345.7,176.5 373.8,166.8 402.0,157.0 430.2,147.3 458.3,137.7 486.5,129.5 514.7,123.2 542.8,118.7 571.0,114.8 599.2,111.1 627.3,107.5 655.5,104.0 683.7,100.6 711.8,97.2 740.0,93.8 "/>
+<polyline stroke="#16a34a" stroke-width="1.6" points="64.0,274.0 92.2,264.2 120.3,254.5 148.5,244.8 176.7,235.0 204.8,225.2 233.0,215.5 261.2,205.7 289.3,196.0 317.5,186.3 345.7,176.5 373.8,166.8 402.0,157.0 430.2,147.3 458.3,137.7 486.5,130.0 514.7,124.8 542.8,121.9 571.0,119.9 599.2,118.1 627.3,116.4 655.5,114.9 683.7,113.4 711.8,112.0 740.0,110.6 "/>
+<polyline stroke="#9333ea" stroke-width="1.6" points="64.0,274.0 92.2,264.2 120.3,254.5 148.5,244.8 176.7,235.0 204.8,225.2 233.0,215.5 261.2,205.7 289.3,196.0 317.5,186.3 345.7,176.5 373.8,166.8 402.0,157.0 430.2,147.3 458.3,137.7 486.5,130.2 514.7,125.4 542.8,123.1 571.0,121.8 599.2,120.6 627.3,119.6 655.5,118.8 683.7,118.0 711.8,117.3 740.0,116.6 "/>
+</g>
+<rect x="599.6" y="48" width="132.39999999999998" height="93" fill="#ffffff" fill-opacity="0.9" stroke="#d1d5db" rx="4"/>
+<line x1="607.6" y1="58" x2="627.6" y2="58" stroke="#9aa3ae" stroke-width="2.4" stroke-dasharray="5 4"/><text x="633.6" y="62" fill="#111827">No compression</text>
+<line x1="607.6" y1="75" x2="627.6" y2="75" stroke="#2563eb" stroke-width="2.4"/><text x="633.6" y="79" fill="#111827">ratio 1.5:1</text>
+<line x1="607.6" y1="92" x2="627.6" y2="92" stroke="#dc2626" stroke-width="2.4"/><text x="633.6" y="96" fill="#111827">ratio 3:1</text>
+<line x1="607.6" y1="109" x2="627.6" y2="109" stroke="#16a34a" stroke-width="2.4"/><text x="633.6" y="113" fill="#111827">ratio 8:1</text>
+<line x1="607.6" y1="126" x2="627.6" y2="126" stroke="#9333ea" stroke-width="2.4"/><text x="633.6" y="130" fill="#111827">ratio 20:1</text>
+</svg>
