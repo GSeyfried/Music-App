@@ -102,6 +102,8 @@ pub struct TrackPlan {
     pub layer_offsets: [i64; MAX_LAYERS_PER_TRACK],
     pub redo_offsets: [i64; MAX_LAYERS_PER_TRACK],
     pub clock: TrackClock,
+    /// The track's effect chain (a restore installs its DSP afterwards).
+    pub effects: voiceloop_dsp::ChainSpec,
 }
 
 impl TrackPlan {
@@ -115,6 +117,7 @@ impl TrackPlan {
         layer_offsets: [0; MAX_LAYERS_PER_TRACK],
         redo_offsets: [0; MAX_LAYERS_PER_TRACK],
         clock: TrackClock::SONG,
+        effects: voiceloop_dsp::ChainSpec::EMPTY,
     };
 }
 

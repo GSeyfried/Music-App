@@ -29,12 +29,12 @@ use serde::{Deserialize, Serialize, Serializer};
 use super::click::{accent_for, db_to_gain, ClickVoice};
 use super::pool::{self, LayerBuf, LayerRecycler, LayerSource};
 use super::transfer::{
-    Chunk, Inventory, JobKind, LayerIdentity, LayerJob, LayerSlot, ParkedLooper, ParkedTrack, RestorePlan, SwapJob, TrackClock, TrackPlan,
-    CHUNK_FRAMES, JOBS_PER_BLOCK, JOB_CAPACITY,
+    Chunk, Inventory, JobKind, LayerIdentity, LayerJob, LayerSlot, ParkedLooper, ParkedTrack, RestorePlan, SwapJob,
+    TrackClock, TrackPlan, CHUNK_FRAMES, JOBS_PER_BLOCK, JOB_CAPACITY,
 };
 use super::{
-    LayerTimingConfig, LooperConfig, LAYER_SUMMARY_BINS, MAX_LAYERS_PER_TRACK, MAX_POOL_LAYERS, MAX_TIMING_HITS,
-    MAX_TRACKS,
+    LayerTimingConfig, LooperConfig, EFFECT_CROSSFADE_MS, EFFECT_RING_CAPACITY, FREEZE_FRAMES_PER_BLOCK,
+    LAYER_SUMMARY_BINS, MAX_LAYERS_PER_TRACK, MAX_POOL_LAYERS, MAX_TIMING_HITS, MAX_TRACKS,
 };
 use crate::error::EngineError;
 use crate::model::LoopMode;
@@ -42,6 +42,7 @@ use crate::transport::{
     first_grid_index_at_or_after, grid_frame, LoopFit, MusicalPosition, OverdubStart, TrackLoop, TrackLoopMode,
     TransportState,
 };
+use voiceloop_dsp::{ChainDsp, ChainSpec};
 
 const COMMAND_CAPACITY: usize = 64;
 const SNAPSHOT_CAPACITY: usize = 8;
@@ -152,6 +153,35 @@ pub enum LooperCommand {
     SetInputLatency {
         frames: u32,
     },
+    /// Replace a track's effect chain (docs/projects/effects/README.md).
+    /// Param, mix and bypass changes glide; structural changes (effects
+    /// added, removed, reordered, a kind or choice param changed) crossfade
+    /// over `EFFECT_CROSSFADE_MS`. Send through [`LooperHandles::send`],
+    /// which builds the DSP off the audio thread when it is needed.
+    SetTrackEffects {
+        track: u8,
+        chain: ChainSpec,
+        /// A `ChainDsp` for `chain` waits in the effect ring (set by `LooperHandles::send`).
+        #[serde(skip)]
+        attached: bool,
+    },
+    /// Render the track (layers through its chain) into one new base layer
+    /// and clear the chain. The old layers go to redo history; `Undo` right
+    /// after a freeze brings them and the chain back. The render is spread
+    /// over callbacks; the track reports `busy` meanwhile and keeps playing.
+    FreezeTrack {
+        track: u8,
+        #[serde(skip)]
+        attached: bool,
+    },
+    /// Internal: DSP for the chain a track already has but cannot play yet
+    /// (after a duplicate, restore, or a lost race). Ignored unless the
+    /// track's chain still equals `chain` and still lacks its DSP.
+    #[serde(skip)]
+    InstallTrackEffects {
+        track: u8,
+        chain: ChainSpec,
+    },
     /// The input stream skipped or repeated time (bridge underrun, skip, or
     /// input overrun). Takes recording now are flagged `timingSuspect`.
     /// Internal: sent by the output callback through [`LooperCore::apply_now`],
@@ -238,9 +268,14 @@ pub struct TrackSnapshot {
     pub loop_period: Option<f64>,
     /// Frames into the track's own current cycle.
     pub loop_phase: u64,
-    /// A duplicate is being copied from or into this track: commands that
-    /// change its layers are refused (`trackBusy`), and a copy is silent.
+    /// A duplicate is being copied from or into this track, or it is being
+    /// frozen: commands that change its layers are refused (`trackBusy`).
     pub busy: bool,
+    /// The track's effect chain.
+    pub effects: ChainSpec,
+    /// The chain has effects but no DSP yet (the control thread installs it).
+    #[serde(skip)]
+    pub effects_pending: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -285,6 +320,8 @@ impl TrackSnapshot {
         loop_period: None,
         loop_phase: 0,
         busy: false,
+        effects: ChainSpec::EMPTY,
+        effects_pending: false,
     };
 }
 
@@ -374,6 +411,106 @@ pub struct LooperHandles {
     /// Receives the looper's content when the `LooperCore` is dropped (the
     /// output stream was torn down). Take it *before* stopping the stream.
     pub parked: Option<mpsc::Receiver<ParkedLooper>>,
+    /// Effect DSP built here for `SetTrackEffects` / `FreezeTrack` /
+    /// `InstallTrackEffects`, consumed in command order.
+    fx: Producer<Box<ChainDsp>>,
+    /// Effect DSP the callback is done with, dropped here.
+    fx_returned: Consumer<Box<ChainDsp>>,
+    sample_rate: u32,
+    /// The chain last sent per track (`None`: unknown), to build DSP only
+    /// for structural changes. Cleared whenever track indices may shift.
+    last_sent: [Option<ChainSpec>; MAX_TRACKS],
+    /// `frames_processed` when DSP was last offered for a pending chain.
+    healed_at: [Option<u64>; MAX_TRACKS],
+}
+
+/// The command (or the effect DSP it needs) did not fit in its queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueFull;
+
+impl LooperHandles {
+    /// Send a command. Effect commands get their DSP built here (off the
+    /// audio thread) when the change needs it; `current` is the latest
+    /// snapshot, used for `FreezeTrack`.
+    pub fn send(&mut self, command: LooperCommand, current: Option<&LooperSnapshot>) -> Result<(), QueueFull> {
+        use LooperCommand as C;
+        let command = match command {
+            C::SetTrackEffects { track, chain, .. } => {
+                let t = track as usize;
+                let known = self.last_sent.get(t).copied().flatten();
+                let attach = !chain.is_empty() && known.is_none_or(|prev| prev.needs_rebuild(&chain));
+                self.push_with(C::SetTrackEffects { track, chain, attached: attach }, attach.then_some(&chain))?;
+                if let Some(slot) = self.last_sent.get_mut(t) {
+                    *slot = Some(chain);
+                }
+                return Ok(());
+            }
+            C::FreezeTrack { track, .. } => {
+                let spec = current
+                    .and_then(|s| s.tracks.get(track as usize))
+                    .map(|t| t.effects)
+                    .or_else(|| self.last_sent.get(track as usize).copied().flatten())
+                    .unwrap_or(ChainSpec::EMPTY);
+                let attach = !spec.is_empty();
+                self.push_with(C::FreezeTrack { track, attached: attach }, attach.then_some(&spec))?;
+                self.forget_sent();
+                return Ok(());
+            }
+            C::InstallTrackEffects { chain, .. } => return self.push_with(command, Some(&chain)),
+            C::RemoveTrack { .. } | C::DuplicateTrack { .. } | C::Undo { .. } => {
+                self.forget_sent();
+                command
+            }
+            other => other,
+        };
+        self.commands.push(command).map_err(|_| QueueFull)
+    }
+
+    fn push_with(&mut self, command: LooperCommand, dsp: Option<&ChainSpec>) -> Result<(), QueueFull> {
+        if self.commands.slots() == 0 || (dsp.is_some() && self.fx.slots() == 0) {
+            return Err(QueueFull);
+        }
+        if let Some(spec) = dsp {
+            // The tempo is set by the callback when it installs the chain.
+            let built = Box::new(ChainDsp::new(spec, self.sample_rate, 120.0));
+            self.fx.push(built).map_err(|_| QueueFull)?;
+        }
+        self.commands.push(command).map_err(|_| QueueFull)
+    }
+
+    /// Forget what was sent (a command was rejected, or tracks moved): the
+    /// next `SetTrackEffects` per track builds its DSP.
+    pub fn forget_sent(&mut self) {
+        self.last_sent = [None; MAX_TRACKS];
+    }
+
+    /// Drop effect DSP the callback has finished with. Call regularly.
+    pub fn collect_effects(&mut self) {
+        while let Ok(chain) = self.fx_returned.pop() {
+            drop(chain);
+        }
+    }
+
+    /// Offer DSP for every chain in `snapshot` that has none (after a
+    /// duplicate, a restore, or a lost race), at most every ~250 ms per track.
+    pub fn heal_effects(&mut self, snapshot: &LooperSnapshot) {
+        let n = (snapshot.track_count as usize).min(MAX_TRACKS);
+        let every = (self.sample_rate as u64 / 4).max(1);
+        for t in 0..MAX_TRACKS {
+            let tr = &snapshot.tracks[t];
+            if t >= n || !tr.effects_pending {
+                self.healed_at[t] = None;
+                continue;
+            }
+            if self.healed_at[t].is_some_and(|at| snapshot.frames_processed < at + every) {
+                continue;
+            }
+            let install = LooperCommand::InstallTrackEffects { track: t as u8, chain: tr.effects };
+            if self.push_with(install, Some(&tr.effects)).is_ok() {
+                self.healed_at[t] = Some(snapshot.frames_processed);
+            }
+        }
+    }
 }
 
 /// The shared loop: phase 0 at `origin`, exact `period` in frames.
@@ -495,6 +632,103 @@ struct Track {
     lp: TrackLoop,
     /// A duplicate is being copied into this track: silent, and refuses edits.
     filling: bool,
+    /// Effect chain and its DSP.
+    fx: TrackFx,
+    /// Set by a freeze: `Undo` restores the frozen-over layers and chain.
+    unfreeze: Option<Unfreeze>,
+}
+
+/// What `Undo` needs to reverse a freeze: the old layers are the newest
+/// `layers` entries of the redo stack.
+#[derive(Debug, Clone, Copy)]
+struct Unfreeze {
+    layers: usize,
+    effects: ChainSpec,
+}
+
+/// A track's effect chain. The layers in the chain's scope are summed into
+/// the chain ("wet"); the others play dry beside it. Each layer's share
+/// moves at most `1 / fade` per frame, so scope changes never click.
+struct TrackFx {
+    spec: ChainSpec,
+    /// DSP for `spec` (`None`: no effects, or not installed yet: plays dry).
+    chain: Option<Box<ChainDsp>>,
+    /// The previous DSP, fading out for `fade` more frames.
+    old: Option<Box<ChainDsp>>,
+    fade: u32,
+    /// Current wet share of each layer (0 dry .. 1 through the chain).
+    weights: [f32; MAX_LAYERS_PER_TRACK],
+    /// Clear effect state before the next sample (the transport stopped).
+    stale: bool,
+}
+
+impl TrackFx {
+    fn new() -> Self {
+        Self {
+            spec: ChainSpec::EMPTY,
+            chain: None,
+            old: None,
+            fade: 0,
+            weights: [1.0; MAX_LAYERS_PER_TRACK],
+            stale: false,
+        }
+    }
+
+    #[inline]
+    fn active(&self) -> bool {
+        self.chain.is_some() || self.old.is_some()
+    }
+
+    fn pending(&self) -> bool {
+        !self.spec.is_empty() && self.chain.is_none()
+    }
+
+    fn snap_weights(&mut self) {
+        for (i, w) in self.weights.iter_mut().enumerate() {
+            *w = if self.spec.layers.includes(i) { 1.0 } else { 0.0 };
+        }
+    }
+
+    /// The chain's output for `wet`, crossfading from `old` while `fade` runs.
+    #[inline]
+    fn run(&mut self, wet: f32, fade_total: u32) -> f32 {
+        if self.stale {
+            self.stale = false;
+            for c in self.chain.iter_mut().chain(self.old.iter_mut()) {
+                c.reset();
+            }
+        }
+        let new = match self.chain.as_deref_mut() {
+            Some(c) => c.process(wet),
+            None => wet,
+        };
+        if self.fade == 0 {
+            return new;
+        }
+        let old = match self.old.as_deref_mut() {
+            Some(c) => c.process(wet),
+            None => wet,
+        };
+        let a = self.fade as f32 / fade_total.max(1) as f32;
+        self.fade -= 1;
+        new + a * (old - new)
+    }
+}
+
+/// A `FreezeTrack` in progress: the track's layers are run through `chain`
+/// twice around the loop (the first pass only warms up tails that wrap
+/// around the loop point) and the second pass is written into `buf`. Then
+/// the track blends from its live sound to `buf` over the effect crossfade
+/// and the result is committed.
+struct FreezeJob {
+    track: usize,
+    chain: Option<Box<ChainDsp>>,
+    buf: Option<LayerBuf>,
+    frames: usize,
+    pos: usize,
+    rendering: bool,
+    /// Frames of the blend played so far.
+    blend: u32,
 }
 
 impl Track {
@@ -589,6 +823,11 @@ pub struct LooperCore {
     /// Publish a snapshot at most every this many frames (~10 ms).
     snapshot_interval: u64,
     frames_since_snapshot: u64,
+    fx_rx: Consumer<Box<ChainDsp>>,
+    fx_back: Producer<Box<ChainDsp>>,
+    /// Effect crossfade length in frames (`EFFECT_CROSSFADE_MS`).
+    fx_fade: u32,
+    freeze: Option<FreezeJob>,
 }
 
 fn validate_transport(t: &TransportState, max_frames: usize) -> Result<(), RejectReason> {
@@ -616,6 +855,9 @@ impl LooperCore {
         let (jobs_tx, job_rx) = RingBuffer::new(JOB_CAPACITY);
         let (job_tx, results_rx) = RingBuffer::new(JOB_CAPACITY);
         let (park_tx, park_rx) = mpsc::channel();
+        let (fx_tx, fx_rx) = RingBuffer::new(EFFECT_RING_CAPACITY);
+        // Every chain sent can come back, plus one per track being replaced.
+        let (fx_back, fx_returned) = RingBuffer::new(EFFECT_RING_CAPACITY * 2 + 2 * MAX_TRACKS);
 
         let mut transport = transport;
         transport.sample_rate = sample_rate;
@@ -645,6 +887,8 @@ impl LooperCore {
                 clock: None,
                 lp: TrackLoop::DEFAULT,
                 filling: false,
+                fx: TrackFx::new(),
+                unfreeze: None,
             };
             if i < config.max_tracks {
                 tracks.push(tr);
@@ -699,6 +943,10 @@ impl LooperCore {
             snapshot_interval: (sample_rate as u64 / 100).max(1),
             // Publish on the first block so the UI sees state immediately.
             frames_since_snapshot: u64::MAX / 2,
+            fx_rx,
+            fx_back,
+            fx_fade: ((EFFECT_CROSSFADE_MS * 0.001 * sample_rate as f32) as u32).max(1),
+            freeze: None,
         };
         core.set_master(core.master);
         let handles = LooperHandles {
@@ -711,6 +959,11 @@ impl LooperCore {
             jobs: jobs_tx,
             job_results: results_rx,
             parked: Some(park_rx),
+            fx: fx_tx,
+            fx_returned,
+            sample_rate,
+            last_sent: [None; MAX_TRACKS],
+            healed_at: [None; MAX_TRACKS],
         };
         Ok((core, handles))
     }
@@ -762,7 +1015,9 @@ impl LooperCore {
     }
 
     fn track_busy(&self, ti: usize) -> bool {
-        self.tracks.get(ti).is_some_and(|tr| tr.filling) || self.dup.is_some_and(|d| d.src == ti)
+        self.tracks.get(ti).is_some_and(|tr| tr.filling)
+            || self.dup.is_some_and(|d| d.src == ti)
+            || self.freeze.as_ref().is_some_and(|f| f.track == ti)
     }
 
     /// Any track in `mode` holds layers (a recording track holds one).
@@ -818,6 +1073,8 @@ impl LooperCore {
         self.drain_commands();
         self.service_jobs();
         self.service_dup();
+        self.service_freeze();
+        self.retire_faded();
         let n = input.len().min(out.len());
         self.resync_click();
         for i in 0..n {
@@ -874,7 +1131,10 @@ impl LooperCore {
         let mut y = 0.0f32;
         {
             let (any_solo, slew) = (self.any_solo, self.gain_slew);
-            for tr in &mut self.tracks {
+            let fx_fade = self.fx_fade;
+            let fx_step = 1.0 / fx_fade as f32;
+            let mut freeze = self.freeze.as_mut().filter(|f| !f.rendering);
+            for (ti, tr) in self.tracks.iter_mut().enumerate() {
                 // A copy being filled stays silent and fades in once complete.
                 let target = if tr.filling { 0.0 } else { tr.target_level(any_solo) };
                 let d = target - tr.level;
@@ -883,13 +1143,38 @@ impl LooperCore {
                 }
                 let Some(m) = tr.clock else { continue };
                 let (_, idx) = m.locate(t);
-                if tr.level > 0.0 {
-                    let mut s = 0.0f32;
+                // Effects keep running while a track is silent, so tails decay naturally.
+                if tr.level > 0.0 || tr.fx.active() {
                     let frames = m.period.ceil().max(1.0) as i64;
-                    for (layer_index, layer) in tr.layers.iter().enumerate() {
-                        let offset = tr.offsets.get(layer_index).copied().unwrap_or(0);
-                        let source = (idx as i64 - offset).rem_euclid(frames) as usize;
-                        s += layer.get(source).copied().unwrap_or(0.0);
+                    let mut s = if !tr.fx.active() {
+                        let mut s = 0.0f32;
+                        for (layer_index, layer) in tr.layers.iter().enumerate() {
+                            let offset = tr.offsets.get(layer_index).copied().unwrap_or(0);
+                            let source = (idx as i64 - offset).rem_euclid(frames) as usize;
+                            s += layer.get(source).copied().unwrap_or(0.0);
+                        }
+                        s
+                    } else {
+                        let (mut dry, mut wet) = (0.0f32, 0.0f32);
+                        for (layer_index, layer) in tr.layers.iter().enumerate() {
+                            let offset = tr.offsets.get(layer_index).copied().unwrap_or(0);
+                            let source = (idx as i64 - offset).rem_euclid(frames) as usize;
+                            let v = layer.get(source).copied().unwrap_or(0.0);
+                            let goal = if tr.fx.spec.layers.includes(layer_index) { 1.0 } else { 0.0 };
+                            let w = &mut tr.fx.weights[layer_index.min(MAX_LAYERS_PER_TRACK - 1)];
+                            if *w != goal {
+                                *w = if (goal - *w).abs() <= fx_step { goal } else { *w + fx_step.copysign(goal - *w) };
+                            }
+                            wet += v * *w;
+                            dry += v * (1.0 - *w);
+                        }
+                        dry + tr.fx.run(wet, fx_fade)
+                    };
+                    if let Some(f) = freeze.as_deref_mut().filter(|f| f.track == ti) {
+                        let frozen = f.buf.as_ref().and_then(|b| b.get(idx)).copied().unwrap_or(0.0);
+                        let a = (f.blend as f32 / fx_fade as f32).min(1.0);
+                        f.blend = f.blend.saturating_add(1);
+                        s += a * (frozen - s);
                     }
                     y += s * tr.level;
                 }
@@ -1292,6 +1577,8 @@ impl LooperCore {
         }
         while let Ok(cmd) = self.cmd_rx.pop() {
             if self.loading {
+                let attached = self.take_attached(&cmd);
+                self.retire(attached);
                 let _ = self.notice_tx.push(LooperNotice::Rejected { reason: RejectReason::TrackBusy });
                 continue;
             }
@@ -1372,7 +1659,328 @@ impl LooperCore {
                 self.latency = (frames as i64).min(self.max_frames as i64 / 2);
                 Ok(())
             }
+            C::SetTrackEffects { track, chain, .. } => {
+                let dsp = self.take_attached(&cmd);
+                self.set_track_effects(track as usize, chain, dsp)
+            }
+            C::FreezeTrack { track, .. } => {
+                let dsp = self.take_attached(&cmd);
+                self.freeze_track(track as usize, dsp)
+            }
+            C::InstallTrackEffects { track, chain } => {
+                let dsp = self.take_attached(&cmd);
+                self.install_track_effects(track as usize, chain, dsp);
+                Ok(())
+            }
         }
+    }
+
+    // ---- effects -------------------------------------------------------------------
+
+    /// The DSP that travels with `cmd`, if any (popped in command order).
+    fn take_attached(&mut self, cmd: &LooperCommand) -> Option<Box<ChainDsp>> {
+        let attached = match *cmd {
+            LooperCommand::SetTrackEffects { attached, .. } | LooperCommand::FreezeTrack { attached, .. } => attached,
+            LooperCommand::InstallTrackEffects { .. } => true,
+            _ => false,
+        };
+        if attached {
+            self.fx_rx.pop().ok()
+        } else {
+            None
+        }
+    }
+
+    /// Hand DSP back to the control thread to be dropped there.
+    fn retire(&mut self, chain: Option<Box<ChainDsp>>) {
+        Self::retire_to(&mut self.fx_back, chain);
+    }
+
+    fn retire_to(back: &mut Producer<Box<ChainDsp>>, chain: Option<Box<ChainDsp>>) {
+        if let Some(c) = chain {
+            if let Err(rtrb::PushError::Full(c)) = back.push(c) {
+                // Unreachable (the ring holds every chain that can exist); never free here.
+                std::mem::forget(c);
+            }
+        }
+    }
+
+    /// Retire chains whose crossfade has finished.
+    fn retire_faded(&mut self) {
+        for tr in &mut self.tracks {
+            if tr.fx.fade == 0 && tr.fx.old.is_some() {
+                Self::retire_to(&mut self.fx_back, tr.fx.old.take());
+            }
+        }
+    }
+
+    /// Remove a track's chain and DSP (track removed, restore).
+    fn clear_fx(back: &mut Producer<Box<ChainDsp>>, tr: &mut Track) {
+        Self::retire_to(back, tr.fx.chain.take());
+        Self::retire_to(back, tr.fx.old.take());
+        tr.fx.fade = 0;
+        tr.fx.spec = ChainSpec::EMPTY;
+        tr.fx.stale = false;
+        tr.fx.snap_weights();
+        tr.unfreeze = None;
+    }
+
+    /// Prepare received DSP for `spec`: its params exactly, the song tempo.
+    fn ready(&self, mut dsp: Box<ChainDsp>, spec: &ChainSpec) -> Result<Box<ChainDsp>, Box<ChainDsp>> {
+        if dsp.sample_rate() != self.sample_rate || !dsp.apply(spec, false) {
+            return Err(dsp);
+        }
+        dsp.set_tempo(self.transport.bpm);
+        Ok(dsp)
+    }
+
+    /// Switch a track to new DSP (or none), crossfading from what played.
+    fn swap_chain(&mut self, ti: usize, next: Option<Box<ChainDsp>>) {
+        let fade = self.fx_fade;
+        let tr = &mut self.tracks[ti];
+        if !tr.fx.active() {
+            tr.fx.snap_weights();
+        }
+        // A crossfade still running is cut short (rare: two structural edits within ~10 ms).
+        let cut = tr.fx.old.take();
+        tr.fx.old = tr.fx.chain.take();
+        tr.fx.chain = next;
+        tr.fx.stale = false;
+        tr.fx.fade = if tr.fx.active() { fade } else { 0 };
+        Self::retire_to(&mut self.fx_back, cut);
+    }
+
+    fn set_track_effects(
+        &mut self,
+        ti: usize,
+        chain: ChainSpec,
+        dsp: Option<Box<ChainDsp>>,
+    ) -> Result<(), RejectReason> {
+        let busy = self.track_busy(ti);
+        let Some(tr) = self.tracks.get_mut(ti) else {
+            self.retire(dsp);
+            return Err(RejectReason::NoSuchTrack);
+        };
+        if busy {
+            self.retire(dsp);
+            return Err(RejectReason::TrackBusy);
+        }
+        let rebuild = match tr.fx.chain.as_deref() {
+            Some(c) => !c.can_apply(&chain),
+            None => !chain.is_empty(),
+        };
+        tr.fx.spec = chain;
+        if !rebuild {
+            if let Some(c) = tr.fx.chain.as_deref_mut() {
+                c.apply(&chain, true);
+            }
+            self.retire(dsp);
+            return Ok(());
+        }
+        let next = match dsp {
+            _ if chain.is_empty() => {
+                self.retire(dsp);
+                None
+            }
+            Some(d) => match self.ready(d, &chain) {
+                Ok(d) => Some(d),
+                Err(d) => {
+                    self.retire(Some(d));
+                    None // pending: the control thread offers DSP for it
+                }
+            },
+            None => None,
+        };
+        self.swap_chain(ti, next);
+        Ok(())
+    }
+
+    fn install_track_effects(&mut self, ti: usize, chain: ChainSpec, dsp: Option<Box<ChainDsp>>) {
+        let wanted = self.tracks.get(ti).is_some_and(|tr| tr.fx.pending() && tr.fx.spec == chain);
+        match dsp {
+            Some(d) if wanted => match self.ready(d, &chain) {
+                Ok(d) => self.swap_chain(ti, Some(d)),
+                Err(d) => self.retire(Some(d)),
+            },
+            other => self.retire(other),
+        }
+    }
+
+    /// Re-time synced effects after a tempo change.
+    fn retempo(&mut self) {
+        let bpm = self.transport.bpm;
+        for tr in &mut self.tracks {
+            for c in tr.fx.chain.iter_mut().chain(tr.fx.old.iter_mut()) {
+                c.set_tempo(bpm);
+            }
+        }
+    }
+
+    fn freeze_track(&mut self, ti: usize, dsp: Option<Box<ChainDsp>>) -> Result<(), RejectReason> {
+        let check = (|| {
+            let tr = self.tracks.get(ti).ok_or(RejectReason::NoSuchTrack)?;
+            if tr.rec.is_some() || self.track_busy(ti) || self.freeze.is_some() || self.dup.is_some() || self.loading {
+                return Err(RejectReason::TrackBusy);
+            }
+            let m = tr.clock.ok_or(RejectReason::TrackEmpty)?;
+            if tr.layers.is_empty() {
+                return Err(RejectReason::TrackEmpty);
+            }
+            if self.pool.available() == 0 {
+                return Err(RejectReason::PoolExhausted);
+            }
+            Ok((m, tr.fx.spec))
+        })();
+        let (m, spec) = match check {
+            Ok(v) => v,
+            Err(e) => {
+                self.retire(dsp);
+                return Err(e);
+            }
+        };
+        let chain = if spec.is_empty() {
+            self.retire(dsp);
+            None
+        } else {
+            match dsp.map(|d| self.ready(d, &spec)) {
+                Some(Ok(d)) => Some(d),
+                Some(Err(d)) => {
+                    self.retire(Some(d));
+                    return Err(RejectReason::TrackBusy);
+                }
+                None => return Err(RejectReason::TrackBusy),
+            }
+        };
+        let Some(buf) = self.pool.acquire() else {
+            self.retire(chain);
+            return Err(RejectReason::PoolExhausted);
+        };
+        let frames = (m.period.ceil().max(1.0) as usize).min(self.max_frames);
+        self.freeze = Some(FreezeJob { track: ti, chain, buf: Some(buf), frames, pos: 0, rendering: true, blend: 0 });
+        Ok(())
+    }
+
+    /// Render up to `FREEZE_FRAMES_PER_BLOCK` frames of a freeze; commit it
+    /// once the blend to the rendered layer has finished.
+    fn service_freeze(&mut self) {
+        let Some(mut f) = self.freeze.take() else { return };
+        let Some(tr) = self.tracks.get(f.track) else {
+            self.abandon_freeze(f);
+            return;
+        };
+        if f.rendering {
+            let total = 2 * f.frames;
+            let end = (f.pos + FREEZE_FRAMES_PER_BLOCK).min(total);
+            let frames = f.frames as i64;
+            for k in f.pos..end {
+                let idx = k % f.frames;
+                let (mut dry, mut wet) = (0.0f32, 0.0f32);
+                for (li, layer) in tr.layers.iter().enumerate() {
+                    let offset = tr.offsets.get(li).copied().unwrap_or(0);
+                    let source = (idx as i64 - offset).rem_euclid(frames) as usize;
+                    let v = layer.get(source).copied().unwrap_or(0.0);
+                    if tr.fx.spec.layers.includes(li) {
+                        wet += v;
+                    } else {
+                        dry += v;
+                    }
+                }
+                let y = dry + f.chain.as_deref_mut().map_or(wet, |c| c.process(wet));
+                if k >= f.frames {
+                    if let Some(s) = f.buf.as_mut().and_then(|b| b.get_mut(idx)) {
+                        *s = y;
+                    }
+                }
+            }
+            f.pos = end;
+            if end == total {
+                f.rendering = false;
+                f.blend = 0;
+            }
+            self.freeze = Some(f);
+        } else if f.blend >= self.fx_fade || self.run != RunState::Running {
+            self.commit_freeze(f);
+        } else {
+            self.freeze = Some(f);
+        }
+    }
+
+    fn abandon_freeze(&mut self, mut f: FreezeJob) {
+        if let Some(buf) = f.buf.take() {
+            self.pool.release(buf);
+        }
+        self.retire(f.chain.take());
+    }
+
+    /// The rendered layer becomes the only layer; the old ones go to redo
+    /// (base take on top), the chain is cleared.
+    fn commit_freeze(&mut self, mut f: FreezeJob) {
+        let Some(buf) = f.buf.take() else { return self.abandon_freeze(f) };
+        self.retire(f.chain.take());
+        self.touch();
+        let tr = &mut self.tracks[f.track];
+        Self::release_redo(&mut self.pool, tr);
+        let n = tr.layers.len();
+        while let Some(layer) = tr.layers.pop() {
+            let mut summary = tr.summaries.pop().unwrap_or(SummaryState::Recording);
+            if let SummaryState::Ready { summary_emitted, timing_emitted, .. } = &mut summary {
+                *summary_emitted = false;
+                *timing_emitted = false;
+            }
+            tr.redo.push(layer); // within capacity: n ≤ max_layers
+            tr.redo_summaries.push(summary);
+            tr.redo_offsets.push(tr.offsets.pop().unwrap_or(0));
+        }
+        tr.offsets.clear();
+        tr.layers.push(buf);
+        tr.summaries.push(SummaryState::Scanning {
+            cursor: 0,
+            bins: [0.0; LAYER_SUMMARY_BINS],
+            timing: TimingScan::EMPTY,
+        });
+        tr.offsets.push(0);
+        tr.unfreeze = Some(Unfreeze { layers: n, effects: tr.fx.spec });
+        let back = &mut self.fx_back;
+        Self::retire_to(back, tr.fx.chain.take());
+        Self::retire_to(back, tr.fx.old.take());
+        tr.fx.fade = 0;
+        tr.fx.spec = ChainSpec::EMPTY;
+        tr.fx.snap_weights();
+    }
+
+    /// `Undo` right after a freeze: the frozen layer goes, the old layers
+    /// and the chain come back (its DSP is installed by the control thread).
+    fn unfreeze(&mut self, ti: usize) -> bool {
+        let tr = &mut self.tracks[ti];
+        let Some(u) = tr.unfreeze.take() else { return false };
+        if tr.layers.len() != 1 || tr.redo.len() < u.layers {
+            return false;
+        }
+        if let Some(buf) = tr.layers.pop() {
+            self.pool.release(buf);
+        }
+        tr.summaries.clear();
+        tr.offsets.clear();
+        for _ in 0..u.layers {
+            let (Some(layer), summary, offset) = (tr.redo.pop(), tr.redo_summaries.pop(), tr.redo_offsets.pop()) else {
+                break;
+            };
+            tr.layers.push(layer);
+            tr.summaries.push(summary.unwrap_or(SummaryState::Scanning {
+                cursor: 0,
+                bins: [0.0; LAYER_SUMMARY_BINS],
+                timing: TimingScan::EMPTY,
+            }));
+            tr.offsets.push(offset.unwrap_or(0));
+        }
+        let back = &mut self.fx_back;
+        Self::retire_to(back, tr.fx.chain.take());
+        Self::retire_to(back, tr.fx.old.take());
+        tr.fx.fade = 0;
+        tr.fx.spec = u.effects;
+        tr.fx.snap_weights();
+        self.touch();
+        true
     }
 
     /// Mixer commands. Refused on both tracks of a duplicate being copied.
@@ -1421,6 +2029,7 @@ impl LooperCore {
         }
         self.refresh_bars_clocks();
         self.resync_click();
+        self.retempo();
         Ok(())
     }
 
@@ -1531,6 +2140,12 @@ impl LooperCore {
         self.t = 0;
         self.count_in_left = 0;
         self.count_in_total = 0;
+        // Tails from before the stop must not play when the loop restarts.
+        for tr in &mut self.tracks {
+            if tr.fx.active() {
+                tr.fx.stale = true;
+            }
+        }
         // Free loops restart from their beginning on the next Play.
         if let Some(m) = self.master {
             self.set_master(Some(Master { origin: 0, ..m }));
@@ -1599,6 +2214,7 @@ impl LooperCore {
         tr.rec = Some(rec);
         tr.timing_suspect = false;
         tr.playing = true;
+        tr.unfreeze = None;
         Ok(())
     }
 
@@ -1777,6 +2393,10 @@ impl LooperCore {
         if tr.rec.is_some() || busy {
             return Err(RejectReason::TrackBusy);
         }
+        if tr.unfreeze.is_some() && self.unfreeze(ti) {
+            return Ok(());
+        }
+        let tr = &mut self.tracks[ti];
         if tr.layers.len() < 2 {
             return Err(RejectReason::NothingToUndo);
         }
@@ -1805,6 +2425,7 @@ impl LooperCore {
             return Err(RejectReason::LayerLimit);
         }
         let buf = tr.redo.pop().ok_or(RejectReason::NothingToRedo)?;
+        tr.unfreeze = None;
         let mut summary = tr.redo_summaries.pop().unwrap_or(SummaryState::Scanning {
             cursor: 0,
             bins: [0.0; LAYER_SUMMARY_BINS],
@@ -1850,6 +2471,7 @@ impl LooperCore {
         tr.clock = self.master;
         tr.lp = TrackLoop::DEFAULT;
         tr.filling = false;
+        Self::clear_fx(&mut self.fx_back, &mut tr);
         self.tracks.push(tr); // within capacity: total tracks never exceed track_capacity
         self.touch();
         Ok(())
@@ -1858,14 +2480,15 @@ impl LooperCore {
     fn remove_track(&mut self, ti: usize) -> Result<(), RejectReason> {
         let tr = self.tracks.get(ti).ok_or(RejectReason::NoSuchTrack)?;
         // A copy in progress addresses tracks by index: none may move meanwhile.
-        if tr.rec.is_some() || self.dup.is_some() {
+        if tr.rec.is_some() || self.dup.is_some() || self.freeze.is_some() {
             return Err(RejectReason::TrackBusy);
         }
         if self.tracks.len() == 1 {
             return Err(RejectReason::TrackLimit);
         }
         self.clear(ti)?; // releases layers and redo history to the recycler
-        let tr = self.tracks.remove(ti); // moves at most MAX_TRACKS small structs; no allocation
+        let mut tr = self.tracks.remove(ti); // moves at most MAX_TRACKS small structs; no allocation
+        Self::clear_fx(&mut self.fx_back, &mut tr);
         self.spare.push(tr);
         // Track indices are part of the frontend key. Re-emit every shifted
         // ready summary so replacing/removing a middle track cannot mislabel it.
@@ -1890,7 +2513,8 @@ impl LooperCore {
             let _ = self.add_track();
         }
         while self.tracks.len() > n {
-            if let Some(tr) = self.tracks.pop() {
+            if let Some(mut tr) = self.tracks.pop() {
+                Self::clear_fx(&mut self.fx_back, &mut tr);
                 self.spare.push(tr);
             }
         }
@@ -1906,6 +2530,7 @@ impl LooperCore {
         tr.rec = None;
         tr.timing_suspect = false;
         tr.playing = true;
+        tr.unfreeze = None;
         while let Some(buf) = tr.layers.pop() {
             self.pool.release(buf);
         }
@@ -1961,7 +2586,7 @@ impl LooperCore {
 
     fn duplicate_track(&mut self, ti: usize) -> Result<(), RejectReason> {
         let src = self.tracks.get(ti).ok_or(RejectReason::NoSuchTrack)?;
-        if src.rec.is_some() || self.dup.is_some() || self.track_busy(ti) {
+        if src.rec.is_some() || self.dup.is_some() || self.freeze.is_some() || self.track_busy(ti) {
             return Err(RejectReason::TrackBusy);
         }
         if self.spare.is_empty() {
@@ -1982,6 +2607,10 @@ impl LooperCore {
         tr.timing_suspect = src.timing_suspect;
         tr.clock = src.clock;
         tr.lp = src.lp;
+        // Same chain; its DSP is installed by the control thread (`heal_effects`).
+        tr.fx.spec = src.fx.spec;
+        tr.fx.weights = src.fx.weights;
+        tr.unfreeze = None;
         tr.summaries.clear();
         tr.redo_summaries.clear();
         tr.offsets.clear();
@@ -2112,11 +2741,16 @@ impl LooperCore {
                 layer_offsets: LayerOffsets::from_slice(&tr.offsets).values,
                 redo_offsets: LayerOffsets::from_slice(&tr.redo_offsets).values,
                 clock: self.track_clock_plan(tr),
+                effects: tr.fx.spec,
             };
         }
         Inventory {
             epoch: self.epoch,
-            busy: self.loading || self.drain.is_some() || self.any_recording() || self.dup.is_some(),
+            busy: self.loading
+                || self.drain.is_some()
+                || self.any_recording()
+                || self.dup.is_some()
+                || self.freeze.is_some(),
             run: self.run,
             transport: self.transport,
             period: self.master.map(|m| m.period),
@@ -2170,8 +2804,10 @@ impl LooperCore {
         if self.loading {
             return Err(RejectReason::TrackBusy);
         }
+        // A freeze is reading this track's layers: wait until it commits.
+        let freezing = self.freeze.as_ref().is_some_and(|f| f.track == job.track as usize);
         let tr = self.tracks.get_mut(job.track as usize).ok_or(RejectReason::NoSuchTrack)?;
-        if tr.filling {
+        if tr.filling || freezing {
             return Err(RejectReason::TrackBusy);
         }
         let (layer, summary) = match job.slot {
@@ -2210,7 +2846,12 @@ impl LooperCore {
     /// Replace all content with zeroed layers laid out as `plan` and enter
     /// loading mode. Releases at most `pool_layers` buffers (bounded work).
     fn restore(&mut self, plan: &RestorePlan) -> Result<(), RejectReason> {
-        if self.run != RunState::Stopped || self.drain.is_some() || self.any_recording() || self.dup.is_some() {
+        if self.run != RunState::Stopped
+            || self.drain.is_some()
+            || self.any_recording()
+            || self.dup.is_some()
+            || self.freeze.is_some()
+        {
             return Err(RejectReason::TrackBusy);
         }
         let mut transport = plan.transport;
@@ -2281,6 +2922,7 @@ impl LooperCore {
         }
         for ti in 0..self.tracks.len() {
             let _ = self.clear(ti);
+            Self::clear_fx(&mut self.fx_back, &mut self.tracks[ti]);
         }
         // Exactly the planned tracks, including empty ones (at least every used one).
         let used = plan.tracks.iter().rposition(|tp| tp.layers > 0 || tp.redo > 0).map_or(0, |i| i + 1);
@@ -2316,6 +2958,9 @@ impl LooperCore {
             tr.solo = tp.solo;
             tr.playing = tp.playing;
             tr.lp = tp.clock.track_loop;
+            // DSP follows from the control thread (`heal_effects`).
+            tr.fx.spec = tp.effects;
+            tr.fx.snap_weights();
         }
         self.any_solo = self.tracks.iter().any(|tr| tr.solo);
         // Start at the target level: nothing ramps in when playback begins.
@@ -2404,6 +3049,8 @@ impl LooperCore {
             loop_period: tr.clock.map(|m| m.period),
             loop_phase: tr.clock.map_or(0, |m| m.locate(self.t).1 as u64),
             busy,
+            effects: tr.fx.spec,
+            effects_pending: tr.fx.pending(),
         }
     }
 }
@@ -2451,6 +3098,7 @@ impl Drop for LooperCore {
                     layer_offsets: LayerOffsets::from_slice(&tr.offsets).values,
                     redo_offsets: LayerOffsets::from_slice(&tr.redo_offsets).values,
                     clock: clocks[i],
+                    effects: tr.fx.spec,
                 },
                 layers: std::mem::take(&mut tr.layers),
                 redo: std::mem::take(&mut tr.redo),

@@ -2318,3 +2318,5 @@ fn a_recording_layer_cannot_be_fetched() {
     assert!(matches!(fetch(&mut r, 0, 0), Err(TransferError::Busy(_))));
     assert!(matches!(fetch(&mut r, 1, 0), Err(TransferError::Rejected(RejectReason::TrackEmpty))));
 }
+
+mod effects;

@@ -1,6 +1,6 @@
 # Effects ("filters") and noise reduction
 
-Status: **plan + build in progress** (2026-11-18).
+Status: **engine (slice 1) and UI (slice 2) built; noise reduction (slice 3) in progress** (2026-11-19).
 
 ## The request
 
@@ -317,10 +317,138 @@ UI deviations (engine agent: please match or flag):
 
 PENDING:
 
-- Engine slice 1: until it lands, a native engine rejects `setTrackEffects`
-  and `freezeTrack` (an error banner), and snapshots show empty chains.
+- ~~Engine slice 1~~: landed (see "Engine status" below).
 - Renaming and deleting saved presets (they can only be added today).
 - Keyboard-only reorder inside the mixer strip works, but drag reorder
   between tracks (drag a box onto another track) is not built.
 - Autofilter "envelope" vs "lfo" does not hide the irrelevant controls yet.
 - Native app launch with the engine side not exercised by this slice.
+
+## Engine status (slice 1, 2026-11-19)
+
+Built (Rust; `npm run engine:test`, `cargo test -p voiceloop-project`,
+`cargo test -p voiceloop-dsp`, `cargo build -p voiceloop` pass):
+
+- **`crates/voiceloop-dsp`** (new crate, no dependencies beyond serde):
+  - `spec.rs`: the contract types. `ChainSpec` / `EffectSpec` are fixed-size
+    and `Copy` (8 effects × 9 params, ids up to 64 bytes) so they ride in
+    looper commands and snapshots without allocating. JSON matches the
+    contract: numbers clamped, unknown params ignored, missing params and
+    `mix` take the defaults (`params_of`, `default_mix`, mirroring
+    `src/effects/types.ts`), choices as their strings. Commands parse
+    strictly (unknown kind, more than 8 effects, long id → error); project
+    files parse leniently (unreadable effects are dropped).
+  - `fx.rs`: every kind, mono, per sample, written here from textbook
+    descriptions: RBJ-cookbook biquads (f64 state) for filter / eq3; peak
+    gate with hold; feed-forward soft-knee compressor (per-sample peak level,
+    attack/release on the gain reduction); delay with fractional
+    interpolated read, synced times, tone filter in the feedback path only
+    (the first echo is the exact input); an 8-line feedback-delay-network
+    reverb (Householder matrix, per-line damping, two input diffusers,
+    pre-delay; −60 dB at `decaySec`); saturation (tanh / clip / asymmetric
+    tube with DC blocker / sine fold) with tone and output; bitcrusher;
+    TPT state-variable auto filter (LFO or envelope); chorus / flanger
+    (modulated interpolated delay with feedback); phaser (2–12 first-order
+    allpasses, feedback); tremolo (sine / triangle / slewed square, synced);
+    ring mod. Buffers are allocated at construction for the largest params
+    at the device rate; recursive state is flushed below 1e-20 (no
+    denormals); a non-finite output resets that effect.
+  - `chain.rs`: `ChainDsp`. Continuous params glide (`PARAM_SMOOTH_MS`,
+    coefficients every 16 frames while moving); per-effect bypass/mix and
+    chain bypass ramp (`BYPASS_RAMP_MS`); once a ramp reaches 0 the effect is
+    skipped, so bypass is bit-exact and free; re-enabling clears its state.
+- **Looper** (`looper/processor.rs`):
+  - `setTrackEffects` (validated JSON → `ChainSpec`). Param, mix, bypass and
+    scope changes are applied in place and glide. Structural changes (add,
+    remove, reorder, kind, or a choice/step param such as filter type,
+    sync, mode, stages) crossfade old → new DSP over `EFFECT_CROSSFADE_MS`.
+    DSP is built on the control thread (`LooperHandles::send`, which keeps
+    the last chain sent per track so it builds only for structural
+    changes), travels to the callback through an `rtrb` ring in command
+    order, and old DSP goes back through a return ring to be dropped there.
+  - Scope: two sums per track (layers in scope → chain, the rest dry); each
+    layer's share ramps, so changing the scope never clicks. Track gain,
+    mute and solo apply after the chain. A track without a chain uses the
+    old summing path unchanged (bit-identical).
+  - `TrackSnapshot.effects`. A chain whose DSP is not in place yet (after
+    Duplicate, a restore or audio restart, Undo of a freeze, or a lost race)
+    plays dry and is flagged internally (`effectsPending`, not serialized);
+    the control thread then sends `InstallTrackEffects` with its DSP
+    (`LooperHandles::heal_effects`, at most every ~250 ms per track).
+  - `freezeTrack`: renders the layers through a fresh copy of the chain in
+    the callback, `FREEZE_FRAMES_PER_BLOCK` frames per block, twice around
+    the loop (the first pass warms up tails that wrap the loop point; the
+    second is written), while the track keeps playing and reports `busy`.
+    Then the track blends from its live sound to the rendered layer over the
+    crossfade and commits: one new base layer, old layers to redo history,
+    chain cleared. **Undo right after a freeze restores the layers and the
+    chain** (matches the simulator). Refused while recording, busy, empty,
+    or out of pool buffers.
+  - Duplicate copies the chain; Remove/Add start clean; Clear keeps the
+    chain; Stop clears effect tails before the next play.
+  - Noise reduction: a freeze drops the track's per-layer noise entries
+    (the frozen layer, and any layers Undo brings back, read as raw
+    layers), and a noise layer swap waits while the track is being frozen.
+  - Synced delay times and LFO rates follow the song tempo (`set_tempo` on
+    every tempo change).
+- **Persistence:** `TrackDoc.effects` and `ArrangementTrackDoc.effects`
+  (serde default: empty chain; an empty chain is not written, so files
+  without effects are unchanged). Park/restore on audio restarts, save,
+  open, recovery and in-place reloads carry chains (`TrackPlan.effects`).
+- **Bring in from Play:** a mixed lane gets the track's whole chain; a
+  per-layer lane gets it only if that layer is in scope. **Send to Play**:
+  the lane's chain goes onto the looper track (scope "all").
+- **Arrangement:** each lane with a chain is mixed into its own buffer,
+  through its `ChainDsp` (built with the schedule), then × lane gain.
+  `update` while playing moves each lane's DSP state into the new schedule
+  when the lane and chain structure are unchanged (tails continue, params
+  glide). Bounce renders in chunks with the same effects carried across
+  chunks (`RangeRenderer`), so a bounce equals playback.
+- **Mixdown / stems:** wet like playback, with one loop of warm-up so frame
+  0 has the tails a playing loop has. Stems follow `RenderOptions.wet`
+  (absent = wet; `effects.stemsWet`); layer stems run each in-scope layer
+  through its own copy of the chain.
+- **Tests:** frequency responses (filter types incl. lowpass −3 dB at the
+  cutoff ±0.5 dB, eq3, gain), compressor gain reduction at known levels
+  (hard and soft knee, makeup), gate, delay timing exact (incl. synced),
+  reverb finite and decaying (RT60), no NaN/denormals on silence and at
+  every extreme param, NaN input recovery, bypass bit-exact (per effect,
+  chain, mix 0, after a ramp), glide without steps, looper scope / bypass /
+  crossfade bounds / freeze = live output / undo of freeze / duplicate and
+  restore installs / tempo sync, no allocation in `ChainDsp`, the looper
+  callback or the arrangement player (counting allocator), lane playback =
+  bounce, chunked bounce = one render, persistence round trips (doc and
+  park → save → open → plan).
+
+Engine deviations:
+
+- Structural changes crossfade between a fresh DSP and the old one, so a
+  reverb or delay tail restarts on an add/remove/reorder (the old tail fades
+  out over 10 ms). Param, bypass and mix changes keep all state.
+- Choice/step params (filter type, sync, saturation mode, phaser stages,
+  autoFilter source, tremolo shape) count as structural: they crossfade
+  instead of gliding.
+- A second structural change within the crossfade (~10 ms) cuts the first
+  crossfade short.
+- PRODUCE: structural chain edits while the arrangement plays restart that
+  lane's effects with no crossfade (param edits are seamless).
+- Arrangement playback and a default-range bounce end at the last region's
+  end, so effect tails past it are cut (choose a longer bounce range to
+  keep them).
+- Compressor and gate detect per-sample peaks (no RMS option); saturation
+  and bitcrusher are not oversampled (some aliasing at high drive).
+- LFO phases run free; synced rates follow the tempo but are not locked to
+  the bar position.
+- `layers` is ignored on lane chains (a lane is one signal); the engine
+  forces `"all"` there.
+- REAPER export writes dry layers (effects are not translated).
+
+PENDING:
+
+- Effect tails across the arrangement end, crossfaded structural edits in
+  the arrangement player.
+- Oversampling for saturation/bitcrusher; an RMS detector option for the
+  compressor.
+- Stereo effects (mono until the engine goes stereo).
+- Native app launch with effects exercised by ear: not done in this slice
+  (no audio hardware run).

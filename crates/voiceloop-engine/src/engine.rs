@@ -38,10 +38,10 @@ use crate::looper::{
 use crate::meter::{amplitude_to_db, MeterFrame};
 use crate::mic::{self, InputNeeds, InputReason, InputStatus, MicAction, MicDemand, MicState, MicWaiting};
 use crate::midi_in::{MidiBatch, MidiPortInfo};
+use crate::model::AudioDevice;
 use crate::noise::{
     NoiseEvent, NoiseGlue, NoiseLayersView, NoiseLearnStatus, NoiseProfileEvent, NoiseReply, NoiseRequest,
 };
-use crate::model::AudioDevice;
 use crate::platform::{self, MicPermission, SessionEvent, SessionInfo, SessionRequest};
 use crate::practice::{self, Practice, PracticeIo, PracticeProgress, PracticeStatus, PracticeTakeEvent, TransportMap};
 use crate::preview::{PreviewRequest, PreviewStarted, SampleBank};
@@ -198,7 +198,7 @@ enum Command {
     StartInput(Option<String>, Reply<EngineStatus>),
     StopInput(Reply<EngineStatus>),
     Status(Reply<EngineStatus>),
-    Looper(LooperCommand, Reply<()>),
+    Looper(Box<LooperCommand>, Reply<()>),
     SetLooperConfig(LooperConfig, Reply<()>),
     PatchLooperConfig(serde_json::Value, Reply<LooperConfig>),
     SetAnalysisConfig(AnalysisConfig, Reply<()>),
@@ -285,7 +285,7 @@ impl Engine {
     /// Send a looper command. `SetTransport` is accepted while audio is stopped
     /// (it applies when audio starts); other commands need running audio.
     pub fn looper(&self, command: LooperCommand) -> Result<(), EngineError> {
-        self.request(|r| Command::Looper(command, r))
+        self.request(|r| Command::Looper(Box::new(command), r))
     }
 
     /// Resource limits for the looper; applied the next time audio starts.
@@ -626,7 +626,7 @@ impl ControlLoop {
                 let _ = reply.send(Ok(self.status()));
             }
             Command::Looper(command, reply) => {
-                let _ = reply.send(self.send_looper(command));
+                let _ = reply.send(self.send_looper(*command));
             }
             Command::SetLooperConfig(config, reply) => {
                 let result = config.max_loop_frames(48_000).map(|_| {
@@ -762,11 +762,13 @@ impl ControlLoop {
                 let _ = reply.send(result);
             }
             Command::Project(request, reply) => {
-                self.noise.finish_transfer_blocking(self.playback.as_mut().map(|p| &mut p.handles), Duration::from_secs(3));
+                self.noise
+                    .finish_transfer_blocking(self.playback.as_mut().map(|p| &mut p.handles), Duration::from_secs(3));
                 let _ = reply.send(self.project.request(request, self.playback.as_mut(), self.practice.library()));
             }
             Command::Practice(request, reply) => {
-                let starts = matches!(request, practice::Request::StartReference(_) | practice::Request::StartAttempt { .. });
+                let starts =
+                    matches!(request, practice::Request::StartReference(_) | practice::Request::StartAttempt { .. });
                 if starts && self.audio_on && self.mic_state() != MicState::On {
                     // Takes are timed on the input clock: the mic must already run.
                     self.practice_grace_until = Some(Instant::now() + mic::START_TIMEOUT);
@@ -814,7 +816,8 @@ impl ControlLoop {
                         }
                     }
                 }
-                self.noise.finish_transfer_blocking(self.playback.as_mut().map(|p| &mut p.handles), Duration::from_secs(3));
+                self.noise
+                    .finish_transfer_blocking(self.playback.as_mut().map(|p| &mut p.handles), Duration::from_secs(3));
                 let answer = Box::new(move |r| {
                     let _ = reply.send(r);
                 });
@@ -887,9 +890,10 @@ impl ControlLoop {
         }
         let looper_records = self.playback.is_some()
             && self.latest_snapshot.is_some_and(|s| {
-                s.tracks.iter().take(s.track_count as usize).any(|t| {
-                    matches!(t.state, TrackState::Armed | TrackState::Recording | TrackState::Overdubbing)
-                })
+                s.tracks
+                    .iter()
+                    .take(s.track_count as usize)
+                    .any(|t| matches!(t.state, TrackState::Armed | TrackState::Recording | TrackState::Overdubbing))
             });
         if looper_records || self.mic_waiting.has_looper() || self.record_grace_until.is_some_and(|t| now < t) {
             reasons.push(InputReason::Record);
@@ -1068,10 +1072,12 @@ impl ControlLoop {
                 self.record_grace_until = Some(Instant::now() + MIC_GRACE);
             }
         }
+        let latest = self.latest_snapshot;
         let result = match self.playback.as_mut() {
-            Some(p) => {
-                p.handles.commands.push(command).map_err(|_| EngineError::Busy("looper command queue is full".into()))
-            }
+            Some(p) => p
+                .handles
+                .send(command, latest.as_ref())
+                .map_err(|_| EngineError::Busy("looper command queue is full".into())),
             None => Err(EngineError::Invalid("start audio input before using the looper".into())),
         };
         if result.is_ok() {
@@ -1278,7 +1284,12 @@ impl ControlLoop {
         let Some(p) = self.playback.as_mut() else { return };
         // Zero released layers here, off the audio thread.
         p.handles.recycler.service();
+        // And drop effect DSP the callback has finished with.
+        p.handles.collect_effects();
         while let Ok(notice) = p.handles.notices.pop() {
+            if matches!(notice, LooperNotice::Rejected { .. }) {
+                p.handles.forget_sent(); // the looper's chains may differ from what was sent
+            }
             (self.sink)(EngineEvent::LooperNotice(notice));
         }
         while let Ok(summary) = p.handles.summaries.pop() {
@@ -1294,6 +1305,11 @@ impl ControlLoop {
         }
         if let (true, Some(s)) = (fresh, self.latest_snapshot.as_ref()) {
             self.noise.on_snapshot(s);
+        }
+        if let Some(s) = self.latest_snapshot.as_ref() {
+            // Chains without DSP (after a duplicate, restore, or a lost race) get it now.
+            p.handles.heal_effects(s);
+            self.project.set_song_tempo(s.transport.bpm);
         }
     }
 

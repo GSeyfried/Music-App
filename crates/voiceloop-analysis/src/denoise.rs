@@ -47,7 +47,8 @@ impl NoiseSpectrum {
         if self.magnitudes.is_empty() || self.sample_rate == 0 {
             return 0.0;
         }
-        let pos = (hz.max(0.0) * self.fft_size as f32 / self.sample_rate as f32).min((self.magnitudes.len() - 1) as f32);
+        let pos =
+            (hz.max(0.0) * self.fft_size as f32 / self.sample_rate as f32).min((self.magnitudes.len() - 1) as f32);
         let i = pos.floor() as usize;
         let j = (i + 1).min(self.magnitudes.len() - 1);
         let f = pos - i as f32;
@@ -385,7 +386,9 @@ mod tests {
         }
         // Too short or bad size: no profile.
         assert!(learn_noise(&[0.0; 100], SR, &LearnOptions::default()).is_none());
-        assert!(learn_noise(&noise(10_000, 0.1, 1), SR, &LearnOptions { fft_size: 1000, ..Default::default() }).is_none());
+        assert!(
+            learn_noise(&noise(10_000, 0.1, 1), SR, &LearnOptions { fft_size: 1000, ..Default::default() }).is_none()
+        );
     }
 
     #[test]

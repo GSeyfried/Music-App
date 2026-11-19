@@ -179,10 +179,21 @@ pub fn open_audio(
             match devices::negotiate_rate(&in_caps, &out_caps, config.sample_rate)? {
                 RateChoice::Shared(r) => {
                     let started = devices::config_at_rate(&out.device, DeviceDirection::Output, r).and_then(|cfg| {
-                        let options =
-                            OutputOptions { buffer_size: cpal_buffer, route: config.output_route, monitor: config.monitor };
+                        let options = OutputOptions {
+                            buffer_size: cpal_buffer,
+                            route: config.output_route,
+                            monitor: config.monitor,
+                        };
                         let counters = Arc::new(IoCounters::default());
-                        LooperPlayback::start(out.device.clone(), cfg, looper_config, transport, None, counters, options)
+                        LooperPlayback::start(
+                            out.device.clone(),
+                            cfg,
+                            looper_config,
+                            transport,
+                            None,
+                            counters,
+                            options,
+                        )
                     });
                     match started {
                         Ok(p) => playback = Some(p),

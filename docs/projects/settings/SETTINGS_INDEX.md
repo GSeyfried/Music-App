@@ -287,11 +287,20 @@ tuning; only the first few are likely user-facing.
 | `effects.pasteMode` | Paste filters | Pasting adds the copied filters after the track's own (append) or replaces its chain. | Add to the end | app | Settings › Effects; effect context menu, ⌘V | exists |
 | `effects.boxLayout` | Filter boxes | Filter boxes under a PLAY track card's controls, or beside them. | Below | app | Settings › Effects; PLAY track cards | exists |
 | `effects.controlStyle` | Filter controls | Knobs (drag up/down, arrow keys) or sliders for filter parameters. | Knobs | app | Settings › Effects; every effect box | exists |
-| `effects.stemsWet` | Stems include filters | Exported stems rendered with each track's chain (on) or dry; sent as `RenderOptions.wet`. Mixdown and bounce always include filters. | on | app | Settings › Effects; Project › Stems… | exists (engine PENDING) |
+| `effects.stemsWet` | Stems include filters | Exported stems rendered with each track's chain (on) or dry; sent as `RenderOptions.wet`. Mixdown and bounce always include filters. | on | app | Settings › Effects; Project › Stems… | exists |
 | `effects.presets` | Filter presets | Chains saved with "Save chain as preset" (`{ id, name, chain }[]`). Built-in presets live in `src/effects/presets.ts`. | none | app | Presets menu on every chain | exists |
 | `effects.sendIntervalMs` | Filter drag update interval | While a control is dragged, `setTrackEffects` is sent at most this often (ms). | 30 ms | app | PLAY effect boxes | internal |
 | `effects.echoTimeoutMs` | Filter edit confirm timeout | How long an edited chain is shown before falling back to the engine's copy when no snapshot confirms it (ms). | 1500 ms | app | PLAY effect boxes | internal |
 | `effects.knobDragPixels` | Knob drag distance | Vertical drag (px) for a knob's whole range; Shift is 10x finer. | 160 px | app | Effect knobs | internal |
+| (engine) `EFFECT_CROSSFADE_MS` | Filter change crossfade | When a track's chain changes structure (a filter added, removed, reordered, or a choice such as filter type changed), when its DSP is installed, and when a freeze swaps in the rendered layer, old and new sound crossfade over this long. Also how long a layer takes to move into or out of the chain's scope. | 10 ms | app | `crates/voiceloop-engine/src/looper/mod.rs` | internal |
+| (engine) `PARAM_SMOOTH_MS` | Filter parameter glide | A changed continuous parameter glides to its new value over this long (no zipper noise). | 20 ms | app | `crates/voiceloop-dsp/src/chain.rs` | internal |
+| (engine) `BYPASS_RAMP_MS` | Filter bypass ramp | Bypass, mix and chain-bypass changes ramp over this long; a fully bypassed filter is then skipped (bit-exact dry). | 10 ms | app | `crates/voiceloop-dsp/src/chain.rs` | internal |
+| (engine) `FREEZE_FRAMES_PER_BLOCK` | Freeze render pace | Frames of a Freeze render done per audio callback (two passes around the loop). | 8192 | app | `crates/voiceloop-engine/src/looper/mod.rs` | internal |
+| (engine) `DELAY_MAX_MS` | Longest delay | The delay buffer size; synced delays are clamped to it. | 2000 ms | app | `crates/voiceloop-dsp/src/fx.rs` | internal |
+| (engine) `AUTO_FILTER_ENV_FULL_SCALE` | Auto-filter envelope sensitivity | Input level (linear peak) at which the envelope-driven auto filter reaches its full depth. | 0.25 (−12 dBFS) | app | `crates/voiceloop-dsp/src/fx.rs` | internal |
+| (engine) `PHASER_SPAN_OCT` | Phaser sweep span | Octaves either side of the phaser centre at depth 1. | 2 | app | `crates/voiceloop-dsp/src/fx.rs` | internal |
+| (engine) `REVERB_OUTPUT_GAIN` | Reverb level | Output gain of the reverb's wet signal. | 0.35 | app | `crates/voiceloop-dsp/src/fx.rs` | internal |
+| (engine) `default_mix` | Default mix per kind | The engine's copy of `effects.<kind>.mix`: what a missing `mix` means. Delay 0.35, reverb 0.3, chorus/flanger/phaser 0.5, others 1. | per kind | app | `crates/voiceloop-dsp/src/spec.rs` | internal |
 
 ### Effect parameter defaults (`effects.<kind>.<param>`, generated from `EFFECT_DEFS`)
 

@@ -10,8 +10,18 @@
 //! carries a BWF time reference of 0, so stems dropped into a DAW at the
 //! project start line up sample-accurately. Rendering streams in blocks; no
 //! whole-file buffers are allocated.
+//!
+//! **Effects.** A track with an effect chain renders like playback: the
+//! layers in the chain's scope go through it, the others stay dry, and the
+//! track gain applies after the chain. The chain first runs over one whole
+//! loop (output discarded), so frame 0 already carries the tails a playing
+//! loop has (a reverb ringing over the loop point). Stems are wet unless
+//! [`RenderJob::stems_wet`] is off; layer stems pass each in-scope layer
+//! through its own copy of the chain.
 
 use std::path::{Path, PathBuf};
+
+use voiceloop_dsp::{ChainDsp, ChainSpec};
 
 use crate::error::{ProjectError, Result};
 use crate::package::Progress;
@@ -28,6 +38,8 @@ pub struct RenderTrack<'a> {
     pub muted: bool,
     pub solo: bool,
     pub playing: bool,
+    /// The track's effect chain (empty: none).
+    pub effects: ChainSpec,
 }
 
 /// What to render.
@@ -42,6 +54,10 @@ pub struct RenderJob<'a> {
     /// Tempo metadata for the `acid` chunk (Metronome-mode sessions).
     pub tempo: Option<Acid>,
     pub project_name: String,
+    /// Song tempo for synced effect times.
+    pub bpm: f64,
+    /// Stems include each track's effects (mixdowns always do).
+    pub stems_wet: bool,
 }
 
 /// Start frame of cycle `c` (origin 0), exactly as the engine computes it.
@@ -66,16 +82,66 @@ pub fn phase(frame: i64, period: f64) -> usize {
     (frame - cycle_start(cycle, period)) as usize
 }
 
-/// Add `layers × gain` for frames `start..start + out.len()` into `out`.
-fn add_track(layers: &[&[f32]], gain: f32, period: f64, start: u64, out: &mut [f32]) {
-    for (i, o) in out.iter_mut().enumerate() {
-        let idx = phase((start + i as u64) as i64, period);
-        let mut s = 0.0f32;
-        for layer in layers {
-            s += layer.get(idx).copied().unwrap_or(0.0);
+/// One rendered signal: some layers (each through the chain or dry) × gain.
+struct Unit<'a> {
+    layers: Vec<(&'a [f32], bool)>,
+    gain: f32,
+    chain: Option<ChainDsp>,
+}
+
+impl<'a> Unit<'a> {
+    /// `wet[i]`: layer `i` goes through `effects`. Warms the chain up over one loop.
+    fn new(layers: Vec<(&'a [f32], bool)>, gain: f32, effects: &ChainSpec, job: &RenderJob) -> Self {
+        let any_wet = layers.iter().any(|(_, w)| *w);
+        let chain = (any_wet && !effects.is_empty()).then(|| ChainDsp::new(effects, job.sample_rate, job.bpm));
+        let mut u = Self { layers, gain, chain };
+        if u.chain.is_some() {
+            let warm = cycle_start(1, job.period).max(1) as usize;
+            let mut scratch = vec![0.0f32; warm.min(BLOCK)];
+            let mut done = 0;
+            while done < warm {
+                let n = (warm - done).min(BLOCK);
+                scratch[..n].fill(0.0);
+                u.add(job.period, done as u64, &mut scratch[..n]);
+                done += n;
+            }
         }
-        *o += s * gain;
+        u
     }
+
+    /// Add frames `start..start + out.len()` into `out`.
+    fn add(&mut self, period: f64, start: u64, out: &mut [f32]) {
+        for (i, o) in out.iter_mut().enumerate() {
+            let idx = phase((start + i as u64) as i64, period);
+            let s = match self.chain.as_mut() {
+                None => {
+                    let mut s = 0.0f32;
+                    for (layer, _) in &self.layers {
+                        s += layer.get(idx).copied().unwrap_or(0.0);
+                    }
+                    s
+                }
+                Some(chain) => {
+                    let (mut dry, mut wet) = (0.0f32, 0.0f32);
+                    for (layer, through) in &self.layers {
+                        let v = layer.get(idx).copied().unwrap_or(0.0);
+                        if *through {
+                            wet += v;
+                        } else {
+                            dry += v;
+                        }
+                    }
+                    dry + chain.process(wet)
+                }
+            };
+            *o += s * self.gain;
+        }
+    }
+}
+
+fn track_unit<'a>(t: &RenderTrack<'a>, job: &RenderJob, wet: bool) -> Unit<'a> {
+    let layers = t.layers.iter().enumerate().map(|(i, l)| (*l, wet && t.effects.layers.includes(i))).collect();
+    Unit::new(layers, t.gain, &t.effects, job)
 }
 
 fn options(job: &RenderJob, what: &str) -> WriteOptions {
@@ -142,8 +208,12 @@ pub fn write_mixdown(
 ) -> Result<u64> {
     let frames = check(job)?;
     let any_solo = job.tracks.iter().any(|t| t.solo);
-    let audible: Vec<&RenderTrack> =
-        job.tracks.iter().filter(|t| t.playing && !t.muted && (!any_solo || t.solo)).collect();
+    let mut audible: Vec<Unit> = job
+        .tracks
+        .iter()
+        .filter(|t| t.playing && !t.muted && (!any_solo || t.solo))
+        .map(|t| track_unit(t, job, true))
+        .collect();
     render_to(
         path,
         job,
@@ -151,8 +221,8 @@ pub fn write_mixdown(
         "mixdown",
         frames,
         |start, out| {
-            for t in &audible {
-                add_track(&t.layers, t.gain, job.period, start, out);
+            for u in audible.iter_mut() {
+                u.add(job.period, start, out);
             }
             for v in out.iter_mut() {
                 *v = limiter(*v);
@@ -185,35 +255,29 @@ pub fn write_stems(
 ) -> Result<Vec<PathBuf>> {
     let frames = check(job)?;
     std::fs::create_dir_all(dir).map_err(|e| ProjectError::io("create", dir, e))?;
-    let mut units: Vec<(String, Vec<&[f32]>, f32)> = Vec::new();
+    let mut units: Vec<(String, Unit)> = Vec::new();
     for (ti, t) in job.tracks.iter().enumerate() {
         if t.layers.is_empty() {
             continue;
         }
         let name = sanitize(&if t.name.is_empty() { format!("Track {}", ti + 1) } else { t.name.clone() });
         match kind {
-            StemKind::Tracks => units.push((name, t.layers.clone(), t.gain)),
+            StemKind::Tracks => units.push((name, track_unit(t, job, job.stems_wet))),
             StemKind::Layers => {
                 for (li, l) in t.layers.iter().enumerate() {
-                    units.push((format!("{name} - layer {}", li + 1), vec![*l], 1.0));
+                    let wet = job.stems_wet && t.effects.layers.includes(li);
+                    let unit = Unit::new(vec![(*l, wet)], 1.0, &t.effects, job);
+                    units.push((format!("{name} - layer {}", li + 1), unit));
                 }
             }
         }
     }
     let total = units.len().max(1);
     let mut written = Vec::with_capacity(units.len());
-    for (i, (name, layers, gain)) in units.iter().enumerate() {
+    for (i, (name, unit)) in units.iter_mut().enumerate() {
         let path = dir.join(format!("{} - {name}.wav", sanitize(prefix)));
         let mut sub = |p: f32| progress((i as f32 + p) / total as f32);
-        render_to(
-            &path,
-            job,
-            1,
-            name,
-            frames,
-            |start, out| add_track(layers, *gain, job.period, start, out),
-            &mut sub,
-        )?;
+        render_to(&path, job, 1, name, frames, |start, out| unit.add(job.period, start, out), &mut sub)?;
         written.push(path);
     }
     Ok(written)
@@ -268,6 +332,7 @@ mod tests {
                     muted: false,
                     solo: false,
                     playing: true,
+                    effects: ChainSpec::EMPTY,
                 },
                 RenderTrack {
                     name: "Bass/Low".into(),
@@ -276,6 +341,7 @@ mod tests {
                     muted: true,
                     solo: false,
                     playing: true,
+                    effects: ChainSpec::EMPTY,
                 },
                 RenderTrack {
                     name: String::new(),
@@ -284,6 +350,7 @@ mod tests {
                     muted: false,
                     solo: false,
                     playing: true,
+                    effects: ChainSpec::EMPTY,
                 },
             ],
             period: 10.5,
@@ -292,6 +359,8 @@ mod tests {
             depth: BitDepth::Float32,
             tempo: None,
             project_name: "Song".into(),
+            bpm: 120.0,
+            stems_wet: true,
         }
     }
 
@@ -326,6 +395,53 @@ mod tests {
         assert_eq!(layers.len(), 3);
         let (_, l1) = read_wav(&layers[0]).unwrap();
         assert_eq!(l1[13], a[phase(13, 10.5)]);
+    }
+
+    #[test]
+    fn effects_render_like_playback_with_scope_warm_up_and_dry_stems() {
+        use voiceloop_dsp::{EffectKind, EffectSpec, LayerScope};
+        let dir = crate::test_dir("render-fx");
+        let period = 4_800.0;
+        let a: Vec<f32> = (0..4_800).map(|i| if i == 100 { 1.0 } else { 0.0 }).collect();
+        let b: Vec<f32> = (0..4_800).map(|i| if i == 200 { 0.5 } else { 0.0 }).collect();
+        // A 1000-frame delay (no feedback), wet only, on layer 0 alone.
+        let mut d = EffectSpec::new("d", EffectKind::Delay);
+        d.set("timeMs", 1_000.0 * 1_000.0 / 48_000.0).set("feedback", 0.0);
+        d.mix = 1.0;
+        let mut fx = ChainSpec::with(&[d]);
+        fx.layers = LayerScope::Layers(0b01);
+        let mut j = job(&a, &b);
+        j.period = period;
+        j.loops = 1;
+        j.tracks[0].effects = fx;
+        j.tracks[0].gain = 1.0;
+        write_mixdown(&dir.join("mix.wav"), &j, 1, clip, &mut |_| {}).unwrap();
+        let (_, mix) = read_wav(&dir.join("mix.wav")).unwrap();
+        assert_eq!(mix[100], 0.0, "layer 0 only through the (fully wet) delay");
+        assert_eq!(mix[1_100], 1.0);
+        assert_eq!(mix[200], 0.5, "layer 1 dry");
+
+        // An echo crossing the loop end comes back at the start (warm-up).
+        let late: Vec<f32> = (0..4_800).map(|i| if i == 4_500 { 1.0 } else { 0.0 }).collect();
+        let mut j = job(&late, &b);
+        j.period = period;
+        j.loops = 1;
+        j.tracks[0].effects = ChainSpec::with(&[d]);
+        j.tracks[0].gain = 1.0;
+        j.tracks[0].layers = vec![&late];
+        write_mixdown(&dir.join("wrap.wav"), &j, 1, clip, &mut |_| {}).unwrap();
+        let (_, wrap) = read_wav(&dir.join("wrap.wav")).unwrap();
+        assert_eq!(wrap[700], 1.0);
+
+        j.stems_wet = false;
+        let stems = write_stems(&dir.join("dry"), "Song", &j, StemKind::Tracks, &mut |_| {}).unwrap();
+        let (_, dry) = read_wav(&stems[0]).unwrap();
+        assert_eq!(dry[4_500], 1.0);
+        assert_eq!(dry[700], 0.0);
+        j.stems_wet = true;
+        let stems = write_stems(&dir.join("wet"), "Song", &j, StemKind::Layers, &mut |_| {}).unwrap();
+        let (_, wet) = read_wav(&stems[0]).unwrap();
+        assert_eq!(wet[700], 1.0);
     }
 
     #[test]

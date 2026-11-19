@@ -4233,6 +4233,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "voiceloop-dsp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "voiceloop-engine"
 version = "0.1.0"
 dependencies = [
@@ -4247,6 +4255,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "voiceloop-analysis",
+ "voiceloop-dsp",
  "voiceloop-project",
 ]
 
@@ -4257,6 +4266,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "voiceloop-dsp",
 ]
 
 [[package]]

@@ -38,7 +38,7 @@ pub use click::Accent;
 pub use pool::{LayerRecycler, StorageSink};
 pub use processor::{
     soft_limit, LayerSummary, LayerTiming, LooperCommand, LooperCore, LooperHandles, LooperNotice, LooperSnapshot,
-    RejectReason, RunState, TimingHit, TrackSnapshot, TrackState, LIMIT_KNEE, MAX_TRANSPORT_FRAME,
+    QueueFull, RejectReason, RunState, TimingHit, TrackSnapshot, TrackState, LIMIT_KNEE, MAX_TRANSPORT_FRAME,
 };
 
 /// Hard upper bound on tracks (snapshot and plan arrays are sized by this).
@@ -50,6 +50,16 @@ pub use processor::{
 /// reads, which stay bounded by `pool_layers` whatever the track count.
 /// 16 is ample for "at least 10 usable tracks" and keeps snapshots small.
 pub const MAX_TRACKS: usize = 16;
+
+/// Crossfade (ms) when a track's effect chain changes structure (an effect
+/// added, removed, reordered, or a choice param changed), when its DSP is
+/// installed, and when a freeze swaps the rendered layer in. Also the time a
+/// layer takes to move into or out of the chain's scope.
+pub const EFFECT_CROSSFADE_MS: f32 = 10.0;
+/// Frames of a `FreezeTrack` render done per callback (bounded work).
+pub const FREEZE_FRAMES_PER_BLOCK: usize = 8_192;
+/// Effect chains in flight to (and back from) the output callback.
+pub const EFFECT_RING_CAPACITY: usize = 64;
 
 /// Fixed wire-format resolution of one completed layer around its loop.
 pub const LAYER_SUMMARY_BINS: usize = 128;

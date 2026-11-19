@@ -35,8 +35,8 @@ use voiceloop_analysis::denoise::{self, GateSettings, LearnOptions, NoiseSpectru
 use voiceloop_project::doc::{NoiseProfileDoc, NoiseReductionDoc};
 
 use crate::error::EngineError;
-use crate::looper::LooperHandles;
 use crate::looper::transfer::{swap_probes, FetchedLayer, LayerFetch, LayerSlot, LayerSwap, Poll, TransferError};
+use crate::looper::LooperHandles;
 use crate::looper::{LooperCommand, LooperSnapshot, TrackState, MAX_TRACKS};
 use crate::transport::TransportState;
 
@@ -159,9 +159,7 @@ impl LayerNoiseSettings {
         if ok {
             Ok(())
         } else {
-            Err(EngineError::Invalid(
-                "noise reduction: amountDb 0..60, sensitivity -12..36, smoothing 0..1".into(),
-            ))
+            Err(EngineError::Invalid("noise reduction: amountDb 0..60, sensitivity -12..36, smoothing 0..1".into()))
         }
     }
 
@@ -298,11 +296,20 @@ pub enum NoiseEvent {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TapRequest {
     /// Record the next `frames` frames.
-    Learn { id: u64, frames: usize },
+    Learn {
+        id: u64,
+        frames: usize,
+    },
     /// Record until the first voiced frame (minus `margin`), at most `max_frames`.
-    PreTake { id: u64, max_frames: usize, margin: usize },
+    PreTake {
+        id: u64,
+        max_frames: usize,
+        margin: usize,
+    },
     /// Finish the pre-take recording now (the take ended).
-    EndPreTake { id: u64 },
+    EndPreTake {
+        id: u64,
+    },
     Cancel,
 }
 
@@ -334,12 +341,19 @@ impl NoiseTap {
     pub fn request(&mut self, r: TapRequest, position: u64, sample_rate: u32) -> Option<TapResult> {
         match r {
             TapRequest::Learn { id, frames } => {
-                self.active =
-                    Some(TapJob { id, pre_take: false, frames, margin: 0, start: position, buf: Vec::with_capacity(frames) });
+                self.active = Some(TapJob {
+                    id,
+                    pre_take: false,
+                    frames,
+                    margin: 0,
+                    start: position,
+                    buf: Vec::with_capacity(frames),
+                });
                 None
             }
             TapRequest::PreTake { id, max_frames, margin } => {
-                self.active = Some(TapJob { id, pre_take: true, frames: max_frames, margin, start: position, buf: Vec::new() });
+                self.active =
+                    Some(TapJob { id, pre_take: true, frames: max_frames, margin, start: position, buf: Vec::new() });
                 None
             }
             TapRequest::EndPreTake { id } => match self.active.take() {
@@ -639,7 +653,14 @@ impl NoiseGlue {
         self.actions.events.push(NoiseEvent::Profile(NoiseProfileEvent { reason: reason.into(), profile, profiles }));
     }
 
-    fn learn_event(&mut self, state: &str, fraction: f32, seconds_left: f32, message: Option<String>, id: Option<String>) {
+    fn learn_event(
+        &mut self,
+        state: &str,
+        fraction: f32,
+        seconds_left: f32,
+        message: Option<String>,
+        id: Option<String>,
+    ) {
         self.actions.events.push(NoiseEvent::Learn(NoiseLearnStatus {
             state: state.into(),
             fraction,
@@ -851,6 +872,16 @@ impl NoiseGlue {
                 }
                 self.drop_jobs(Some(track));
             }
+            // A freeze replaces the layers with one rendered layer (the old ones
+            // go to redo, and Undo can bring them back): its noise entries are
+            // dropped, and every layer reads as raw afterwards.
+            C::FreezeTrack { track, .. } => {
+                if let Some(tr) = self.tracks.get_mut(t(track)) {
+                    tr.layers.clear();
+                    tr.redo.clear();
+                }
+                self.drop_jobs(Some(track));
+            }
             C::ClearAll => {
                 for tr in &mut self.tracks {
                     tr.layers.clear();
@@ -992,7 +1023,8 @@ impl NoiseGlue {
                 return; // too short to describe the room
             }
             let reject = self.config.click_bleed == ClickBleed::RejectTransients;
-            if let Some(spectrum) = denoise::learn_noise(&r.samples, r.sample_rate, &self.config.learn_options(reject)) {
+            if let Some(spectrum) = denoise::learn_noise(&r.samples, r.sample_rate, &self.config.learn_options(reject))
+            {
                 // One auto profile, refreshed before every take (it becomes the newest).
                 let old = self.profiles.iter().position(|p| p.doc.source == "beforeTake");
                 let keep = old.map(|i| self.profiles.remove(i));
@@ -1098,7 +1130,8 @@ impl NoiseGlue {
         let Some(p) = playback else {
             if self.active.is_some() || !self.queue.is_empty() {
                 // Audio stopped: the jobs cannot run; report them failed.
-                let jobs: Vec<Job> = self.active.take().map(|a| a.job).into_iter().chain(self.queue.drain(..)).collect();
+                let jobs: Vec<Job> =
+                    self.active.take().map(|a| a.job).into_iter().chain(self.queue.drain(..)).collect();
                 for job in jobs {
                     self.fail(&job, "audio stopped".into());
                 }
@@ -1241,7 +1274,14 @@ impl NoiseGlue {
     fn swap_for(&self, job: &Job, fetched: &FetchedLayer, content: &[f32]) -> LayerSwap {
         let id = fetched.identity;
         let n = content.len().min(id.frames);
-        LayerSwap::new(job.track, LayerSlot::Active(job.layer), id.ptr, swap_probes(&fetched.samples), &content[..n], id.len)
+        LayerSwap::new(
+            job.track,
+            LayerSlot::Active(job.layer),
+            id.ptr,
+            swap_probes(&fetched.samples),
+            &content[..n],
+            id.len,
+        )
     }
 
     /// Run the transfer in flight to its end (before a project operation
@@ -1436,14 +1476,19 @@ mod tests {
     #[test]
     fn learning_creates_profiles_and_layer_settings_need_one() {
         let mut g = NoiseGlue::new();
-        assert!(g.set_layer(0, 0, Some(LayerNoiseSettings {
-            enabled: true,
-            profile_id: "nope".into(),
-            amount_db: 12.0,
-            sensitivity: 6.0,
-            smoothing: 0.5,
-        }))
-        .is_err());
+        assert!(g
+            .set_layer(
+                0,
+                0,
+                Some(LayerNoiseSettings {
+                    enabled: true,
+                    profile_id: "nope".into(),
+                    amount_db: 12.0,
+                    sensitivity: 6.0,
+                    smoothing: 0.5,
+                })
+            )
+            .is_err());
         g.learn(Some(3.0)).unwrap();
         assert!(g.wants_mic());
         g.tick(None, Some(1000), false);

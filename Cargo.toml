@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/voiceloop-analysis", "crates/voiceloop-engine", "crates/voiceloop-project", "src-tauri"]
+members = ["crates/voiceloop-analysis", "crates/voiceloop-dsp", "crates/voiceloop-engine", "crates/voiceloop-project", "src-tauri"]
 
 [workspace.package]
 edition = "2021"
@@ -21,6 +21,9 @@ opt-level = 2
 # pitch analysis are 10-30x slower, which is enough to cause dropouts in `tauri dev`.
 [profile.dev.package.voiceloop-engine]
 opt-level = 2
+
+[profile.dev.package.voiceloop-dsp]
+opt-level = 3
 
 [profile.dev.package.voiceloop-analysis]
 opt-level = 3

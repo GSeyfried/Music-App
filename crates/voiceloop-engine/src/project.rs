@@ -72,11 +72,14 @@ pub struct RenderOptions {
     pub loops: u32,
     /// Mixdown only: write two identical channels instead of one.
     pub stereo: bool,
+    /// Stems only: include each track's effects (`export.stemsWet`; the
+    /// mixdown always does). Absent means wet.
+    pub wet: bool,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        Self { depth: BitDepth::Int24, loops: 1, stereo: false }
+        Self { depth: BitDepth::Int24, loops: 1, stereo: false, wet: true }
     }
 }
 
@@ -457,6 +460,7 @@ fn doc_from_captured(base: &ProjectDoc, cap: Captured, config: Option<&AudioConf
         d.muted = tr.plan.muted;
         d.solo = tr.plan.solo;
         d.playing = tr.plan.playing;
+        d.effects = tr.plan.effects;
         audio.push(TrackAudio {
             layers: tr.layers.into_iter().map(Arc::from).collect(),
             redo: tr.redo.into_iter().map(Arc::from).collect(),
@@ -571,6 +575,7 @@ fn loadable(
             },
             // Plans without loop info (project files today) mean Song tracks.
             clock: clocks.get(t).copied().unwrap_or_default(),
+            effects: d.effects,
         };
         for (i, l) in a.layers.iter().enumerate() {
             layers.push((t as u8, LayerSlot::Active(i as u8), l.to_vec()));
@@ -702,7 +707,7 @@ enum AfterExport {
     Stems { dir: PathBuf, options: RenderOptions, per_layer: bool },
     AddLayer { track: u8, samples: Vec<f32>, fit: FitMode, resampled_from: Option<u32> },
     Capture { tracks: Vec<u32>, per_layer: bool, repeats: u32, start: u64 },
-    SendToLooper { samples: Vec<f32>, track: Option<u32>, name: String },
+    SendToLooper { samples: Vec<f32>, track: Option<u32>, name: String, effects: Box<voiceloop_dsp::ChainSpec> },
 }
 
 enum AfterWork {
@@ -1482,6 +1487,7 @@ impl ProjectGlue {
                     meter_denominator: t.time_signature.denominator as u16,
                     is_loop: true,
                 });
+                let bpm = t.bpm;
                 let rx = spawn_worker(move |progress| {
                     let tracks: Vec<RenderTrack> = doc
                         .tracks
@@ -1494,6 +1500,7 @@ impl ProjectGlue {
                             muted: d.muted,
                             solo: d.solo,
                             playing: d.playing,
+                            effects: d.effects,
                         })
                         .collect();
                     let mut job = RenderJob {
@@ -1504,6 +1511,8 @@ impl ProjectGlue {
                         depth: BitDepth::Int24,
                         tempo,
                         project_name: doc.name.clone(),
+                        bpm,
+                        stems_wet: true,
                     };
                     match after {
                         AfterExport::Mixdown { path, options } => {
@@ -1519,6 +1528,7 @@ impl ProjectGlue {
                         AfterExport::Stems { dir, options, per_layer } => {
                             job.loops = options.loops.max(1);
                             job.depth = options.depth;
+                            job.stems_wet = options.wet;
                             if let Some(a) = job.tempo.as_mut() {
                                 a.beats = a.beats.saturating_mul(job.loops);
                             }
@@ -1566,7 +1576,7 @@ impl ProjectGlue {
                 self.capture_into_arrangement(&cap, &tracks, per_layer, repeats, start)?;
                 Ok(Next::Finished(OpResult::ArrangementCaptured { arrangement: self.arr.view() }))
             }
-            AfterExport::SendToLooper { samples, track, name } => {
+            AfterExport::SendToLooper { samples, track, name, effects } => {
                 if inv.busy || inv.run != crate::looper::RunState::Stopped {
                     return Err(file_error("busy", "stop the looper transport before sending a region to it"));
                 }
@@ -1603,6 +1613,8 @@ impl ProjectGlue {
                     doc.tracks.push(TrackDoc::new(n));
                 }
                 doc.tracks[ti].name = name.clone();
+                // The lane's chain comes along (a lane chain covers all layers).
+                doc.tracks[ti].effects = effects.all_layers();
                 doc.tracks[ti].layers.clear();
                 doc.tracks[ti].redo_layers.clear();
                 audio.resize_with(doc.tracks.len(), TrackAudio::default);
@@ -1653,6 +1665,12 @@ impl ProjectGlue {
                 let label = layer.map_or_else(|| name.clone(), |l| format!("{name} layer {}", l + 1));
                 let asset_id = next.add_asset(&label, samples);
                 let mut lane = ArrangementTrackDoc::new(&label);
+                // The track's chain comes along: whole for a mixed lane, and
+                // for a per-layer lane only when that layer is in its scope.
+                let fx = track.plan.effects;
+                if layer.is_none_or(|l| fx.layers.includes(l as usize)) {
+                    lane.effects = fx.all_layers();
+                }
                 lane.gain = track.plan.gain;
                 lane.muted = track.plan.muted || !track.plan.playing;
                 lane.regions.push(RegionDoc {
@@ -1695,6 +1713,14 @@ impl ProjectGlue {
         self.arr.ensure_rate(rate);
         if let Err(e) = self.arr.schedule().and_then(|s| p.arrangement.update(s)) {
             sink(EngineEvent::Error(e));
+        }
+    }
+
+    /// Song tempo for synced effects in the arrangement player and bounce.
+    pub fn set_song_tempo(&mut self, bpm: f64) {
+        if bpm.is_finite() && bpm > 0.0 && bpm != self.arr.bpm {
+            self.arr.bpm = bpm;
+            self.player_stale = true;
         }
     }
 
@@ -1765,7 +1791,7 @@ impl ProjectGlue {
                 if let Err(e) = self.need_looper(playback.is_some()) {
                     return reply(Err(e));
                 }
-                let Some((_, region)) = self.arr.doc.find_region(&region_id) else {
+                let Some((lane, region)) = self.arr.doc.find_region(&region_id) else {
                     return reply(Err(EngineError::Invalid(format!("no region {region_id}"))));
                 };
                 let Some(asset) = self.arr.audio.get(&region.asset_id) else {
@@ -1773,7 +1799,8 @@ impl ProjectGlue {
                 };
                 let samples = render_region(region, asset);
                 let name = if region.name.is_empty() { "From PRODUCE".to_string() } else { region.name.clone() };
-                let after = AfterExport::SendToLooper { samples, track: looper_track, name };
+                let after =
+                    AfterExport::SendToLooper { samples, track: looper_track, name, effects: Box::new(lane.effects) };
                 self.start(OpKind::ArrangementSendToLooper, Stage::Export(Exporter::new(), after));
                 self.set_waiter(make_waiter(reply, |r| match r {
                     OpResult::SentToLooper { looper_track } => {
@@ -1978,6 +2005,8 @@ fn write_reaper(
             muted: false,
             solo: false,
             playing: true,
+            // REAPER gets the raw layers; effects are not translated (PENDING).
+            effects: voiceloop_dsp::ChainSpec::EMPTY,
         })
         .collect();
     let loops = options.loops.max(1);
@@ -1989,6 +2018,8 @@ fn write_reaper(
         depth: options.depth,
         tempo: None,
         project_name: doc.name.clone(),
+        bpm: doc.transport.bpm,
+        stems_wet: false,
     };
     let stems = render::write_stems(&dir.join("Audio"), &doc.name, &job, StemKind::Tracks, progress)?;
     // write_stems skips tracks without layers, in track order.
@@ -2073,9 +2104,10 @@ fn bounce(
     let spec = wav::WavSpec { sample_rate: arr.rate(), channels: 1, format: BitDepth::Int24.into() };
     let mut w = wav::WavWriter::create(path, spec, wav::WriteOptions::default())?;
     let mut at = start;
+    let mut renderer = arr.renderer();
     while at < end {
         let to = (at + BOUNCE_CHUNK).min(end);
-        w.write_interleaved(&arr.render(at, to))?;
+        w.write_interleaved(&arr.render_with(&mut renderer, at, to))?;
         at = to;
         progress((at - start) as f32 / (end - start) as f32);
     }
@@ -2201,6 +2233,11 @@ mod tests {
         let input: Vec<f32> = (0..4_000).map(|i| (i as f32 * 0.01).sin() * 0.3).collect();
         core.process(&input, &mut vec![0.0; 4_000]);
         h.commands.push(LooperCommand::StopRecording { track: 0 }).unwrap();
+        // An effect chain travels with the loops (park → save → open).
+        let mut rev = voiceloop_dsp::EffectSpec::new("rev", voiceloop_dsp::EffectKind::Reverb);
+        rev.set("decaySec", 4.5);
+        let chain = voiceloop_dsp::ChainSpec::with(&[rev]);
+        h.send(LooperCommand::SetTrackEffects { track: 0, chain, attached: false }, None).unwrap();
         core.process(&[0.0; 64], &mut [0.0; 64]);
         let rx = h.parked.take();
         drop(core);
@@ -2233,6 +2270,9 @@ mod tests {
         assert_eq!(period, 4_000.0);
         assert_eq!(audio[0].layers[0].len(), 4_000);
         assert_eq!(audio[0].layers[0][1_000], input[1_000], "samples are the recorded ones");
+        assert_eq!(opened.doc.tracks[0].effects, chain, "the chain is saved");
+        let load = loadable(&opened.doc, &audio, &[], Some(period), 8_000).unwrap();
+        assert_eq!(load.plan.tracks[0].effects, chain, "and goes back into the looper");
 
         // Opening it again hands Practice Lab its (empty) library.
         let mut fresh = ProjectGlue::new();
@@ -2421,14 +2461,24 @@ mod tests {
         // Track 0 is not empty: refused.
         let mut ex = Exporter::new();
         let cap = drive(&mut core, &mut h, |h| ex.poll(h)).unwrap();
-        let after = AfterExport::SendToLooper { samples: samples.clone(), track: Some(0), name: "Riff".into() };
+        let after = AfterExport::SendToLooper {
+            samples: samples.clone(),
+            track: Some(0),
+            name: "Riff".into(),
+            effects: Box::new(voiceloop_dsp::ChainSpec::EMPTY),
+        };
         assert!(matches!(glue.after_export(after, cap, &AudioConfig::default()), Err(e) if e.kind == "doesNotFit"));
 
         // A new track: the next free index, a Free loop of the region's length.
         let mut ex = Exporter::new();
         let cap = drive(&mut core, &mut h, |h| ex.poll(h)).unwrap();
         let new_track = cap.inventory.track_count as u32;
-        let after = AfterExport::SendToLooper { samples: samples.clone(), track: None, name: "Riff".into() };
+        let after = AfterExport::SendToLooper {
+            samples: samples.clone(),
+            track: None,
+            name: "Riff".into(),
+            effects: Box::new(voiceloop_dsp::ChainSpec::EMPTY),
+        };
         let Ok(Next::Continue(Stage::Import(mut im, AfterImport::SentToLooper { track, name }))) =
             glue.after_export(after, cap, &AudioConfig::default())
         else {

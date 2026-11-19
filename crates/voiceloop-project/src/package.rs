@@ -582,7 +582,9 @@ mod tests {
         audio[0].layer_noise = vec![];
         let second = save_package(&dir, &saved, &audio, &AssetAudio::new(), None, &mut |_| {}).unwrap();
         assert!(second.tracks[0].raw_layers.is_empty());
-        assert!(second.tracks[0].layers[1].derived_from.is_none() && second.tracks[0].layers[1].noise_reduction.is_none());
+        assert!(
+            second.tracks[0].layers[1].derived_from.is_none() && second.tracks[0].layers[1].noise_reduction.is_none()
+        );
         save_package(&dir, &second, &audio, &AssetAudio::new(), None, &mut |_| {}).unwrap();
         assert_eq!(files(&dir).len(), 4);
     }
