@@ -249,3 +249,78 @@ mono until the engine goes stereo (PENDING).
 - The PRODUCE inspector does not show per-layer noise state yet.
 - Tested without hardware: the native app build compiles, but Learn room and
   before-take learning need a real mic to check by ear.
+
+## UI status (slice 2, 2026-11-19)
+
+Built (TS/CSS only; works against the simulator today, and against the engine
+once slice 1 lands the same contract):
+
+- **Shared module** `src/effects/types.ts`: `EffectKind`, `Effect`,
+  `EffectChain`, `EffectPreset`, `MAX_EFFECTS_PER_TRACK`, and `EFFECT_DEFS`,
+  the parameter table (ranges, defaults, units, labels, choices, log travel,
+  tempo-sync links) that drives the controls, validation and registry
+  defaults. `normalizeChain` makes any chain valid (older snapshots and
+  projects get an empty chain); `validateChain` is the strict check the
+  simulator applies.
+- **Protocol:** `TrackSnapshot.effects` (filled in by `normalizeLooperState`
+  for older engines), `ArrangementTrack.effects` (`parseArrangement`
+  defaults it; `validateArrangement` checks it), the `setTrackEffects` and
+  `freezeTrack` `LooperCommand`s.
+- **Simulator** (`src/engine/mock.ts`, `src/produce/mockArrangement.ts`):
+  stores chains per track (kept by Clear and audio restarts, copied by
+  Duplicate), rejects malformed chains (`invalid`), clamps values, Freeze
+  makes one base layer and empties the chain (Undo restores the layers and
+  the chain), and Bring in / Send to Play copy chains.
+- **PLAY:** each track card has a Filters section: chain bypass, **Add
+  filter** (menu grouped Tone / Dynamics / Space / Character / Movement),
+  Presets, a chain menu (copy chain, paste, paste the other way, bypass all,
+  remove all), the scope picker (All layers / Choose layers with per-layer
+  chips), and **Freeze** with a confirm press. Each effect is a box with a
+  drag grip, collapse, bypass, an actions menu (right-click, Shift+F10 or ⋯:
+  copy, paste, duplicate, bypass, move up/down, collapse, remove), remove,
+  the Mix knob, and one control per parameter (knobs or sliders; segmented
+  controls or a select for choices; a synced time/rate shows "Synced 1/8").
+  Keys: ⌘C / ⌘V anywhere on a track card copy its chain / paste onto it; on a
+  focused box ⌘C copies that effect, ⌘D duplicates it, ⌥↑ / ⌥↓ move it.
+  Existing live shortcuts are unchanged (they ignore modifier chords).
+- **Sending:** edits show at once from a local draft; structural changes
+  send `setTrackEffects` immediately, control drags at most every
+  `effects.sendIntervalMs` (the last value always goes out). The draft yields
+  to the engine's copy when a snapshot matches it, or after
+  `effects.echoTimeoutMs`.
+- **PRODUCE:** the lane inspector and every mixer strip (compact, boxes
+  collapsed) use the same editor; edits go through the arrangement undo
+  stack and `arrangement_set` (drags coalesce into one undo step).
+- **Presets:** five built in (Telephone, Robot, Dreamy space, Lo-fi, Vocal
+  polish; `src/effects/chain.ts`) plus "Save chain as preset" into
+  `effects.presets`. Applying a preset replaces the chain and keeps the
+  track's scope.
+- **Registry:** `effects.<kind>.<param>` and `effects.<kind>.mix` generated
+  from the table, `effects.maxPerTrack`, `effects.pasteMode`,
+  `effects.boxLayout`, `effects.controlStyle`, `effects.stemsWet`,
+  `effects.presets`, `effects.sendIntervalMs`, `effects.echoTimeoutMs`,
+  `effects.knobDragPixels`; rows in SETTINGS_INDEX.md ("Effects").
+- **Tests:** `src/effects/effects.test.tsx`.
+
+UI deviations (engine agent: please match or flag):
+
+- `RenderOptions.wet?: boolean` (new, optional) carries `effects.stemsWet`
+  on `exportStems`; absent means wet.
+- Mix defaults per kind (delay 0.35, reverb 0.3, chorus/flanger/phaser 0.5,
+  others 1) are UI-side choices; the contract only says `mix` is 0..1.
+- Lanes have no layers, so a lane chain always has `layers: "all"`. Bring in
+  "mixed" copies the whole chain regardless of the track's scope; per-layer
+  bring-in gives only in-scope layers' lanes the chain.
+- `effects.controlStyle` (knob/slider) was added under the
+  build-both-behind-a-setting rule.
+- Collapse state is per session (not saved).
+
+PENDING:
+
+- Engine slice 1: until it lands, a native engine rejects `setTrackEffects`
+  and `freezeTrack` (an error banner), and snapshots show empty chains.
+- Renaming and deleting saved presets (they can only be added today).
+- Keyboard-only reorder inside the mixer strip works, but drag reorder
+  between tracks (drag a box onto another track) is not built.
+- Autofilter "envelope" vs "lfo" does not hide the irrelevant controls yet.
+- Native app launch with the engine side not exercised by this slice.

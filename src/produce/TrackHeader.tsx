@@ -1,5 +1,7 @@
 // Lane header: name, color, mute, solo, volume, pan, reorder, delete.
 
+import type { ChainChangeOptions } from "../effects/EffectChainEditor";
+import type { EffectChain } from "../effects/types";
 import { memo } from "react";
 import { Button } from "../components/ui/controls";
 import { PanSlider, TextField, VolumeSlider } from "./fields";
@@ -13,6 +15,9 @@ export function useLaneEdits() {
   return {
     patch: (track: ArrangementTrack, label: string, patch: Partial<ArrangementTrack>, coalesce?: string) =>
       store.apply(label, (a) => updateTrack(a, track.id, patch), { trackId: track.id }, coalesce),
+    /** Effect chain edit; drags coalesce into one undo step and one debounced arrangement_set. */
+    effects: (track: ArrangementTrack, effects: EffectChain, options?: ChainChangeOptions) =>
+      store.apply(options?.label ?? "Filters", (a) => updateTrack(a, track.id, { effects }), { trackId: track.id }, options?.continuous ? `fx:${track.id}` : undefined),
     move: (track: ArrangementTrack, delta: number) => store.apply("Move lane", (a) => moveTrack(a, track.id, delta)),
     remove: (track: ArrangementTrack) =>
       store.apply("Delete lane", (a) => ({ ...a, tracks: a.tracks.filter((t) => t.id !== track.id) }), {

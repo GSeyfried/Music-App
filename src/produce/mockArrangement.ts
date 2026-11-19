@@ -3,6 +3,7 @@
 // through `ArrangementHost`. No real audio: assets carry synthetic peaks.
 
 import type { EngineError, EngineEvent } from "../engine/protocol";
+import { cloneEffect, emptyChain, layerInScope, type EffectChain } from "../effects/types";
 import { arrangementEnd, newTrack, validateArrangement } from "./model";
 import {
   emptyArrangement,
@@ -21,6 +22,8 @@ export interface MockLooperTrackInfo {
   period: number | null;
   offsets: number[];
   gain: number;
+  /** The track's effect chain (copied onto lanes brought in from PLAY). */
+  effects: EffectChain;
 }
 
 export interface ArrangementHost {
@@ -29,8 +32,8 @@ export interface ArrangementHost {
   looperTracks(): MockLooperTrackInfo[] | null;
   /** The same envelope the mock sends as `layerSummary` bins. */
   layerBins(track: number, layer: number): number[];
-  /** Load audio into a looper track as its base layer; returns the track index (throws EngineError). */
-  loadIntoLooper(track: number | null, frames: number, bins: number[]): number;
+  /** Load audio into a looper track as its base layer, with the lane's chain; returns the track index (throws EngineError). */
+  loadIntoLooper(track: number | null, frames: number, bins: number[], effects: EffectChain): number;
   /** The looper and the arrangement transports are exclusive. */
   stopLooper(): void;
   markUnsaved(): void;
@@ -132,6 +135,11 @@ export class MockArrangement {
     for (const index of args.tracks) {
       const tr = tracks[index];
       if (!tr) throw invalid(`PLAY track ${index + 1} does not exist`);
+      // The track's filters come along; a lane has no layers, so its chain applies to everything.
+      const chainFor = (layer: number | null): EffectChain =>
+        layer === null || layerInScope(tr.effects, layer)
+          ? { enabled: tr.effects.enabled, layers: "all", effects: tr.effects.effects.map(cloneEffect) }
+          : emptyChain();
       if (tr.layers === 0 || !tr.period) throw invalid(`PLAY track ${index + 1} is empty`);
       const period = Math.round(tr.period);
       const region = (asset: AudioAsset, layer: number | null): ArrangementRegion => ({
@@ -152,14 +160,14 @@ export class MockArrangement {
         for (let layer = 0; layer < tr.layers; layer++) {
           const asset = this.addAsset(`Track ${index + 1} · layer ${layer + 1}`, period, this.host.layerBins(index, layer));
           const lane = { ...newTrack(asset.name), id: `lane-m${this.nextRegion++}` };
-          lanes.push({ ...lane, regions: [region(asset, layer)] });
+          lanes.push({ ...lane, regions: [region(asset, layer)], effects: chainFor(layer) });
         }
       } else {
         const layers = Array.from({ length: tr.layers }, (_, l) => this.host.layerBins(index, l));
         const mixed = layers[0].map((_, bin) => Math.min(1, layers.reduce((s, b) => s + (b[bin] ?? 0) * 0.7, 0) * tr.gain));
         const asset = this.addAsset(`Track ${index + 1}`, period, mixed);
         const lane = { ...newTrack(asset.name), id: `lane-m${this.nextRegion++}` };
-        lanes.push({ ...lane, regions: [region(asset, null)] });
+        lanes.push({ ...lane, regions: [region(asset, null)], effects: chainFor(null) });
       }
     }
     this.arrangement = { ...this.arrangement, tracks: lanes };
@@ -169,7 +177,12 @@ export class MockArrangement {
 
   private sendToLooper(regionId: string, looperTrack: number | null): { looperTrack: number } {
     let region: ArrangementRegion | undefined;
-    for (const t of this.arrangement.tracks) region ??= t.regions.find((r) => r.id === regionId);
+    let lane: EffectChain = emptyChain();
+    for (const t of this.arrangement.tracks) {
+      if (region) break;
+      region = t.regions.find((r) => r.id === regionId);
+      if (region) lane = t.effects;
+    }
     if (!region) throw invalid(`no region "${regionId}"`);
     const asset = this.assets.find((a) => a.id === region!.assetId);
     if (!asset) throw invalid("the region's audio is missing");
@@ -180,7 +193,8 @@ export class MockArrangement {
       const src = region!.sourceOffsetFrames + (region!.repeat ? into % loop : into);
       return (asset.peaks[Math.floor((src / asset.frames) * asset.peaks.length)] ?? 0) * region!.gain;
     });
-    return { looperTrack: this.host.loadIntoLooper(looperTrack, region.lengthFrames, bins) };
+    const effects: EffectChain = { enabled: lane.enabled, layers: "all", effects: lane.effects.map(cloneEffect) };
+    return { looperTrack: this.host.loadIntoLooper(looperTrack, region.lengthFrames, bins, effects) };
   }
 
   private play(fromFrame: number): null {

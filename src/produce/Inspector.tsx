@@ -3,6 +3,7 @@
 
 import { useEngineState, useEngineStore } from "../engine/EngineContext";
 import { Button } from "../components/ui/controls";
+import { EffectChainEditor } from "../effects/EffectChainEditor";
 import { formatGain } from "../lib/format";
 import { minRegionFrames, playheadFrame, useProduceCommands } from "./commands";
 import { CheckField, NumberField, PanSlider, TextField, VolumeSlider } from "./fields";
@@ -143,6 +144,9 @@ function LaneInspector({ trackId }: { trackId: string }) {
       <p className="pr-readout">
         {track.regions.length} region{track.regions.length === 1 ? "" : "s"} · {track.kind}
       </p>
+      <div style={{ ["--tc" as string]: laneHex(track.color, index) }}>
+        <EffectChainEditor owner={track.name} chain={track.effects} onChange={(chain, o) => edit.effects(track, chain, o)} />
+      </div>
       <Button variant="danger" size="sm" onPress={() => edit.remove(track)}>
         Delete lane
       </Button>

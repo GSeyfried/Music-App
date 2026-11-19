@@ -2,6 +2,7 @@ import type { EngineClient } from "../engine/client";
 import { continueNativeClose, onNativeCloseRequested, projectDialogs, recoveryDirectory } from "../engine/bridge";
 import { toEngineError, type EngineEvent } from "../engine/protocol";
 import type { EngineStore } from "../engine/store";
+import { getAppSetting } from "../settings/appSettings";
 import type {
   BitDepth,
   OpKind,
@@ -285,7 +286,7 @@ export class ProjectStore {
 
   async exportStems(options: RenderOptions, perLayer: boolean): Promise<void> {
     const dir = await projectDialogs.chooseExportFolder("Folder for exported stems");
-    if (dir) await this.request({ type: "exportStems", dir, options, perLayer });
+    if (dir) await this.request({ type: "exportStems", dir, options: { ...options, wet: getAppSetting("effects.stemsWet") }, perLayer });
   }
 
   async exportReaper(options: RenderOptions): Promise<void> {
