@@ -685,7 +685,8 @@
   bottom: 0;
   width: 0;
   border-left: 2px solid var(--record);
-  z-index: 4;
+  /* Above regions, below the sticky lane headers (3) and ruler (4). */
+  z-index: 2;
   pointer-events: none;
 }
 
