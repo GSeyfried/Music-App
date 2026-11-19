@@ -95,6 +95,7 @@ export const MIC_REASON_LABELS: Record<InputReason, string> = {
   record: "recording",
   monitor: "monitoring",
   calibration: "calibration",
+  noise: "learning room noise",
 };
 
 /** Short text for the mic indicator, e.g. "Mic on · recording, live pitch". */

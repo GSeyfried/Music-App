@@ -17,6 +17,7 @@ import { Button, ConfirmButton, Kbd, usePress } from "./ui/controls";
 import { useUi } from "./UiContext";
 import { ContextMenu } from "./ui/ContextMenu";
 import { addTrackState, trackActions } from "../lib/trackActions";
+import { TrackNoiseMeta } from "../noise/NoiseControls";
 
 const RING_R = 46;
 const RING_C = 2 * Math.PI * RING_R;
@@ -273,6 +274,7 @@ export function TrackCard({
           {t.redoLayers > 0 && ` · ${t.redoLayers} to redo`}
           {silencedBySolo && " · silent (solo)"}
           {t.loop.mode !== "song" && ` · ${trackLoopSummary(t.loop)}`}
+          <TrackNoiseMeta track={track} />
         </div>
         {!main.enabled && main.reason && <div className="track-reason">{main.reason}</div>}
       </div>

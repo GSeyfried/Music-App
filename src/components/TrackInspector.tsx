@@ -7,6 +7,7 @@ import { formatGain, formatSeconds } from "../lib/format";
 import { trackLoopSummary, trackStateLabel } from "../lib/looperControls";
 import { trackActions } from "../lib/trackActions";
 import { useAppSetting } from "../settings/appSettings";
+import { LayerNoiseControls, NoiseBadge } from "../noise/NoiseControls";
 import { Button, Sheet } from "./ui/controls";
 import { useUi } from "./UiContext";
 import "./TrackInspector.css";
@@ -61,9 +62,13 @@ export function TrackInspector() {
                 return (
                   <li className="timing-layer" key={`layer-${layer + 1}`}>
                     <div className="diag-row">
-                      <span>Layer {layer + 1}</span>
+                      <span>
+                        Layer {layer + 1}
+                        <NoiseBadge track={selectedTrack} layer={layer} />
+                      </span>
                       <span>{layer === 0 ? "Base loop" : "Overdub"}</span>
                     </div>
+                    <LayerNoiseControls track={selectedTrack} layer={layer} />
                     {showTiming ? (
                       <div className="timing-readout">
                         <span>{timing ? timingLabel(timing.medianOffsetMs) : "Timing unavailable"}</span>

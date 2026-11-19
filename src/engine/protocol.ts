@@ -20,6 +20,7 @@ import { DEFAULT_TRACK_LOOP, type AudioDevice, type TrackLoop, type TrackLoopMod
 import type { PracticeCommands, PracticeEvent, TransportMap } from "../practice/types";
 import type { ProjectCommands, ProjectEngineEvent } from "../project/types";
 import type { ArrangementCommands, ArrangementEngineEvent } from "../produce/types";
+import type { NoiseCommands, NoiseEngineEvent } from "../noise/types";
 
 // ---- Preview instrument (preview.rs) ------------------------------------------
 
@@ -275,7 +276,17 @@ export interface EngineStatus {
 // ---- Mic only when needed (crates/voiceloop-engine/src/mic.rs) ------------------------
 
 /** Why the microphone is open. record / monitor / calibration are set by the engine only. */
-export type InputReason = "alwaysOn" | "pitch" | "practice" | "game" | "meter" | "record" | "monitor" | "calibration";
+export type InputReason =
+  | "alwaysOn"
+  | "pitch"
+  | "practice"
+  | "game"
+  | "meter"
+  | "record"
+  | "monitor"
+  | "calibration"
+  /** Engine: "Learn room" is recording the room's noise. */
+  | "noise";
 /** off: closed (system mic indicator off); opening: open, input not flowing yet; on: delivering input. */
 export type MicState = "off" | "opening" | "on";
 
@@ -805,7 +816,9 @@ export type EngineEvent =
   // PRODUCE (docs/projects/produce/README.md "Contract"); consumed by src/produce.
   | ArrangementEngineEvent
   // Practice Lab (docs/projects/practice-lab/INTERFACE.md); consumed by src/practice.
-  | PracticeEvent;
+  | PracticeEvent
+  // Noise reduction (docs/projects/effects/README.md "Noise reduction"); src/noise/types.ts.
+  | NoiseEngineEvent;
 
 export type EngineEventType = EngineEvent["type"];
 
@@ -834,6 +847,9 @@ export const EVENT_TYPES: readonly EngineEventType[] = [
   "practiceState",
   "practiceProgress",
   "practiceTake",
+  "noiseProfile",
+  "noiseLearn",
+  "noiseLayers",
 ];
 
 export const ENGINE_EVENT = "engine://event";
@@ -859,7 +875,7 @@ export function parseEngineEvent(raw: unknown): EngineEvent | null {
  * Tauri command table: command name -> argument object and result. Argument
  * keys are camelCase (Tauri maps them to the Rust snake_case parameters).
  */
-export interface EngineCommands extends PracticeCommands, ProjectCommands, ArrangementCommands {
+export interface EngineCommands extends PracticeCommands, ProjectCommands, ArrangementCommands, NoiseCommands {
   list_input_devices: { args: undefined; result: AudioDevice[] };
   start_input: { args: { deviceId: string | null }; result: EngineStatus };
   stop_input: { args: undefined; result: EngineStatus };

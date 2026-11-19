@@ -10,6 +10,7 @@ import { Tuner } from "../components/Tuner";
 import { ChordReadout } from "../components/ChordReadout";
 import { Button } from "../components/ui/controls";
 import { setAppSetting, useAppSetting } from "../settings/appSettings";
+import { LearnRoomControls } from "../noise/NoiseControls";
 
 export function Studio() {
   const capturing = useEngineState((s) => s.status.capturing);
@@ -25,6 +26,7 @@ export function Studio() {
       {!capturing && <InputOffBar />}
       <TransportBar />
       <div className="studio-view-row">
+        <LearnRoomControls />
         <Button
           variant="toggle"
           size="sm"
