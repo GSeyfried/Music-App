@@ -1,7 +1,7 @@
 // One looper track: a large circular pad (record / overdub / stop) wrapped in
 // a loop-progress ring, plus play, mute, solo, level, undo, redo, clear.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useAppSetting } from "../settings/appSettings";
 import { framesPerBeat, loopTicks } from "../lib/loopTicks";
 import { PLAYHEAD_SCALE, PLAYHEAD_TRAIL_BINS, binAt, layerBands, radialAreaPath } from "../lib/layerRings";
@@ -17,6 +17,7 @@ import { Button, ConfirmButton, Kbd, usePress } from "./ui/controls";
 import { useUi } from "./UiContext";
 import { ContextMenu } from "./ui/ContextMenu";
 import { addTrackState, trackActions } from "../lib/trackActions";
+import { PlayTrackEffects } from "../effects/PlayTrackEffects";
 
 const RING_R = 46;
 const RING_C = 2 * Math.PI * RING_R;
@@ -171,6 +172,8 @@ export function TrackCard({
   onDetails?: (track: number) => void;
 }) {
   const overflow = useRef<HTMLButtonElement>(null);
+  const fxKeys = useRef<((e: ReactKeyboardEvent) => boolean) | null>(null);
+  const fxLayout = useAppSetting("effects.boxLayout");
   const openMenuAt = (el: Element | null) => {
     if (!onMenu || !el) return;
     const r = el.getBoundingClientRect();
@@ -194,7 +197,7 @@ export function TrackCard({
 
   return (
     <section
-      className={selected ? "track-card is-selected" : "track-card"}
+      className={["track-card", selected ? "is-selected" : "", fxLayout === "side" ? "fx-side" : ""].filter(Boolean).join(" ")}
       style={{ ["--tc" as string]: `var(--track-${(track % 8) + 1})` }}
       data-state={t.state}
       data-muted={t.muted || silencedBySolo}
@@ -217,9 +220,13 @@ export function TrackCard({
           e.preventDefault();
           e.stopPropagation();
           openMenuAt(e.target as Element);
+          return;
         }
+        // ⌘C / ⌘V anywhere on the card copy the track's filters or paste onto it.
+        fxKeys.current?.(e);
       }}
     >
+      <div className="track-main">
       <header className="track-head">
         <button
           type="button"
@@ -341,6 +348,8 @@ export function TrackCard({
       </div>
 
       <GainSlider track={track} gain={t.gain} onChange={(gain) => sendLooper({ type: "setGain", track, gain })} />
+      </div>
+      <PlayTrackEffects track={track} keysRef={fxKeys} />
     </section>
   );
 }

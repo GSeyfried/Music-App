@@ -17,6 +17,8 @@ export interface MenuItem {
   reason?: string;
   /** Start a new visual group before this item. */
   separatorBefore?: boolean;
+  /** A group heading shown above this item (not focusable). */
+  heading?: string;
 }
 
 interface Props {
@@ -108,6 +110,11 @@ export function ContextMenu({ label, x, y, items, onSelect, onClose }: Props) {
       {items.map((it, i) => (
         <div key={it.id} role="none">
           {it.separatorBefore && <div className="menu-sep" role="separator" />}
+          {it.heading && (
+            <div className="menu-heading" aria-hidden="true">
+              {it.heading}
+            </div>
+          )}
           <button
             type="button"
             role={it.checked === undefined ? "menuitem" : "menuitemcheckbox"}

@@ -4,6 +4,7 @@
 
 import type { LooperState } from "../engine/protocol";
 import { DEFAULT_TRACK_LOOP } from "../models/domain";
+import { emptyChain } from "../effects/types";
 
 /** Verbatim: engine.rs `events_serialise_with_type_tag`. */
 export const ERROR_EVENT_JSON = `{"type":"error","payload":{"kind":"noInputDevice"}}`;
@@ -76,6 +77,8 @@ export const RUST_FIELDS = {
     "loop_period",
     "loop_phase",
     "busy",
+    // Effects (docs/projects/effects/README.md "Contract").
+    "effects",
   ],
   /** transport.rs `TrackLoop` (PER_TRACK_LOOPS.md "Contract"). */
   TrackLoop: ["mode", "bars", "beats", "ratio", "count_in_bars", "overdub_start", "loop_fit"],
@@ -135,6 +138,7 @@ export const LOOPER_STATE: LooperState = {
       loopPeriod: 96_000,
       loopPhase: 24_000,
       busy: false,
+      effects: emptyChain(),
     },
     {
       state: "empty",
@@ -150,6 +154,7 @@ export const LOOPER_STATE: LooperState = {
       loopPeriod: 96_000,
       loopPhase: 24_000,
       busy: false,
+      effects: emptyChain(),
     },
   ],
   maxTracks: 16,
@@ -182,7 +187,7 @@ export const OLD_LOOPER_EVENT_JSON = JSON.stringify({
   type: "looper",
   payload: {
     ...LOOPER_STATE,
-    tracks: LOOPER_STATE.tracks.map(({ loop: _l, loopPeriod: _p, loopPhase: _ph, busy: _b, ...rest }) => rest),
+    tracks: LOOPER_STATE.tracks.map(({ loop: _l, loopPeriod: _p, loopPhase: _ph, busy: _b, effects: _fx, ...rest }) => rest),
   },
 });
 

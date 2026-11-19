@@ -1,6 +1,7 @@
 // Mixer: a channel strip per lane plus the master strip.
 
 import { Button } from "../components/ui/controls";
+import { EffectChainEditor } from "../effects/EffectChainEditor";
 import { formatGain } from "../lib/format";
 import { useProduceCommands } from "./commands";
 import { PanSlider, panText, VolumeSlider } from "./fields";
@@ -41,6 +42,7 @@ export function Mixer() {
                 S
               </Button>
             </div>
+            <EffectChainEditor compact owner={t.name} chain={t.effects} onChange={(chain, o) => edit.effects(t, chain, o)} />
           </div>
         ))}
         <div className="pr-strip is-master" role="group" aria-label="Master">

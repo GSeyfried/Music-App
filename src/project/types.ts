@@ -7,6 +7,8 @@ export interface RenderOptions {
   depth?: BitDepth;
   loops?: number;
   stereo?: boolean;
+  /** Stems only: render each track with its effect chain (true, the default) or dry (effects README; setting effects.stemsWet). */
+  wet?: boolean;
 }
 
 export interface MidiExportOptions {

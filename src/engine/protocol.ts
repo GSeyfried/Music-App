@@ -20,6 +20,7 @@ import { DEFAULT_TRACK_LOOP, type AudioDevice, type TrackLoop, type TrackLoopMod
 import type { PracticeCommands, PracticeEvent, TransportMap } from "../practice/types";
 import type { ProjectCommands, ProjectEngineEvent } from "../project/types";
 import type { ArrangementCommands, ArrangementEngineEvent } from "../produce/types";
+import { normalizeChain, type EffectChain } from "../effects/types";
 
 // ---- Preview instrument (preview.rs) ------------------------------------------
 
@@ -433,11 +434,13 @@ export interface TrackSnapshot {
   loopPhase: number;
   /** True while the engine is still filling the track (DuplicateTrack copy). */
   busy: boolean;
+  /** The track's effect chain (docs/projects/effects/README.md); older engines: an empty chain. */
+  effects: EffectChain;
 }
 
-/** TrackSnapshot as it may arrive from an engine older than per-track loops. */
-export type WireTrackSnapshot = Omit<TrackSnapshot, "loop" | "loopPeriod" | "loopPhase" | "busy"> &
-  Partial<Pick<TrackSnapshot, "loop" | "loopPeriod" | "loopPhase" | "busy">>;
+/** TrackSnapshot as it may arrive from an engine older than per-track loops or effects. */
+export type WireTrackSnapshot = Omit<TrackSnapshot, "loop" | "loopPeriod" | "loopPhase" | "busy" | "effects"> &
+  Partial<Pick<TrackSnapshot, "loop" | "loopPeriod" | "loopPhase" | "busy" | "effects">>;
 
 export interface MusicalPosition {
   bar: number;
@@ -502,7 +505,8 @@ export function normalizeLooperState(s: WireLooperState): LooperState {
   const loopKeys = Object.keys(DEFAULT_TRACK_LOOP) as (keyof TrackLoop)[];
   const fullLoop = (l: TrackLoop | undefined) => !!l && loopKeys.every((k) => l[k] !== undefined);
   const complete = s.tracks.every(
-    (t) => fullLoop(t.loop) && t.loopPeriod !== undefined && t.loopPhase !== undefined && t.busy !== undefined,
+    (t) =>
+      fullLoop(t.loop) && t.loopPeriod !== undefined && t.loopPhase !== undefined && t.busy !== undefined && t.effects !== undefined,
   );
   if (complete) return s as LooperState;
   return {
@@ -513,6 +517,7 @@ export function normalizeLooperState(s: WireLooperState): LooperState {
       loopPeriod: t.loopPeriod === undefined ? s.loopPeriodFrames : t.loopPeriod,
       loopPhase: t.loopPhase ?? s.loopPhase,
       busy: t.busy ?? false,
+      effects: t.effects === undefined ? normalizeChain(undefined) : t.effects,
     })),
   };
 }
@@ -615,6 +620,13 @@ export type LooperCommand =
   | { type: "setTrackLoop"; track: number; settings: TrackLoop }
   /** Add a copy right after `track` (same loop, gain, mute, offsets, layers); it reports `busy` while copying. */
   | { type: "duplicateTrack"; track: number }
+  /**
+   * Replace the track's effect chain (effects README "Contract"). Applies at
+   * once: parameter-only changes are smoothed, structural ones crossfade.
+   */
+  | { type: "setTrackEffects"; track: number; chain: EffectChain }
+  /** Render the track through its chain into a new base layer and clear the chain (old layers stay in undo history). */
+  | { type: "freezeTrack"; track: number }
   | { type: "setInputLatency"; frames: number };
 
 // ---- Analysis -------------------------------------------------------------------
