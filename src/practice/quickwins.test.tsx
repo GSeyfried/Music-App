@@ -132,14 +132,14 @@ describe("stop Studio when entering Practice", () => {
 
   it("sends Stop when switching to Practice Lab", async () => {
     const mock = await playingApp();
-    fireEvent.click(screen.getByRole("tab", { name: "Practice Lab" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Assess" }));
     await waitFor(() => expect(mock.looperState().run).toBe("stopped"));
   });
 
   it("leaves Studio playing when the setting is off", async () => {
     setAppSetting("practice.stopStudioOnEnter", false);
     const mock = await playingApp();
-    fireEvent.click(screen.getByRole("tab", { name: "Practice Lab" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Assess" }));
     act(() => mock.tick(0.1));
     expect(mock.looperState().run).not.toBe("stopped");
   });
@@ -149,7 +149,7 @@ describe("Practice Lab UI: difficulty and scales", () => {
   it("shows Easy/Medium/Hard, applies a mode, and adds a scale exercise", async () => {
     const mock = new MockEngine({ realtime: false });
     render(<App client={createEngine(mock)} />);
-    fireEvent.click(screen.getByRole("tab", { name: "Practice Lab" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Assess" }));
     const group = await screen.findByRole("radiogroup", { name: "Difficulty" });
     expect(within(group).queryByRole("radio", { name: "Custom" })).toBeNull();
     await waitFor(() => expect(within(group).getByRole("radio", { name: "Medium" }).getAttribute("aria-checked")).toBe("true"));
@@ -175,7 +175,7 @@ describe("Practice Lab UI: clef mode", () => {
     setAppSetting("notation.view", "staff");
     const mock = new MockEngine({ realtime: false });
     render(<App client={createEngine(mock)} />);
-    fireEvent.click(screen.getByRole("tab", { name: "Practice Lab" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Assess" }));
     const card = await screen.findByRole("region", { name: "Scale exercise" });
     fireEvent.click(within(card).getByRole("button", { name: /^Add C major scale/ }));
     const ref = await screen.findByRole("region", { name: "Reference C major scale" });

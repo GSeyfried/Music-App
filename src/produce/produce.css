@@ -1,0 +1,749 @@
+/* PRODUCE workspace. Uses the app tokens from src/styles.css, so light and
+   dark themes both work. Desktop-dense: lane-header controls are compact on
+   fine pointers and grow to --hit on touch (pointer: coarse). */
+
+.produce {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  min-height: 0;
+}
+
+/* ---- Toolbar ------------------------------------------------------------------ */
+
+.pr-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2) var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.pr-group {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.pr-group[role="radiogroup"] {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  gap: 0;
+}
+
+.pr-group[role="radiogroup"] .seg {
+  min-height: 34px;
+}
+
+.pr-end {
+  margin-left: auto;
+}
+
+.pr-position {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 8.5em;
+  padding: 2px var(--s-2);
+  background: var(--viz-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.pr-position-bars {
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.pr-position-time,
+.pr-tempo,
+.pr-zoom {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.pr-tempo {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.pr-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+
+.pr-toolbar .pr-field {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.pr-toolbar select {
+  min-height: 34px;
+}
+
+.pr-field input[type="text"],
+.pr-field input[type="number"] {
+  min-height: 34px;
+  padding: 0 var(--s-2);
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font: inherit;
+  font-size: var(--fs-sm);
+}
+
+.pr-unit {
+  color: var(--text-faint);
+}
+
+.pr-check {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 34px;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.pr-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+/* ---- Layout ---------------------------------------------------------------------- */
+
+.pr-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s-3);
+  min-height: 420px;
+}
+
+.pr-main[data-browser] {
+  grid-template-columns: 260px minmax(0, 1fr);
+}
+
+.pr-main[data-inspector] {
+  grid-template-columns: minmax(0, 1fr) 290px;
+}
+
+.pr-main[data-browser][data-inspector] {
+  grid-template-columns: 260px minmax(0, 1fr) 290px;
+}
+
+@media (max-width: 1100px) {
+  .pr-main[data-browser],
+  .pr-main[data-inspector],
+  .pr-main[data-browser][data-inspector] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.pr-browser,
+.pr-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-3);
+  max-height: 72vh;
+  overflow: auto;
+}
+
+.pr-inspector-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.pr-inspector-section h3 {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.pr-inspector-section h4 {
+  margin: var(--s-2) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.pr-readout {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.pr-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px var(--s-2);
+  margin: 0;
+  font-size: var(--fs-xs);
+}
+
+.pr-facts dt {
+  color: var(--text-dim);
+}
+
+.pr-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.pr-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+}
+
+.pr-browser-list,
+.pr-marker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.pr-browser-list li,
+.pr-marker-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: 2px var(--s-2);
+  background: var(--surface-2);
+  border-radius: var(--r-sm);
+}
+
+.pr-browser-list li[draggable="true"] {
+  cursor: grab;
+}
+
+.pr-browser-list li > span,
+.pr-check > span {
+  display: flex;
+  flex-direction: column;
+}
+
+.pr-sub {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+
+.pr-marker-list input {
+  flex: 1;
+  min-width: 0;
+  min-height: 30px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+}
+
+/* ---- Timeline -------------------------------------------------------------------- */
+
+.pr-timeline {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  min-width: 0;
+}
+
+.pr-scroller {
+  position: relative;
+  flex: 1;
+  overflow: auto;
+  max-height: 72vh;
+  background: var(--viz-bg);
+}
+
+.pr-scroller[data-tool="split"] .pr-region {
+  cursor: crosshair;
+}
+
+.pr-scroller[data-tool="trim"] .pr-region {
+  cursor: ew-resize;
+}
+
+.pr-canvas {
+  position: relative;
+  min-height: 100%;
+}
+
+.pr-ruler-row {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.pr-corner {
+  position: sticky;
+  left: 0;
+  z-index: 5;
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--s-2);
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+}
+
+.pr-ruler {
+  position: relative;
+  flex: none;
+  user-select: none;
+}
+
+.pr-loop-strip {
+  position: relative;
+  background: var(--surface-2);
+  cursor: crosshair;
+}
+
+.pr-loop-band {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  background: color-mix(in srgb, var(--caution) 55%, transparent);
+  border-radius: 3px;
+}
+
+.pr-loop-handle {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 8px;
+  background: var(--caution);
+  cursor: ew-resize;
+}
+
+.pr-loop-handle.is-start {
+  left: -4px;
+  border-radius: 3px 0 0 3px;
+}
+
+.pr-loop-handle.is-end {
+  right: -4px;
+  border-radius: 0 3px 3px 0;
+}
+
+.pr-loop-shade {
+  position: absolute;
+  top: 44px;
+  bottom: 0;
+  background: color-mix(in srgb, var(--caution) 7%, transparent);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.pr-ticks {
+  display: block;
+  cursor: text;
+}
+
+.pr-tick-bar {
+  stroke: var(--viz-grid-strong);
+  stroke-width: 1;
+}
+
+.pr-tick-beat {
+  stroke: var(--viz-grid-strong);
+  stroke-width: 1;
+  opacity: 0.6;
+}
+
+.pr-tick-label {
+  fill: var(--text-dim);
+  font: 600 10px var(--font-mono);
+}
+
+.pr-marker,
+.pr-marker-rename {
+  position: absolute;
+  bottom: 2px;
+  max-width: 140px;
+  height: 18px;
+  padding: 0 6px;
+  border: 0;
+  border-left: 2px solid var(--info);
+  border-radius: 0 4px 4px 0;
+  background: color-mix(in srgb, var(--info) 22%, var(--surface));
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.pr-marker:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
+.pr-row {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+
+.pr-header {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  flex: none;
+  width: var(--pr-header-width, 232px);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding: 4px var(--s-2);
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  border-left: 4px solid var(--lane-color);
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.pr-header[data-selected] {
+  background: var(--surface-2);
+}
+
+.pr-header-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.pr-header .btn,
+.pr-strip .btn {
+  min-height: 26px;
+  min-width: 26px;
+  padding: 0 6px;
+}
+
+@media (pointer: coarse) {
+  .pr-header .btn,
+  .pr-strip .btn {
+    min-height: var(--hit);
+    min-width: var(--hit);
+  }
+}
+
+.pr-color {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+}
+
+.pr-lane-name {
+  flex: 1;
+  min-width: 0;
+  min-height: 26px;
+  padding: 0 4px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  font: 600 var(--fs-sm) var(--font-ui);
+}
+
+.pr-lane-name:hover,
+.pr-lane-name:focus {
+  border-color: var(--border);
+  background: var(--surface-2);
+}
+
+.pr-ms[aria-pressed="true"] {
+  background: var(--caution);
+  color: var(--accent-ink);
+}
+
+.pr-fader,
+.pr-pan {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.pr-fader.is-vertical {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  flex: none;
+  height: 120px;
+  width: 26px;
+}
+
+.pr-lane {
+  position: relative;
+  flex: none;
+  background-image: linear-gradient(to right, var(--viz-grid) 1px, transparent 1px);
+}
+
+.pr-lane[data-muted] .pr-region {
+  opacity: 0.45;
+}
+
+.pr-empty {
+  padding: var(--s-5);
+  color: var(--text-dim);
+}
+
+/* ---- Regions --------------------------------------------------------------------- */
+
+.pr-region {
+  --region-color: var(--accent);
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--region-color) 22%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--region-color) 70%, var(--surface));
+  border-radius: 6px;
+  color: var(--text);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  box-sizing: border-box;
+}
+
+.pr-region[aria-selected="true"] {
+  background: color-mix(in srgb, var(--region-color) 40%, var(--surface));
+  border-color: var(--text);
+  box-shadow: 0 0 0 1px var(--text);
+}
+
+.pr-region:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
+.pr-region[data-muted] {
+  opacity: 0.4;
+}
+
+.pr-region-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 16px;
+  padding: 0 6px;
+  background: color-mix(in srgb, var(--region-color) 55%, var(--surface));
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.pr-region-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pr-region-flag {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--caution);
+  color: var(--accent-ink);
+}
+
+.pr-region-rename {
+  width: 100%;
+  height: 15px;
+  font-size: 10px;
+  border: 0;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.pr-region-body {
+  position: relative;
+  flex: 1;
+}
+
+.pr-wave {
+  position: absolute;
+  inset: 0;
+}
+
+.pr-wave-fill {
+  fill: color-mix(in srgb, var(--region-color) 80%, var(--text));
+  opacity: 0.75;
+}
+
+.pr-wave-line {
+  fill: none;
+  stroke: color-mix(in srgb, var(--region-color) 80%, var(--text));
+  stroke-width: 1;
+}
+
+.pr-cycle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed color-mix(in srgb, var(--text) 45%, transparent);
+  pointer-events: none;
+}
+
+.pr-fades {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.pr-fades polygon {
+  fill: color-mix(in srgb, var(--bg) 55%, transparent);
+}
+
+.pr-handle {
+  position: absolute;
+  z-index: 1;
+}
+
+.pr-handle-trim-start,
+.pr-handle-trim-end {
+  top: 16px;
+  bottom: 0;
+  cursor: ew-resize;
+}
+
+.pr-handle-trim-start {
+  left: 0;
+}
+
+.pr-handle-trim-end {
+  right: 0;
+}
+
+.pr-handle-trim-start:hover,
+.pr-handle-trim-end:hover {
+  background: color-mix(in srgb, var(--text) 25%, transparent);
+}
+
+.pr-handle-fade-in,
+.pr-handle-fade-out {
+  top: 16px;
+  width: 9px;
+  height: 9px;
+  margin: 0 -4px;
+  border-radius: 50%;
+  background: var(--text);
+  opacity: 0;
+  cursor: col-resize;
+}
+
+.pr-region:hover .pr-handle-fade-in,
+.pr-region:hover .pr-handle-fade-out,
+.pr-region[aria-selected="true"] .pr-handle-fade-in,
+.pr-region[aria-selected="true"] .pr-handle-fade-out {
+  opacity: 0.85;
+}
+
+.pr-handle-repeat {
+  right: 0;
+  bottom: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 6px 0 0 0;
+  background: color-mix(in srgb, var(--region-color) 80%, var(--text));
+  cursor: e-resize;
+}
+
+.pr-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 2px solid var(--record);
+  /* Above regions, below the sticky lane headers (3) and ruler (4). */
+  z-index: 2;
+  pointer-events: none;
+}
+
+/* ---- Mixer ----------------------------------------------------------------------- */
+
+.pr-mixer {
+  padding: var(--s-3);
+  overflow-x: auto;
+}
+
+.pr-strips {
+  display: flex;
+  gap: var(--s-2);
+}
+
+.pr-strip {
+  flex: none;
+  width: 96px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: var(--s-2);
+  background: var(--surface-2);
+  border-top: 4px solid var(--lane-color, var(--border-strong));
+  border-radius: var(--r-sm);
+}
+
+.pr-strip[data-selected] {
+  outline: 1px solid var(--text-dim);
+}
+
+.pr-strip.is-master {
+  width: 150px;
+  --lane-color: var(--text);
+}
+
+.pr-strip-name {
+  max-width: 100%;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pr-strip-value {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.pr-strip-ms {
+  display: flex;
+  gap: 4px;
+}
+
+.pr-strip .pr-pan {
+  width: 100%;
+}

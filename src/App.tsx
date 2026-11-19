@@ -19,14 +19,20 @@ import { shortcutKeys } from "./lib/shortcuts";
 import { GamesWorkspace } from "./games/GamesWorkspace";
 import { PracticeLab } from "./workspaces/PracticeLab";
 import { Studio } from "./workspaces/Studio";
+import { Produce } from "./produce/Produce";
 import { ProjectProvider, useProject } from "./project/ProjectContext";
 import { ProjectPanel } from "./project/ProjectPanel";
 
-type WorkspaceId = "studio" | "practice" | "games";
+// Internal ids stay as they were (saved layouts and settings keep working);
+// only the labels changed (docs/projects/produce/README.md "Tabs"). The tab
+// text is drawn in capitals by CSS (.tab), so the accessible names stay
+// readable words ("Play", not "P-L-A-Y").
+type WorkspaceId = "studio" | "produce" | "practice" | "games";
 
 const WORKSPACES: { id: WorkspaceId; label: string }[] = [
-  { id: "studio", label: "Studio" },
-  { id: "practice", label: "Practice Lab" },
+  { id: "studio", label: "Play" },
+  { id: "produce", label: "Produce" },
+  { id: "practice", label: "Assess" },
   { id: "games", label: "Games" },
 ];
 
@@ -55,7 +61,8 @@ function Shell() {
   const project = useProject((state) => state.project);
   const projectName = project?.name || "Untitled";
   const projectLabel = project?.unsavedChanges ? `${projectName} · Unsaved` : projectName;
-  useLiveShortcuts();
+  // PRODUCE has its own keyboard map (useProduceShortcuts in src/produce/Produce.tsx).
+  useLiveShortcuts(workspace === "produce" ? "app" : "live");
   useThemeEffects();
   useAnalysisWhenNeeded(workspace === "practice" || workspace === "games");
   useMicWhenNeeded(workspace);
@@ -116,7 +123,15 @@ function Shell() {
       <MicPermissionBanner />
       <Alerts />
       <main>
-        {workspace === "studio" ? <Studio /> : workspace === "practice" ? <PracticeLab /> : <GamesWorkspace />}
+        {workspace === "studio" ? (
+          <Studio />
+        ) : workspace === "produce" ? (
+          <Produce onOpenPlay={() => selectWorkspace("studio")} />
+        ) : workspace === "practice" ? (
+          <PracticeLab />
+        ) : (
+          <GamesWorkspace />
+        )}
       </main>
       <Toasts />
       <SettingsSheet />
