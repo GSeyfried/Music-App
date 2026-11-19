@@ -697,7 +697,7 @@ enum AfterExport {
     Stems { dir: PathBuf, options: RenderOptions, per_layer: bool },
     AddLayer { track: u8, samples: Vec<f32>, fit: FitMode, resampled_from: Option<u32> },
     Capture { tracks: Vec<u32>, per_layer: bool, repeats: u32, start: u64 },
-    SendToLooper { samples: Vec<f32>, track: Option<u32>, name: String, effects: voiceloop_dsp::ChainSpec },
+    SendToLooper { samples: Vec<f32>, track: Option<u32>, name: String, effects: Box<voiceloop_dsp::ChainSpec> },
 }
 
 enum AfterWork {
@@ -1764,7 +1764,8 @@ impl ProjectGlue {
                 };
                 let samples = render_region(region, asset);
                 let name = if region.name.is_empty() { "From PRODUCE".to_string() } else { region.name.clone() };
-                let after = AfterExport::SendToLooper { samples, track: looper_track, name, effects: lane.effects };
+                let after =
+                    AfterExport::SendToLooper { samples, track: looper_track, name, effects: Box::new(lane.effects) };
                 self.start(OpKind::ArrangementSendToLooper, Stage::Export(Exporter::new(), after));
                 self.set_waiter(make_waiter(reply, |r| match r {
                     OpResult::SentToLooper { looper_track } => {
@@ -2195,6 +2196,11 @@ mod tests {
         let input: Vec<f32> = (0..4_000).map(|i| (i as f32 * 0.01).sin() * 0.3).collect();
         core.process(&input, &mut vec![0.0; 4_000]);
         h.commands.push(LooperCommand::StopRecording { track: 0 }).unwrap();
+        // An effect chain travels with the loops (park → save → open).
+        let mut rev = voiceloop_dsp::EffectSpec::new("rev", voiceloop_dsp::EffectKind::Reverb);
+        rev.set("decaySec", 4.5);
+        let chain = voiceloop_dsp::ChainSpec::with(&[rev]);
+        h.send(LooperCommand::SetTrackEffects { track: 0, chain, attached: false }, None).unwrap();
         core.process(&[0.0; 64], &mut [0.0; 64]);
         let rx = h.parked.take();
         drop(core);
@@ -2227,6 +2233,9 @@ mod tests {
         assert_eq!(period, 4_000.0);
         assert_eq!(audio[0].layers[0].len(), 4_000);
         assert_eq!(audio[0].layers[0][1_000], input[1_000], "samples are the recorded ones");
+        assert_eq!(opened.doc.tracks[0].effects, chain, "the chain is saved");
+        let load = loadable(&opened.doc, &audio, &[], Some(period), 8_000).unwrap();
+        assert_eq!(load.plan.tracks[0].effects, chain, "and goes back into the looper");
 
         // Opening it again hands Practice Lab its (empty) library.
         let mut fresh = ProjectGlue::new();
@@ -2419,7 +2428,7 @@ mod tests {
             samples: samples.clone(),
             track: Some(0),
             name: "Riff".into(),
-            effects: voiceloop_dsp::ChainSpec::EMPTY,
+            effects: Box::new(voiceloop_dsp::ChainSpec::EMPTY),
         };
         assert!(matches!(glue.after_export(after, cap, &AudioConfig::default()), Err(e) if e.kind == "doesNotFit"));
 
@@ -2431,7 +2440,7 @@ mod tests {
             samples: samples.clone(),
             track: None,
             name: "Riff".into(),
-            effects: voiceloop_dsp::ChainSpec::EMPTY,
+            effects: Box::new(voiceloop_dsp::ChainSpec::EMPTY),
         };
         let Ok(Next::Continue(Stage::Import(mut im, AfterImport::SentToLooper { track, name }))) =
             glue.after_export(after, cap, &AudioConfig::default())

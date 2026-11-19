@@ -2242,3 +2242,5 @@ fn captured_lanes_render_exactly_the_looper_mix() {
         assert!(heard.iter().any(|&v| v.abs() > 0.1));
     }
 }
+
+mod effects;

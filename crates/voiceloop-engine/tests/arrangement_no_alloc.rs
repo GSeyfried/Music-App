@@ -71,6 +71,11 @@ fn process_never_allocates_or_frees() {
             extra: Default::default(),
         });
     }
+    // Lane effects: built with each schedule; an update moves their state across.
+    lane.effects = voiceloop_dsp::ChainSpec::with(
+        &[voiceloop_dsp::EffectKind::Reverb, voiceloop_dsp::EffectKind::Delay, voiceloop_dsp::EffectKind::Compressor]
+            .map(|k| voiceloop_dsp::EffectSpec::new(k.name(), k)),
+    );
     let mut doc = st.doc.clone();
     doc.tracks.push(lane);
     doc.loop_range = Some(LoopRangeDoc { start_frame: 5_000, end_frame: 15_000 });
@@ -86,6 +91,10 @@ fn process_never_allocates_or_frees() {
         }
     });
     assert_eq!(n, 0, "allocations while playing");
+    control.update(st.schedule().unwrap()).unwrap();
+    let mut edited = st.doc.clone();
+    edited.tracks[0].effects.effects_mut()[0].set("decaySec", 4.0);
+    st.set(edited).unwrap();
     control.update(st.schedule().unwrap()).unwrap();
     control.play(st.schedule().unwrap(), 3_000).unwrap();
     let n = watched(|| {

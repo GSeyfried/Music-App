@@ -38,7 +38,7 @@ pub use click::Accent;
 pub use pool::{LayerRecycler, StorageSink};
 pub use processor::{
     soft_limit, LayerSummary, LayerTiming, LooperCommand, LooperCore, LooperHandles, LooperNotice, LooperSnapshot,
-    RejectReason, RunState, TimingHit, TrackSnapshot, TrackState, LIMIT_KNEE, MAX_TRANSPORT_FRAME,
+    QueueFull, RejectReason, RunState, TimingHit, TrackSnapshot, TrackState, LIMIT_KNEE, MAX_TRANSPORT_FRAME,
 };
 
 /// Hard upper bound on tracks (snapshot and plan arrays are sized by this).

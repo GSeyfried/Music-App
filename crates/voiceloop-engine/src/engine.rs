@@ -189,7 +189,7 @@ enum Command {
     StartInput(Option<String>, Reply<EngineStatus>),
     StopInput(Reply<EngineStatus>),
     Status(Reply<EngineStatus>),
-    Looper(LooperCommand, Reply<()>),
+    Looper(Box<LooperCommand>, Reply<()>),
     SetLooperConfig(LooperConfig, Reply<()>),
     PatchLooperConfig(serde_json::Value, Reply<LooperConfig>),
     SetAnalysisConfig(AnalysisConfig, Reply<()>),
@@ -275,7 +275,7 @@ impl Engine {
     /// Send a looper command. `SetTransport` is accepted while audio is stopped
     /// (it applies when audio starts); other commands need running audio.
     pub fn looper(&self, command: LooperCommand) -> Result<(), EngineError> {
-        self.request(|r| Command::Looper(command, r))
+        self.request(|r| Command::Looper(Box::new(command), r))
     }
 
     /// Resource limits for the looper; applied the next time audio starts.
@@ -598,7 +598,7 @@ impl ControlLoop {
                 let _ = reply.send(Ok(self.status()));
             }
             Command::Looper(command, reply) => {
-                let _ = reply.send(self.send_looper(command));
+                let _ = reply.send(self.send_looper(*command));
             }
             Command::SetLooperConfig(config, reply) => {
                 let result = config.max_loop_frames(48_000).map(|_| {

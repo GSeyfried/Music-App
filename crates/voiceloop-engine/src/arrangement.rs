@@ -730,6 +730,50 @@ mod tests {
     }
 
     #[test]
+    fn lane_effects_play_like_the_bounce_and_survive_param_updates() {
+        use voiceloop_dsp::{ChainSpec, EffectKind, EffectSpec};
+        let (mut st, id) = state();
+        st.bpm = 100.0;
+        st.doc.tracks[0].regions.push(region("r1", &id, 100, 900));
+        st.doc.tracks[0].gain = 0.8;
+        let mut d = EffectSpec::new("d", EffectKind::Delay);
+        d.set_choice("sync", "1/16").set("feedback", 0.6);
+        st.doc.tracks[0].effects = ChainSpec::with(&[d, EffectSpec::new("r", EffectKind::Reverb)]);
+        st.set(st.doc.clone()).unwrap();
+        let expected = st.render(0, 6_000);
+        // A bounce in chunks equals one render.
+        let mut r = st.renderer();
+        let chunked: Vec<f32> =
+            [0u64, 7, 1_000, 1_001, 4_500, 6_000].windows(2).flat_map(|w| st.render_with(&mut r, w[0], w[1])).collect();
+        assert_eq!(chunked, expected);
+        // Playback equals the bounce (the tail rings past the region end).
+        let (mut c, mut p) = arrangement_pair();
+        st.doc.loop_range = None;
+        c.play(st.schedule().unwrap(), 0).unwrap();
+        let mut out = Vec::new();
+        for n in [5usize, 64, 333, 1, 512, 1_000, 4_085] {
+            out.extend(run(&mut p, n, n));
+        }
+        for f in D..1_000 {
+            assert!((out[f] - expected[f]).abs() < 1e-6, "frame {f}: {} vs {}", out[f], expected[f]);
+        }
+        assert!(expected[1_500..].iter().any(|v| v.abs() > 1e-4), "an effect tail after the region");
+        // An update that only changes params keeps the effect state (no restart).
+        let (mut c, mut p) = arrangement_pair();
+        st.doc.tracks[0].regions[0].length_frames = 3_000; // playback ends with the last region
+        st.doc.tracks[0].regions[0].start_frame = 0;
+        st.doc.tracks[0].regions[0].repeat = true;
+        c.play(st.schedule().unwrap(), 0).unwrap();
+        let _ = run(&mut p, 1_200, 64);
+        st.doc.tracks[0].effects.effects_mut()[1].set("decaySec", 3.0);
+        c.update(st.schedule().unwrap()).unwrap();
+        let before = run(&mut p, 1, 1)[0];
+        let after = run(&mut p, 64, 64);
+        assert!((after[0] - before).abs() < 0.05, "no restart: the output continues smoothly");
+        c.collect();
+    }
+
+    #[test]
     fn starting_mid_region_fades_in_and_stop_fades_out() {
         let (mut st, id) = state();
         st.doc.tracks[0].regions.push(region("r1", &id, 0, 1_000));
