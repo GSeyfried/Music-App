@@ -17,6 +17,25 @@ Local `reference-packages/` holds only `README.md` and `manifest.json` on this
 machine (the waveform-playlist and Tone.js checkouts are absent), so this
 survey uses the upstream repos. Nothing was cloned or added to the manifest.
 
+## How we use concept-only (GPL/AGPL) references (user guidance, 2026-11-18)
+
+openDAW in particular is a good model to **study**: open it, see how it
+handles regions, loops, snapping and the timeline, and adjust our design.
+Where a problem has essentially one right solution (snapping a position to
+the grid, trimming a region, scheduling a repeat), our code may end up looking
+similar. Both are DAWs, and that kind of similarity is expected and fine.
+
+The line we keep:
+- Write our own code from the understood idea.
+- Never copy or translate their files line by line.
+- Don't reproduce their file and module structure, identifiers or comments
+  wholesale.
+- When a design idea clearly came from a reference, note it in the doc or
+  commit message ("approach studied from openDAW's region model").
+
+This applies to every concept-only project in the tables below
+([AGENTS.md](../../../AGENTS.md) code boundaries).
+
 ## 1. Open-source DAW and timeline projects
 
 | Project | URL | Licence (verified) | Activity | May copy code | Good reference for |
