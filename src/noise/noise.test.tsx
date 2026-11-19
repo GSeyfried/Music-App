@@ -30,15 +30,17 @@ async function started() {
   return { mock, calls, record };
 }
 
+const last = <T,>(xs: T[]): T | undefined => xs[xs.length - 1];
+
 afterEach(() => resetAppSettings());
 
 describe("noise reduction", () => {
   it("syncs the noise.* settings to the engine", async () => {
     const { calls } = await started();
     await waitFor(() => expect(calls("set_noise_config").length).toBeGreaterThan(0));
-    expect(calls("set_noise_config").at(-1)).toMatchObject({ config: { learnMode: "both", fftSize: 2048, autoApply: true } });
+    expect(last(calls("set_noise_config"))).toMatchObject({ config: { learnMode: "both", fftSize: 2048, autoApply: true } });
     act(() => setAppSetting("noise.autoApply", false));
-    await waitFor(() => expect(calls("set_noise_config").at(-1)).toMatchObject({ config: { autoApply: false } }));
+    await waitFor(() => expect(last(calls("set_noise_config"))).toMatchObject({ config: { autoApply: false } }));
   });
 
   it("Learn room creates a profile that can be renamed and deleted in the noise pop-up", async () => {
@@ -82,7 +84,7 @@ describe("noise reduction", () => {
     await waitFor(() => expect((within(details).getByRole("button", { name: /Layer 1 noise reduction/ }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(within(details).getByRole("button", { name: "Layer 1 noise reduction off" }));
     await waitFor(() =>
-      expect(calls("set_layer_noise_reduction").at(-1)).toEqual({
+      expect(last(calls("set_layer_noise_reduction"))).toEqual({
         track: 0,
         layer: 0,
         settings: { enabled: true, profileId: "noise-1", amountDb: 12, sensitivity: 6, smoothing: 0.5 },
@@ -95,15 +97,15 @@ describe("noise reduction", () => {
     const amount = within(details).getByRole("slider", { name: "Layer 1 noise reduction amount" });
     fireEvent.change(amount, { target: { value: "20" } });
     fireEvent.pointerUp(amount);
-    await waitFor(() => expect(calls("set_layer_noise_reduction").at(-1)).toMatchObject({ settings: { amountDb: 20, enabled: true } }));
+    await waitFor(() => expect(last(calls("set_layer_noise_reduction"))).toMatchObject({ settings: { amountDb: 20, enabled: true } }));
 
     // Off keeps the settings; Reset removes them (raw restored).
     fireEvent.click(within(details).getByRole("button", { name: "Layer 1 noise reduction on" }));
-    await waitFor(() => expect(calls("set_layer_noise_reduction").at(-1)).toMatchObject({ settings: { enabled: false, amountDb: 20 } }));
+    await waitFor(() => expect(last(calls("set_layer_noise_reduction"))).toMatchObject({ settings: { enabled: false, amountDb: 20 } }));
     await within(details).findByText("Off");
     expect(within(details).queryByText("NR")).toBeNull();
     fireEvent.click(within(details).getByRole("button", { name: "Remove layer 1 noise reduction" }));
-    await waitFor(() => expect(calls("set_layer_noise_reduction").at(-1)).toEqual({ track: 0, layer: 0, settings: null }));
+    await waitFor(() => expect(last(calls("set_layer_noise_reduction"))).toEqual({ track: 0, layer: 0, settings: null }));
 
     // The indicator can be turned off.
     fireEvent.click(within(details).getByRole("button", { name: "Layer 1 noise reduction off" }));
