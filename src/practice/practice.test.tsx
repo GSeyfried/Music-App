@@ -391,7 +391,7 @@ describe("Practice Lab UI", () => {
       act(() => {
         for (let t = 0; t < seconds; t += 0.033) mock.tick(0.033);
       });
-    fireEvent.click(screen.getByRole("tab", { name: "Practice Lab" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Assess" }));
     await waitFor(() => screen.getAllByRole("button", { name: /Start input/ }));
     fireEvent.click(screen.getAllByRole("button", { name: /Start input/ })[0]);
     const recordCard = await screen.findByRole("region", { name: "Record a reference" });

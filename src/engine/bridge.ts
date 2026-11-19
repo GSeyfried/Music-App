@@ -39,6 +39,11 @@ export const projectDialogs = {
     nativeAvailable()
       ? await save({ title: "Export mixdown", defaultPath: `${name || "Mixdown"}.wav`, filters: [{ name: "WAV", extensions: ["wav"] }] })
       : null,
+  /** PRODUCE: where to write the arrangement bounce (arrangement_bounce). */
+  saveBounce: async (name: string) =>
+    nativeAvailable()
+      ? await save({ title: "Bounce arrangement", defaultPath: `${name || "Bounce"}.wav`, filters: [{ name: "WAV", extensions: ["wav"] }] })
+      : null,
   chooseExportFolder: async (title: string) =>
     nativeAvailable() ? singlePath(await open({ directory: true, multiple: false, title })) : null,
   openAudio: async () =>

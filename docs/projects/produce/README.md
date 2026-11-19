@@ -222,3 +222,83 @@ How it behaves:
 - Not exercised against real hardware yet: playback through the device,
   position events in the running app, the async Tauri commands.
 - Arrangement undo is the UI's job (`arrangement_set` with the previous doc).
+
+## UI status
+
+Built on branch `worktree-agent-a707ac9f9982697dc` (from `dev/workstation-buildout`), against the mock
+engine. TypeScript/CSS only; the Rust side of the contract is a separate slice.
+`npm run typecheck` and `npx vitest run` pass. Not yet launched natively, and
+no audio hardware was exercised.
+
+Code: `src/produce/` (README-level map below), `src/engine/protocol.ts` + `store.ts`
+(event and command table), `src/engine/mock.ts` + `src/produce/mockArrangement.ts`
+(simulation), `projectDialogs.saveBounce` in `src/engine/bridge.ts`.
+
+| File | What |
+| --- | --- |
+| `types.ts` | Contract types, `ArrangementCommands`, `arrangementPosition` event, defensive `parseArrangementDoc` |
+| `model.ts` | Snap/grid math, bars.beats and time formatting, gain ↔ dB, pure edits (move/copy, trim, repeat, split, duplicate, delete, lanes), `validateArrangement` (mirrors the engine checks) |
+| `arrangementStore.ts` | Local copy + selection/tool/cursor + undo/redo; edits debounce to `arrangement_set`; resync on error |
+| `commands.ts` | One command set used by toolbar, keys, menus and inspector |
+| `Toolbar`, `Ruler`, `Timeline`, `TrackHeader`, `Region`, `Waveform`, `Inspector`, `Browser`, `Mixer` | The page |
+| `shortcuts.ts` | PRODUCE keyboard map (also shown in the shortcut sheet) |
+
+Built:
+
+- Tabs PLAY / PRODUCE / ASSESS / GAMES (ids unchanged; `produce` added).
+- Toolbar: play/stop, return to start, loop, position (bars.beats.16ths + time, live at 60 fps),
+  song tempo/meter with "Edit in PLAY", snap (off/bar/beat/1/8/1/16), tools (pointer/trim/split),
+  zoom in/out/fit, follow playhead, undo/redo (labelled), add marker, panel toggles, bounce.
+- Ruler: bar/beat ticks with adaptive labels, click/drag to seek, loop strip (drag the ends, or drag
+  to draw a new range), markers (click to seek, double-click/F2 to rename, context menu: go to,
+  rename, move to playhead, delete).
+- Lane headers: name, color, mute, solo, volume (dB fader, double-click = 0 dB), pan, move up/down,
+  delete; "+ Lane".
+- Regions (SVG waveform from asset peaks, following trim and repeat; cycle marks; fade shading):
+  click / Shift- or ⌘-click select, drag to move with snap (also to another lane), Alt-drag copy,
+  edge trim, repeat handle, fade-in/out handles, split tool, trim tool, ←/→ nudge by the grid,
+  Alt+↑/↓ to another lane, Enter or double-click for the inspector, context menu
+  (Send to Play, Send to PLAY track N for empty tracks, Rename, Duplicate, Split at playhead,
+  Mute, Details, Delete). Lanes are `listbox`es, regions `option`s with descriptive labels.
+- Inspector: every region field (name, start, length, source offset, repeat, gain as fader and dB,
+  fades in ms, muted, asset/file/origin read-only, actions); lane fields; multi-selection actions;
+  with nothing selected, the loop range and the marker list.
+- Browser: PLAY tracks with recorded loops (checkbox + per-track "Bring in"), mixed / per layer,
+  repeats, at playhead or start → `arrangement_capture_from_looper`; project audio (drag onto a
+  lane, or "Add" to the selected lane / a new lane at the playhead).
+- Mixer: a strip per lane (pan, vertical fader, M/S) and a Master strip with Bounce.
+- Keys: see `PRODUCE_SHORTCUTS` (Space, ⇧Space, Home, L, S, ⌫, ⌘D, ⌘Z/⇧⌘Z, ⌘A, Esc, = − Z, F,
+  V/T/B, M). On PRODUCE the global looper keys are off; ?, D and Esc keep their app meaning.
+- Settings: `produce.*` in the registry and `SETTINGS_INDEX.md`.
+- Mock: capture builds assets (512 peak bins from the mock's layer envelopes, mixed or per layer),
+  set validates, play advances and emits `arrangementPosition`, the looper and arrangement
+  transports stop each other, send-to-Play loads a Free-loop base layer into a new or empty track,
+  bounce returns frames.
+
+### UI deviations
+
+- **Tab labels** are title case in the DOM ("Play", "Assess") and drawn in capitals by CSS, so
+  screen readers read words and the existing GAMES tests keep working.
+- **Loop on/off**: the contract has only `loopRange | null`, so Loop off sets it to null; the UI
+  remembers the last range for the session only. PENDING: a `loopEnabled` flag in the contract.
+- **Split of a repeating region mid-cycle** makes three regions (left, a non-repeating partial
+  cycle, a repeating rest), because the contract loops `[offset, asset end)` with no phase field.
+  Exact, but more regions. PENDING: an optional loop phase in `ArrangementRegion`.
+- **Play needs audio running**: the play button is disabled while input is off (an InputOffBar is
+  shown). The mock refuses `arrangement_play` without audio (`invalid`). Confirm with the engine.
+- **Stop** leaves the cursor where playback stopped (the next play starts there).
+- **Undo of "Bring in from PLAY"** removes the lanes through `arrangement_set`; the captured assets
+  stay in the project (they are listed under Project audio).
+- **After a failed `arrangement_set`** the UI shows the error, takes the engine's copy, and drops
+  the redo history.
+- **Bounce outside Tauri** (mock) uses a placeholder path (`<project>.wav`), since there is no dialog.
+- **Master strip** has no level or meter: the contract has no master gain or meter data.
+
+PENDING:
+
+- Native launch and the engine side of the contract (slices 2–3); hardware playback not verified.
+- Lane and master meters, master gain (contract has neither).
+- Marquee selection; touch long-press for context menus (right-click, Shift+F10 and the overflow
+  routes work today); pinch zoom.
+- A playhead mark inside the ruler (the playhead line sits under the sticky ruler).
+- MIDI regions, warp/stretch, automation, tempo changes (as in Slices above).

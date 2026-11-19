@@ -4,10 +4,15 @@ import { useEffect } from "react";
 import { useEngineActions, useEngineStore } from "../engine/EngineContext";
 import { mainAction, pauseCommand, playStopCommand, trackControls } from "../lib/looperControls";
 import { SHORTCUTS, isTypingTarget, resolveShortcut, type ShortcutDef } from "../lib/shortcuts";
+import { PRODUCE_SHORTCUTS } from "../produce/shortcuts";
 import { Kbd, Sheet } from "./ui/controls";
 import { useUi } from "./UiContext";
 
-export function useLiveShortcuts(): void {
+/**
+ * "live": the looper keys (PLAY, ASSESS, GAMES). "app": only Escape, ? and D
+ * (PRODUCE owns Space, S, Z and the rest; see useProduceShortcuts in src/produce/Produce.tsx).
+ */
+export function useLiveShortcuts(scope: "live" | "app" = "live"): void {
   const store = useEngineStore();
   const actions = useEngineActions();
   const ui = useUi();
@@ -15,6 +20,17 @@ export function useLiveShortcuts(): void {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (isTypingTarget(e.target)) return;
+      if (scope === "app") {
+        if (ui.menu) return;
+        const appHit = resolveShortcut(e);
+        if (appHit?.id === "close") {
+          if (ui.overlay) ui.setOverlay(null);
+        } else if (appHit?.id === "help" || appHit?.id === "settings") {
+          e.preventDefault();
+          ui.setOverlay(ui.overlay === appHit.id ? null : appHit.id);
+        }
+        return;
+      }
       // Space belongs to play/stop. Cancel its default on every keydown, auto-repeats
       // included: holding Space on a focused button (e.g. "Stop input") must not let
       // the browser activate that button.
@@ -93,6 +109,7 @@ export function useLiveShortcuts(): void {
     // Space activation from keydown); Firefox activates on keyup, so cancel that too.
     // Otherwise Space would both toggle play/stop and press the focused button.
     const onKeyUp = (e: KeyboardEvent) => {
+      if (scope === "app") return;
       if (ui.overlay || ui.menu || isTypingTarget(e.target)) return;
       if (e.code === "Space" || e.key === " ") e.preventDefault();
     };
@@ -102,7 +119,7 @@ export function useLiveShortcuts(): void {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [store, actions, ui]);
+  }, [store, actions, ui, scope]);
 }
 
 export function ShortcutSheet() {
@@ -126,6 +143,18 @@ export function ShortcutSheet() {
           </ul>
         </section>
       ))}
+      <section className="sheet-section">
+        <h3>PRODUCE (arrangement)</h3>
+        <ul className="shortcut-list">
+          {PRODUCE_SHORTCUTS.map((s) => (
+            <li key={s.id}>
+              <span>{s.label}</span>
+              <Kbd keys={s.keys} announce />
+            </li>
+          ))}
+        </ul>
+      </section>
+      <p className="hint">On PRODUCE, the PRODUCE keys replace the looper keys.</p>
       <p className="hint">Shortcuts act on the selected track. They are ignored while typing in a field.</p>
     </Sheet>
   );
