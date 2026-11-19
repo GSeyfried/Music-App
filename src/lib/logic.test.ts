@@ -3,6 +3,7 @@ import { describeError, describeNotice, describeUnpitched, describeWarning } fro
 import { ENGINE_ERROR_KINDS, type PitchFrame, type RejectReason, type TrackSnapshot } from "../engine/protocol";
 import type { LooperView } from "../engine/store";
 import { DEFAULT_TRACK_LOOP } from "../models/domain";
+import { emptyChain } from "../effects/types";
 import { LOOPER_STATE } from "../test/fixtures";
 import { formatDb, formatGain } from "./format";
 import { ringProgress } from "./loopProgress";
@@ -108,6 +109,7 @@ const track = (over: Partial<TrackSnapshot> = {}): TrackSnapshot => ({
   loopPeriod: null,
   loopPhase: 0,
   busy: false,
+  effects: emptyChain(),
   ...over,
 });
 

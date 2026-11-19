@@ -17,6 +17,7 @@ import {
 import { DEFAULT_AUDIO_CONFIG, LAYER_SUMMARY_BINS } from "./protocol";
 import { MockPractice } from "../practice/mockPractice";
 import { MockArrangement, resamplePeaks } from "../produce/mockArrangement";
+import { emptyChain, normalizeChain, validateChain, type EffectChain } from "../effects/types";
 import type { OpKind, OpResult, ProjectInfo, ProjectRequest } from "../project/types";
 import type {
   AnalysisConfig,
@@ -169,6 +170,10 @@ interface MockTrack {
   clock: { period: number; origin: number } | null;
   /** DuplicateTrack: frames still to copy; the track reports `busy` until zero. */
   copyFramesLeft: number;
+  /** Effect chain (effects README); a track setting like `loop`, kept by Clear. */
+  effects: EffectChain;
+  /** FreezeTrack: what the frozen base layer replaced, restored by Undo (old layers stay reserved). */
+  frozen: { layers: number; offsets: number[]; redo: number; redoOffsets: number[]; effects: EffectChain } | null;
 }
 
 /** [MIDI note or null for a rest, seconds]. Null with "noise" = unpitched breath. */
@@ -265,6 +270,8 @@ export function validateTrackLoop(l: TrackLoop): string | null {
   if (!(Number.isInteger(l.countInBars) && l.countInBars >= 0 && l.countInBars <= 8)) return "count-in must be 0-8 bars";
   return null;
 }
+
+const cloneChain = (c: EffectChain): EffectChain => JSON.parse(JSON.stringify(c)) as EffectChain;
 
 export function musicalPosition(t: TransportState, frame: number): MusicalPosition {
   const subsPerBeat = Math.max(1, t.metronome.subdivision);
@@ -368,10 +375,16 @@ export class MockEngine implements EngineTransport {
     sampleRate: () => this.sampleRate,
     looperTracks: () =>
       this.capturing
-        ? this.tracks.map((tr) => ({ layers: tr.layers, period: this.trackPeriod(tr), offsets: [...tr.offsets], gain: tr.gain }))
+        ? this.tracks.map((tr) => ({
+            layers: tr.layers,
+            period: this.trackPeriod(tr),
+            offsets: [...tr.offsets],
+            gain: tr.gain,
+            effects: cloneChain(tr.effects),
+          }))
         : null,
     layerBins: (track, layer) => this.layerBins(track, layer),
-    loadIntoLooper: (track, frames, bins) => this.loadIntoLooper(track, frames, bins),
+    loadIntoLooper: (track, frames, bins, effects) => this.loadIntoLooper(track, frames, bins, effects),
     stopLooper: () => {
       if (this.capturing && this.run !== "stopped") {
         this.stop();
@@ -1008,6 +1021,11 @@ export class MockEngine implements EngineTransport {
       const problem = validateTrackLoop(cmd.settings);
       if (problem) throw { kind: "invalid", message: problem } satisfies EngineError;
     }
+    if (cmd.type === "setTrackEffects") {
+      // Like setTrackLoop: a malformed chain fails the call itself.
+      const problem = validateChain(cmd.chain);
+      if (problem) throw { kind: "invalid", message: problem } satisfies EngineError;
+    }
     // The looper and arrangement transports are exclusive: starting one stops the other.
     if (["play", "resume", "restart", "record", "overdub"].includes(cmd.type)) this.arrangement.stop();
     const rejected = this.apply(cmd);
@@ -1021,7 +1039,7 @@ export class MockEngine implements EngineTransport {
   // song clock (`period` / `origin`), exactly as before. Bars, Multiple and
   // Free tracks keep their own clock; Multiple tracks share `base`.
 
-  private emptyTrack(loop: TrackLoop = DEFAULT_TRACK_LOOP): MockTrack {
+  private emptyTrack(loop: TrackLoop = DEFAULT_TRACK_LOOP, effects: EffectChain = emptyChain()): MockTrack {
     return {
       layers: 0,
       redo: 0,
@@ -1035,6 +1053,8 @@ export class MockEngine implements EngineTransport {
       loop: { ...loop },
       clock: null,
       copyFramesLeft: 0,
+      effects: cloneChain(effects),
+      frozen: null,
     };
   }
 
@@ -1044,7 +1064,7 @@ export class MockEngine implements EngineTransport {
     this.origin = 0;
     this.countInLeft = 0;
     this.free = POOL_LAYERS;
-    this.tracks = this.tracks.map((tr) => this.emptyTrack(tr.loop));
+    this.tracks = this.tracks.map((tr) => this.emptyTrack(tr.loop, tr.effects));
     this.base = null;
     this.period = this.transport.mode === "synced" ? this.syncedPeriod(this.transport) : null;
   }
@@ -1192,6 +1212,15 @@ export class MockEngine implements EngineTransport {
         return null;
       case "undo":
         if (tr.rec || tr.copyFramesLeft > 0) return "trackBusy";
+        if (tr.frozen && tr.layers === 1) {
+          // Undo a freeze: the original layers and chain come back.
+          const f = tr.frozen;
+          this.free += 1 + tr.redo;
+          Object.assign(tr, { layers: f.layers, offsets: f.offsets, redo: f.redo, redoOffsets: f.redoOffsets, effects: f.effects, frozen: null });
+          this.loadedBins.delete(`${cmd.track}:0`);
+          for (let layer = 0; layer < tr.layers; layer += 1) this.emitLayerSummary(cmd.track, layer);
+          return null;
+        }
         if (tr.layers < 2) return "nothingToUndo";
         tr.layers -= 1;
         tr.redo += 1; // the buffer stays reserved for Redo, so `free` does not change
@@ -1229,7 +1258,32 @@ export class MockEngine implements EngineTransport {
         return this.setTrackLoop(tr, cmd.settings);
       case "duplicateTrack":
         return this.duplicateTrack(cmd.track);
+      case "setTrackEffects":
+        tr.effects = normalizeChain(cmd.chain);
+        return null;
+      case "freezeTrack":
+        return this.freezeTrack(cmd.track);
     }
+  }
+
+  /** Render the track through its chain into one new base layer; the chain empties (effects README). */
+  private freezeTrack(index: number): RejectReason | null {
+    const tr = this.tracks[index];
+    if (tr.rec || tr.copyFramesLeft > 0) return "trackBusy";
+    if (tr.layers === 0) return "trackEmpty";
+    if (this.free === 0) return "poolExhausted";
+    const mixed = Array.from({ length: tr.layers }, (_, l) => this.layerBins(index, l));
+    const bins = mixed[0].map((_, bin) => Math.min(1, mixed.reduce((s, b) => s + (b[bin] ?? 0) * 0.7, 0)));
+    this.free -= 1;
+    tr.frozen = { layers: tr.layers, offsets: tr.offsets, redo: tr.redo, redoOffsets: tr.redoOffsets, effects: tr.effects };
+    tr.layers = 1;
+    tr.offsets = [0];
+    tr.redo = 0;
+    tr.redoOffsets = [];
+    tr.effects = emptyChain();
+    this.loadedBins.set(`${index}:0`, bins);
+    this.emitLayerSummary(index, 0);
+    return null;
   }
 
   private setTrackLoop(tr: MockTrack, next: TrackLoop): RejectReason | null {
@@ -1274,6 +1328,7 @@ export class MockEngine implements EngineTransport {
       muted: tr.muted,
       playing: tr.playing,
       gain: tr.gain,
+      effects: cloneChain(tr.effects),
       clock: tr.clock ? { ...tr.clock } : null,
       // The engine copies at most CHUNK_FRAMES per callback; the copy reports busy until done.
       copyFramesLeft: tr.layers * period,
@@ -1515,7 +1570,8 @@ export class MockEngine implements EngineTransport {
   private clear(index: number): void {
     const tr = this.tracks[index];
     this.loadedBins.delete(`${index}:0`);
-    this.free += tr.layers + tr.redo;
+    this.free += tr.layers + tr.redo + (tr.frozen ? tr.frozen.layers + tr.frozen.redo : 0);
+    tr.frozen = null;
     tr.layers = 0;
     tr.redo = 0;
     tr.offsets = [];
@@ -1543,7 +1599,7 @@ export class MockEngine implements EngineTransport {
    * PRODUCE "Send to Play": load rendered audio into an empty track (or a new
    * one) as its base layer, with a Free loop of the region's length.
    */
-  private loadIntoLooper(track: number | null, frames: number, bins: number[]): number {
+  private loadIntoLooper(track: number | null, frames: number, bins: number[], effects?: EffectChain): number {
     if (!this.capturing) throw { kind: "invalid", message: "start audio before sending to PLAY" } satisfies EngineError;
     if (this.tooLong(frames)) throw { kind: "invalid", message: `longer than the ${MAX_LOOP_SECONDS} s loop limit` } satisfies EngineError;
     let index = track;
@@ -1566,6 +1622,8 @@ export class MockEngine implements EngineTransport {
     tr.playing = true;
     tr.loop = { ...tr.loop, mode: "free" };
     tr.clock = { period: Math.round(frames), origin: 0 };
+    // The lane's filters come along (effects README "Model").
+    if (effects) tr.effects = normalizeChain(effects);
     this.loadedBins.set(`${index}:0`, resamplePeaks(bins, LAYER_SUMMARY_BINS));
     this.emitLayerSummary(index, 0);
     this.emit({ type: "looper", payload: this.looperState() });
@@ -1654,6 +1712,7 @@ export class MockEngine implements EngineTransport {
       loopPeriod,
       loopPhase,
       busy: tr.copyFramesLeft > 0,
+      effects: cloneChain(tr.effects),
     };
   }
 

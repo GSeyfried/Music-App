@@ -3,6 +3,8 @@
 // hand from the engine side (voiceloop-project `Arrangement`); change both
 // sides together. No Tauri import here (only bridge.ts may).
 
+import { normalizeChain, type EffectChain } from "../effects/types";
+
 export interface ArrangementMarker {
   id: string;
   frame: number;
@@ -36,6 +38,8 @@ export interface ArrangementTrack {
   muted: boolean;
   solo: boolean;
   regions: ArrangementRegion[];
+  /** The lane's effect chain (effects README "Contract"); older engines/projects: an empty chain. */
+  effects: EffectChain;
 }
 
 export interface RegionOrigin {
@@ -156,6 +160,7 @@ function parseTrack(raw: unknown, i: number): ArrangementTrack | null {
     muted: bool(t.muted, false),
     solo: bool(t.solo, false),
     regions: Array.isArray(t.regions) ? t.regions.map(parseRegion).filter((r): r is ArrangementRegion => r !== null) : [],
+    effects: normalizeChain(t.effects),
   };
 }
 

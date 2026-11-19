@@ -19,6 +19,7 @@ import {
   type TransportState,
 } from "../models/domain";
 import { DEFAULT_NOTE_COLORS } from "./noteColors";
+import { EFFECT_DEFS, MAX_EFFECTS_PER_TRACK, effectParamSettingId, effectTableDefaults, type EffectKind, type EffectPreset } from "../effects/types";
 
 /** day-to-day controls are shown in place; the rest live in the advanced pop-up or Preferences. */
 export type SettingTier = "daily" | "advanced" | "preferences" | "internal";
@@ -90,8 +91,16 @@ export const GAME_VOICE_START_HOLD_MS = 250;
 /** Maximum distance from the prompted semitone during a hands-free start. */
 export const GAME_VOICE_START_TOLERANCE_CENTS = 45;
 
+// Effects (docs/projects/effects/README.md): one default per parameter,
+// generated from the parameter table in src/effects/types.ts.
+export type EffectParamSettingId = `effects.${EffectKind}.${string}`;
+export type EffectParamSettings = { [K in EffectParamSettingId]: number | string };
+export type EffectsPasteMode = "append" | "replace";
+export type EffectsBoxLayout = "below" | "side";
+export type EffectsControlStyle = "knob" | "slider";
+
 /** Values owned by the frontend ("app" source), with their types. */
-export interface AppSettings {
+export interface AppSettings extends EffectParamSettings {
   "practice.difficulty": Difficulty;
   "practice.stopStudioOnEnter": boolean;
   /** Octave of the tonic for generated scale exercises (4 = middle C's octave). */
@@ -132,6 +141,17 @@ export interface AppSettings {
   "produce.edgeHandlePx": number;
   "produce.tailBars": number;
   "produce.headerWidth": number;
+  // ---- Effects (src/effects; per-parameter defaults come from EffectParamSettings) ----
+  "effects.maxPerTrack": number;
+  "effects.pasteMode": EffectsPasteMode;
+  "effects.boxLayout": EffectsBoxLayout;
+  "effects.controlStyle": EffectsControlStyle;
+  "effects.stemsWet": boolean;
+  /** Saved chains ("Save as preset"). */
+  "effects.presets": EffectPreset[];
+  "effects.sendIntervalMs": number;
+  "effects.echoTimeoutMs": number;
+  "effects.knobDragPixels": number;
   /** New tracks' loop settings (PER_TRACK_LOOPS.md); the engine default is "song". */
   "looper.trackDefaults.mode": TrackLoopMode;
   "looper.trackDefaults.bars": number;
@@ -266,6 +286,16 @@ export const APP_DEFAULTS: AppSettings = {
   "produce.edgeHandlePx": 8,
   "produce.tailBars": 8,
   "produce.headerWidth": 232,
+  ...(effectTableDefaults() as EffectParamSettings),
+  "effects.maxPerTrack": MAX_EFFECTS_PER_TRACK,
+  "effects.pasteMode": "append",
+  "effects.boxLayout": "below",
+  "effects.controlStyle": "knob",
+  "effects.stemsWet": true,
+  "effects.presets": [],
+  "effects.sendIntervalMs": 30,
+  "effects.echoTimeoutMs": 1500,
+  "effects.knobDragPixels": 160,
   "looper.trackDefaults.mode": DEFAULT_TRACK_LOOP.mode,
   "looper.trackDefaults.bars": DEFAULT_TRACK_LOOP.bars,
   "looper.trackDefaults.beats": DEFAULT_TRACK_LOOP.beats,
@@ -1700,6 +1730,155 @@ export const SETTINGS: SettingDef[] = [
     tier: "internal",
     scope: "app",
   },
+  // ---- Effects (docs/projects/effects/README.md) -----------------------------
+  {
+    id: "effects.maxPerTrack",
+    source: "app",
+    kind: "number",
+    min: 1,
+    max: MAX_EFFECTS_PER_TRACK,
+    step: 1,
+    label: "Filters per track",
+    description: `Most filters one track can hold (the engine reserves room for ${MAX_EFFECTS_PER_TRACK}).`,
+    category: "Effects",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "effects.pasteMode",
+    source: "app",
+    kind: "choice",
+    label: "Paste filters",
+    description: "Pasting filters onto a track adds them after its own filters, or replaces its chain.",
+    category: "Effects",
+    tier: "preferences",
+    scope: "app",
+    options: [
+      { value: "append", label: "Add to the end" },
+      { value: "replace", label: "Replace the chain" },
+    ],
+  },
+  {
+    id: "effects.boxLayout",
+    source: "app",
+    kind: "choice",
+    label: "Filter boxes",
+    description: "Show a track's filter boxes under its controls, or beside them.",
+    category: "Effects",
+    tier: "preferences",
+    scope: "app",
+    options: [
+      { value: "below", label: "Below" },
+      { value: "side", label: "Beside" },
+    ],
+  },
+  {
+    id: "effects.controlStyle",
+    source: "app",
+    kind: "choice",
+    label: "Filter controls",
+    description: "Turn knobs (drag up/down or use the arrow keys) or slide faders.",
+    category: "Effects",
+    tier: "preferences",
+    scope: "app",
+    options: [
+      { value: "knob", label: "Knobs" },
+      { value: "slider", label: "Sliders" },
+    ],
+  },
+  {
+    id: "effects.stemsWet",
+    source: "app",
+    kind: "bool",
+    label: "Stems include filters",
+    description: "Exported stems are rendered with each track's filters (on) or dry (off). Mixdowns and bounces always include them.",
+    category: "Effects",
+    tier: "preferences",
+    scope: "app",
+  },
+  {
+    id: "effects.sendIntervalMs",
+    source: "app",
+    kind: "number",
+    min: 0,
+    max: 200,
+    step: 5,
+    label: "Filter drag update interval",
+    description: "While a filter control is dragged, changes reach the engine at most this often (ms).",
+    category: "Effects",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "effects.echoTimeoutMs",
+    source: "app",
+    kind: "number",
+    min: 200,
+    max: 10000,
+    step: 100,
+    label: "Filter edit confirm timeout",
+    description: "How long an edited chain is shown before falling back to the engine's copy if the engine never confirms it (ms).",
+    category: "Effects",
+    tier: "internal",
+    scope: "app",
+  },
+  {
+    id: "effects.knobDragPixels",
+    source: "app",
+    kind: "number",
+    min: 40,
+    max: 600,
+    step: 10,
+    label: "Knob drag distance",
+    description: "Pixels of vertical drag that turn a knob through its whole range (Shift drags 10x finer).",
+    category: "Effects",
+    tier: "internal",
+    scope: "app",
+  },
+  // Defaults for every filter parameter, generated from src/effects/types.ts.
+  ...EFFECT_DEFS.flatMap((d): SettingDef[] => [
+    {
+      id: effectParamSettingId(d.kind, "mix") as EffectParamSettingId,
+      source: "app",
+      kind: "number",
+      min: 0,
+      max: 1,
+      step: 0.01,
+      label: `${d.label} mix`,
+      description: `Dry/wet a new ${d.label} starts with.`,
+      category: "Effect defaults",
+      tier: "internal",
+      scope: "app",
+    },
+    ...d.params.map(
+      (p): SettingDef =>
+        p.type === "choice"
+          ? {
+              id: effectParamSettingId(d.kind, p.key) as EffectParamSettingId,
+              source: "app",
+              kind: "choice",
+              options: p.choices.map((ch) => ({ value: String(ch.value), label: ch.label })),
+              label: `${d.label} ${p.label.toLowerCase()}`,
+              description: `${p.label} a new ${d.label} starts with.`,
+              category: "Effect defaults",
+              tier: "internal",
+              scope: "app",
+            }
+          : {
+              id: effectParamSettingId(d.kind, p.key) as EffectParamSettingId,
+              source: "app",
+              kind: "number",
+              min: p.min,
+              max: p.max,
+              step: p.step ?? 0.001,
+              label: `${d.label} ${p.label.toLowerCase()}`,
+              description: `${p.label} a new ${d.label} starts with (${p.min}..${p.max}${p.unit ? ` ${p.unit}` : ""}).`,
+              category: "Effect defaults",
+              tier: "internal",
+              scope: "app",
+            },
+    ),
+  ]),
   // ---- Appearance -----------------------------------------------------------
   {
     id: "theme.mode",
