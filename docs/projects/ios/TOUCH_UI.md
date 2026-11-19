@@ -1,5 +1,9 @@
 # Touch UI guidelines (iPadOS and iPhone, in WKWebView)
 
+Focused mobile product flows and the shared one-octave digital piano are
+specified in [PRODUCT_APPS.md](PRODUCT_APPS.md). This file supplies the broader
+adaptive layout and interaction constraints for those experiences.
+
 For the frontend agent. The React UI runs in a WKWebView inside the Tauri iOS
 app. These rules keep one codebase working with a mouse on macOS and with
 fingers, pencils, hardware keyboards, and MIDI controllers on iPad and iPhone.

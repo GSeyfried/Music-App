@@ -1,6 +1,6 @@
 # Product direction
 
-Last updated: 2026-11-17
+Last updated: 2026-11-19
 
 This document records product direction discussed during the November 2026 native-app review. It is a handoff for future agents as well as a guide for upcoming workstation work. Items marked `PENDING` still need a design or technical decision.
 
@@ -11,6 +11,13 @@ This document records product direction discussed during the November 2026 nativ
 - Prefer progressive disclosure: fast actions near the object, with detailed editing in an inspector, modal, or dedicated view.
 
 ## Tracks and layers
+
+The next track architecture is specified in
+[track-system](../track-system/README.md). Its central decision is that a track
+is a stable mixer/editing container, while source, interpretation, recording
+behavior, instrument and effects are composable parts. Friendly Add Track
+templates configure those parts without creating a permanent special-case
+track type.
 
 A **track** is the main mixer and arrangement lane. It owns controls such as input, record arm, volume, mute, solo, routing, and effects.
 
@@ -28,9 +35,13 @@ The exact layer-editing model is `PENDING`. Editing should be nondestructive by 
 ## Track capacity and creation
 
 - The product target is **at least 10 usable tracks**, with room to support more as memory and realtime performance allow.
-- The current engine starts with 2 tracks and has a compile-time ceiling of 8. The UI does not currently support adding or removing tracks dynamically.
-- A visible **Add Track** action is required. Right-click and keyboard shortcuts may supplement it, but must not be the only discovery path.
-- `PENDING`: choose a higher internal ceiling and define memory/performance behavior. Do not silently equate the UI target with the engine ceiling.
+- The current UI supports visible dynamic Add/Remove Track actions against a
+  preallocated 16-track ceiling. Real-session CPU and memory stress still need
+  measurement before that ceiling is considered production-safe.
+- The next Add Track surface should choose a template (Audio Looper, Audio
+  Track, MIDI Instrument, Voice Instrument, Voice Drums, Sampler or Live Input)
+  rather than creating only another audio looper.
+- A template is an editable starting configuration, not a permanent track kind.
 
 ## Editing and persistence direction
 
@@ -60,7 +71,10 @@ their engine parts (layer offset, onset timing) so the lane view can reuse
 them. `PENDING`: the lane/region data model, how warping relates to the
 loop grid, and whether stretch is realtime or rendered offline.
 
-The repository already contains substantial project persistence and export infrastructure, but no project UI. Region trimming, arrangement editing, and layer detail controls are future work rather than hidden features. See [UNWIRED_FEATURES.md](UNWIRED_FEATURES.md).
+The repository contains project persistence/export UI, the PRODUCE arrangement
+workspace, and a Track Details sheet with per-layer timing and noise controls.
+Deeper looper-layer trim/warp/comp editing and MIDI arrangement remain future
+work. See [UNWIRED_FEATURES.md](UNWIRED_FEATURES.md).
 
 ## Advanced audio tools
 
@@ -72,7 +86,23 @@ The desired direction includes advanced track detail tools such as:
 - noise reduction;
 - effects and other standard workstation processing.
 
-These are product goals, not currently implemented effects. `PENDING`: define an effects architecture, ordering/routing model, realtime constraints, and which operations are realtime versus offline.
+Realtime filter chains, presets, per-layer scope, freeze, noise reduction and
+PRODUCE integration are implemented. Harmonization, synthesis, pitch
+correction, stereo processing, automation and hardware listening validation
+remain product goals. See [effects](../effects/README.md).
+
+## Tool modes and presets
+
+Tools should offer **Supportive**, **Hardware**, and **Advanced** modes over the
+same engine and project data. Supportive mode recommends reversible cleanup and
+good defaults; Hardware mode applies measured controller/state-machine
+profiles; Advanced mode exposes explicit control and provenance. Modes must not
+erase settings that become hidden.
+
+Keep these concepts distinct: mode (workflow/control surface), track template
+(creation recipe), preset (editable value bundle), profile (learned/calibrated
+data), and mapping (input bindings). Full behavior and precedence are in
+[track-system](../track-system/README.md).
 
 ## Input, transport, and playback lifecycle
 
@@ -100,3 +130,11 @@ Detailed interaction direction is maintained in [../frontend/INTERACTION_DESIGN.
 
 Keyboard, pointer, gesture, and touch actions should converge on a shared command model so the same capability does not develop separate behavior on each platform.
 
+## Focused mobile products
+
+VoiceLoop Pocket should begin as one universal app with simple, purpose-built
+experiences: Voice Song Builder (Voice Melody and Voice Percussion), Singing
+Practice, Rhythm Practice and Note Recognition. Melody and recognition screens
+share a one-octave digital piano with octave down/up. Touch and the built-in
+microphone are baseline inputs; H4n connectors and a physical MIDI keyboard are
+optional later. See [the Pocket product definition](../ios/PRODUCT_APPS.md).

@@ -7,6 +7,11 @@ Next-round design for stereo/per-track input: [STEREO_AND_PER_TRACK_INPUT.md](ST
 Status legend: **T** = covered by automated tests, **R** = ran on this Mac's
 built-in devices (no H4n, no MIDI keyboard attached), **H** = needs hardware.
 
+**User hardware note (2026-11-19):** the H4n connector/cable and a physical
+MIDI keyboard are not currently available. Keep their procedures intact, but
+mark those results deferred rather than blocking work that can use the built-in
+microphone, speakers/headphones, touch keyboard or virtual CoreMIDI source.
+
 ## What was built
 
 | Area | What | Status |

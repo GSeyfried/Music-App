@@ -40,9 +40,11 @@ infrastructure rather than create parallel stacks.
 | 6 | Pitch, rhythm and theory analysis | `crates/voiceloop-analysis`, `engine/src/analysis.rs` | Live tuner/curve end to end; Practice and theory services exceed their current UI; real-voice validation pending |
 | 7 | Practice service | `engine/src/practice/` | Capture, scoring, history and library wired through Tauri to the React workflow; real-voice validation pending |
 | 8 | Session/project persistence | `crates/voiceloop-project`, `engine/src/project.rs` | Package, recovery, import/export, typed React store and native dialogs implemented/tested; real save/recovery/DAW flow pending |
-| 9 | DSP effects and instruments | future crate/service boundary | Metronome click only; synths, effects, percussion and advanced pitch processing are not implemented |
-| 10 | Frontend | `src/` | Studio, Practice Lab, hardware, project/recovery, import and export workflows implemented |
-| 11 | App↔engine communication | `src-tauri/src/lib.rs`, `src/engine/bridge.ts` | One event stream and typed commands, including project and Practice contracts; raw audio never crosses it |
+| 9 | DSP effects and noise reduction | `crates/voiceloop-dsp`, `engine/src/{noise,looper,arrangement}.rs`, `src/effects`, `src/noise` | Realtime ordered chains, presets, scope, freeze, offline noise derivatives, persistence and PLAY/PRODUCE UI implemented; stereo and hardware listening pending |
+| 10 | Arrangement | `engine/src/arrangement.rs`, `voiceloop-project/src/arrangement.rs`, `src/produce/` | Audio lanes/regions, playback, editing, filters and bounce implemented; native listening and MIDI lanes pending |
+| 11 | Instruments and sound library | `engine/src/preview.rs` prototype; future Rust renderer/library boundary | Bundled 30-zone preview piano is realtime-safe but preview-only; track synths, drum racks, sampler/library, sustain and MIDI clip playback are not implemented; see `projects/sound-library/README.md` |
+| 12 | Frontend | `src/` | Studio, PRODUCE, Practice Lab, games, hardware, project/recovery, import and export workflows implemented |
+| 13 | App↔engine communication | `src-tauri/src/lib.rs`, `src/engine/bridge.ts` | One event stream and typed commands, including project and Practice contracts; raw audio never crosses it |
 
 `engine/` = `crates/voiceloop-engine/`.
 

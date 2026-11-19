@@ -21,10 +21,12 @@ Use lowercase-kebab-case folder names (for example `audio-player/`).
 | [frontend](frontend/README.md): Studio, Practice, project flows, tuner, pitch visualisation, settings, and interaction direction | Current vertical workflows implemented; native audio and hardware verification incomplete |
 | [practice-lab](practice-lab/README.md): reference/attempt capture and scoring | Rust service, Tauri contract, React workflow and simulator tests implemented; real voice/timing pending |
 | [persistence](persistence/README.md): projects, recovery, WAV/MIDI/DAW interchange | Rust service, Tauri commands, native dialogs and React workflow implemented; real save/recovery/DAW validation pending |
-| [hardware-io](hardware-io/README.md): devices, routing, monitoring, MIDI, calibration | UI wired; built-in-device testing partial; H4n and physical keyboard pending |
-| [ios](ios/README.md): iPhone/iPad feasibility and touch guidance | Compile-level investigation complete; Xcode/device proof blocked |
+| [hardware-io](hardware-io/README.md): devices, routing, monitoring, MIDI, calibration | UI wired; built-in-device testing partial; H4n/cable loopback/physical keyboard deferred until hardware is available |
+| [ios](ios/README.md): iPhone/iPad feasibility, touch guidance and [focused mobile products](ios/PRODUCT_APPS.md) | Compile-level investigation and product definition complete; Xcode/device proof blocked |
 | [workstation-buildout](workstation-buildout/PROGRESS.md): cross-project integration and handoff | Active working tree; not integrated into `main` |
-| [settings](settings/README.md): settings registry and [settings index](settings/SETTINGS_INDEX.md) | Proposed 2026-11-17; index lists existing and proposed settings |
+| [settings](settings/README.md): settings registry and [settings index](settings/SETTINGS_INDEX.md) | Typed registry and settings UI implemented; override model and hardware verification incomplete |
+| [track-system](track-system/README.md): unified tracks, tool modes, templates, presets, and voice instruments | Product direction and architecture proposal; MIDI/voice track slices not started |
+| [sound-library](sound-library/README.md): recorded/imported sounds, instruments, kits, sampler articulation, and Ring/Linger controls | Product direction and architecture proposal; preview piano is the only current sampled instrument |
 | [visualization](visualization/README.md): loop-circle histogram/ticks, note colors, pitch-reactive theme | Proposed 2026-11-17; not started |
 | [games](games/README.md): Pitch Glider and Range Finder | Built; requested changes pending |
 | [voice-progress](voice-progress/README.md): range training (head/chest), local profiles, milestones | Proposed 2026-11-17 |

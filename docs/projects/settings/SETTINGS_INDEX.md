@@ -2,10 +2,45 @@
 
 The source of truth for every setting. See [README.md](README.md) for the rules.
 
-Status values: **exists** (in the code at `3157f27`), **proposed** (not built).
+Status values: **exists** or **wired** (in the current tree), **proposed** (not built).
 Descriptions are user-facing drafts.
 
 Scopes: app / project / track / session.
+
+## Tool modes, track templates, and presets (proposed; see [track-system](../track-system/README.md))
+
+These ids reserve product behavior; they are not present in the registry yet.
+Mode controls disclosure and workflow policy. It must not discard hidden track
+overrides. Templates create editable track configurations, while presets copy
+values and profiles hold learned/calibrated data.
+
+| ID | Label | Description | Default | Scope | Connected element | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `tools.defaultMode` | Default tool mode | Mode first selected for a tool that supports it. Each tool remembers its own project mode; this preference does not switch the entire app at once. | Supportive | app | Preferences › Tools; new tool/workspace setup | proposed |
+| `looper.experienceMode` | Looper mode | Supportive recommends reversible setup/cleanup, Hardware follows a controller-style state machine, and Advanced exposes the complete track configuration. Changing mode does not erase hidden values. | Supportive | project | PLAY header; Add Track; Track Details | proposed |
+| `looper.supportivePreset` | Supportive setup | Starting behavior for a new Audio Looper, such as Vocal Loop, Beatbox, Acoustic Instrument, Ambient Texture, or Free Idea. The chosen preset copies inspectable values into the track. | Vocal Loop | track | Add Track template; compact track preset chip; Details › Overview | proposed |
+| `looper.hardwareProfile` | Hardware controls | Press/hold/double-press transitions and controller feedback. Factory choices are Single switch, Two switch, and Multitrack tabletop; custom mappings are profiles. | Single switch | project | PLAY hardware surface; MIDI mapping editor | proposed |
+| `tracks.defaultTemplate` | New track type | Template selected initially when Add Track opens; it can still be changed in the picker. | Audio Looper | app | Add Track picker | proposed |
+| `presets.applyBehavior` | Applying presets | Show a value diff before a preset replaces meaningful track overrides, or apply immediately. Destructive data replacement is never allowed. | Show changes | app | Every preset menu | proposed |
+| `help.detailLevel` | Help detail | Supportive explanations emphasize purpose and audible result; Technical also shows processing, timing, CPU/latency and value provenance. | Follow tool mode | app | Tooltips, info sheets and Settings help | proposed |
+
+## Pocket keyboard and voice song building (see [mobile products](../ios/PRODUCT_APPS.md))
+
+| ID | Label | Description | Default | Scope | Connected element | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `keyboard.octave` | Keyboard octave | Lowest C of the one-octave digital piano. Octave changes affect new touch notes, not recorded notes. | C4–B4 | project | Pocket one-octave keyboard; octave down/up | wired |
+| `keyboard.noteLabels` | Piano note labels | Show note names on the digital piano. Accessibility names remain available when visual labels are hidden. | on | app | Pocket one-octave keyboard | wired |
+| `pocket.songBpm` | Pocket song tempo | Established beat grid used to place Pocket notes and hits. | 100 BPM | project | Pocket tempo field | wired |
+| `pocket.quantizeSubdivision` | Pocket beat grid | Nearest rhythmic division used by Pocket timing correction. | Eighth notes | project | Pocket beat-grid picker | wired |
+| `pocket.quantizeStrength` | Pocket tightness | Blend note times toward the beat grid without replacing their original performance times. | 65% | project | Pocket Tightness control and adjusted preview | wired |
+| `keyboard.scaleHighlight` | Highlight allowed notes | Mark notes allowed by the selected key/scale or custom note set. | on | app | Voice Melody and practice keyboards | proposed |
+| `keyboard.touchVelocity` | Touch key loudness | Fixed plays every touch at one velocity; Position uses where the key is touched when the platform can report it reliably. | Fixed, 0.8 | app | Digital piano | proposed |
+| `voiceMelody.tuneAmount` | Tune | How strongly interpreted instrument pitch moves toward the selected chromatic/key/custom note. Raw measured pitch remains unchanged. If continuous pitch bend is unavailable, expose this as Note lock instead. | 100% (Locked) | track | Voice Melody primary screen | proposed |
+| `voiceMelody.noteSetMode` | Allowed notes | Use every chromatic note, a key/scale, or a custom set selected on the keyboard. | Key/scale | track | Voice Melody key chip and keyboard | proposed |
+| `voiceMelody.noteChangeHoldMs` | Note-change steadiness | How long a new target must remain confident before the interpreted instrument changes note. Lower is more responsive; higher resists vibrato/noise. | 80 ms | track | Voice Melody Advanced | proposed |
+| `voiceMelody.keepRawAudio` | Keep my voice recording | Save the microphone performance beside the interpreted notes. Raw pitch observations are always retained for nondestructive correction. | on | track | Voice Melody recording options | proposed |
+| `voicePercussion.tightness` | Beat tightness | Blend recorded trigger times toward the selected grid while preserving original timing for undo/readjustment. | 50% | track | Voice Percussion primary screen | proposed |
+| `pocket.resumeLastActivity` | Resume where I left off | Put the most recent unfinished song or practice activity at the top of the Pocket home screen. | on | app | Pocket home | proposed |
 
 ## Audio devices and I/O (exists: `AudioConfig`, `routing.rs`; stored in `audio-settings.json`)
 
@@ -241,6 +276,28 @@ tuning; only the first few are likely user-facing.
 | `looper.timing.minimumSpacingMs` | Timing hit spacing | Minimum distance between detected attacks. | 80 ms | app | Track Details timing readout | exists (engine internal) |
 | `looper.timing.maxHits` | Timing hit limit | Maximum attack offsets carried in one layer-timing event. | 32 | app | Track Details timing readout | exists (engine internal) |
 | `looper.timing.wholeBeatToleranceFrames` | Whole-beat tolerance | Maximum period mismatch allowed before beat-relative timing is withheld. | 1 frame | app | Track Details timing readout | exists (engine internal) |
+
+## Sound library and instruments (proposed; see [sound-library](../sound-library/README.md))
+
+Instrument patches store their resolved articulation values in the project.
+These registry entries supply defaults and safety/resource policy for newly
+created or imported sounds.
+
+| ID | Label | Description | Default | Scope | Connected element | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `library.importStorage` | Imported sound storage | Copy imported audio into the local VoiceLoop library, or reference its current file location. Copying is safer if the original moves. | Copy into library | app | Library › Import | proposed |
+| `library.projectEmbedPolicy` | Keep project sounds portable | Which used sounds are copied into a saved project: all, non-factory only, or references only. References only may create missing sounds on another device. | Embed non-factory sounds | app | Preferences › Library; Save/portable export summary | proposed |
+| `library.autoAnalyze` | Analyze new sounds | Generate waveform peaks, duration, loudness and a pitch/root-note suggestion after recording or import. Suggestions retain confidence and never rewrite audio. | on | app | Record/Import sound progress; Library details | proposed |
+| `instrument.ringDefault` | Ring / Linger | Friendly starting amount for how long a newly created instrument continues while held or after release. Each instrument preset maps this macro to its natural tail, sustain loop and envelope; reverb remains separate. | 50% | track | Compact instrument track; Details › Shape | proposed |
+| `instrument.playbackModeDefault` | New sample behavior | Starting playback rule for an unmapped imported sample: One-shot, Gated, Natural, Sustain loop, or Latch. Drum-kit templates override this per pad. | One-shot | track | New Sample; Details › Shape | proposed |
+| `instrument.attackMsDefault` | New instrument attack | Starting fade-in time for a newly created sampler instrument. Instrument presets may override it. | 2 ms | track | Details › Shape › Envelope | proposed |
+| `instrument.decayMsDefault` | New instrument decay | Time from attack peak to the sustain level for a newly created sampler instrument. | 0 ms | track | Details › Shape › Envelope | proposed |
+| `instrument.sustainDefault` | New instrument sustain | Level held after decay while a sustain-capable note remains on. A one-shot or naturally decaying sample may still become silent. | 100% | track | Details › Shape › Envelope | proposed |
+| `instrument.releaseMsDefault` | New instrument release | Fade time after Note Off for a newly created sampler instrument. | 60 ms | track | Ring/Linger macro; Details › Shape › Envelope | proposed |
+| `instrument.sustainLoopCrossfadeMs` | Sustain-loop smoothing | Crossfade at loop boundaries so a held sample repeats without clicking. | 20 ms | track | Sustain-loop editor | proposed |
+| `instrument.maxVoices` | Instrument polyphony | Most sample/synth voices one instrument track may sound at once. The engine preallocates them and steals a voice at the limit. | 32 | app | Instrument diagnostics; Advanced › Voice behavior | proposed |
+| `instrument.voiceStealPolicy` | At the voice limit | Which voice ends when polyphony is full. Prefer already-released/quiet voices before the oldest held voice. | Released, then quietest | app | Advanced › Voice behavior | proposed |
+| `instrument.maxHeldSeconds` | Longest held note | Optional safety timeout for latch or sustain-loop notes. Off permits a note to continue until Note Off, unlatch, Stop/All Notes Off, or voice stealing. | Off (unlimited) | app | Advanced › Voice behavior; stuck-note warning | proposed |
 
 ## PRODUCE engine (exists: `crates/voiceloop-engine/src/arrangement.rs`, `voiceloop-project/src/arrangement.rs`; see [produce](../produce/README.md))
 

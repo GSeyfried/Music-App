@@ -1,6 +1,6 @@
 # Workstation vertical-integration audit
 
-Audit date: 2026-11-17
+Audit date: 2026-11-19
 
 This inventory distinguishes capabilities that already exist in code from partial foundations and product ideas that have not been implemented. It reflects the current working tree, including the workstation-buildout changes that have not yet been integrated into `main`.
 
@@ -19,7 +19,10 @@ Passing an early stage does not imply completion of the later stages.
 | Practice reference/attempt/score/history | Implemented | Implemented | Implemented | Implemented | Implemented | Automated end to end; real voice pending |
 | Projects, recovery and interchange | Implemented | Implemented | Implemented | Implemented | Implemented | Automated plus packaged UI/dialog launch; real save/recovery/DAW flow pending |
 | Dynamic Add Track / 10+ tracks | Implemented | Implemented | Implemented | Implemented | Implemented | Automated up to 16; real-session stress pending |
-| Instruments, percussion, effects and arrangement | Foundations only where noted below | Missing | Missing | Missing | Missing | Not implemented as workflows |
+| Realtime filter chains, presets and freeze | Implemented | Implemented | Implemented | Implemented | Implemented in PLAY/PRODUCE | Automated; native listening/stereo pending |
+| Offline per-layer noise reduction | Implemented | Implemented | Implemented | Implemented | Implemented in Track Details | Automated; real room/voice listening pending |
+| Audio arrangement and bounce | Implemented | Implemented | Implemented | Implemented | Implemented in PRODUCE | Automated; native listening/export flow pending |
+| Instruments and percussion | Metronome/preview only | Missing | Missing | Partial preview tools | Missing as tracks | Not implemented as a workflow |
 
 ## Contract mismatches resolved in the current working tree
 
@@ -104,8 +107,9 @@ Settings can list, open, and close MIDI input ports, and the engine can receive 
 ### Tracks and layers
 
 The Studio UI exposes live add/remove plus recording, overdubbing, undo and
-redo. Persistence and export code can preserve or export layers, but there is
-no layer inspector, take browser, or per-layer mixer/editor.
+redo. Track Details exposes per-layer timing/nudge and noise reduction, and
+persistence/export preserve layers. Nondestructive trim, audition/mute,
+reorder, promotion, comping and a full take browser remain missing.
 
 ### Hardware settings verification
 
@@ -115,8 +119,8 @@ Input/output selection, routes, monitoring, sample rate, buffer size, latency ca
 
 Do not describe these as hidden features:
 
-- nondestructive trim and arrangement editing;
-- harmonization, synthesis, pitch correction, and noise reduction effects;
-- per-layer mute, reorder, promotion, bounce, and detailed editing;
+- nondestructive looper-layer trim, comping and warp editing;
+- harmonization, native instruments, pitch correction, stereo effects and automation;
+- per-layer mute, reorder, promotion, bounce, and deeper editing;
 - gesture bindings and rebindable hotkeys;
 - audible MIDI clip playback.

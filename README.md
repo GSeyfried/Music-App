@@ -90,5 +90,8 @@ Monitoring (playing input through the speakers) is off.
 - [Roadmap](docs/ROADMAP.md)
 - [Current end-to-end integration audit](docs/projects/workstation-buildout/UNWIRED_FEATURES.md)
 - [Expanded product direction](docs/projects/workstation-buildout/PRODUCT_DIRECTION.md)
+- [Track system, tool modes, templates, and presets](docs/projects/track-system/README.md)
+- [Sound library, sampler, and instrument articulation](docs/projects/sound-library/README.md)
+- [VoiceLoop Pocket focused mobile products](docs/projects/ios/PRODUCT_APPS.md)
 - [Reference package assessment](docs/REFERENCE_PACKAGE_ASSESSMENT.md)
 - [Reference packages: how to restore](reference-packages/README.md)

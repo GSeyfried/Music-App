@@ -23,7 +23,7 @@ workspaces share audio, MIDI, musical analysis, and project infrastructure:
 | **Composition** | MIDI editing, notation, harmonic analysis, transcription and arrangement | Analysis, theory, MIDI-file and project-data foundations exist. There is no composition workspace, MIDI playback/editor, notation or MusicXML. |
 | **Live Performance** | Instrument routing, monitoring, looping and digital instruments | Audio routing, monitoring, looping and MIDI input management exist. Instruments, mappings and performance-safe hardware validation do not. |
 | **Music Library** | Projects, recordings, samples, scores, presets and practice material | Project save/open, recovery, recent-project access and interchange are exposed in the current Project panel; a broader searchable library is absent. |
-| **VoiceLoop Pocket** | Simplified offline iPhone/iPad capture, layering and practice | Feasibility and touch guidance exist. No on-device Tauri/audio proof has run because full Xcode and device validation are still required. |
+| **VoiceLoop Pocket** | Focused offline Voice Song Builder, Singing Practice, Rhythm Practice and Note Recognition experiences | Product flows and touch guidance exist. No on-device Tauri/audio proof has run because full Xcode and device validation are still required. |
 
 The accepted Rust engine, Tauri 2 shell and React/TypeScript UI remain the
 baseline (D-001). Revisit that decision only at its documented technical
@@ -156,11 +156,20 @@ Detailed evidence and integration gaps are maintained in
   physical-device feasibility tests before commitment.
 - Initial acceptance: on a physical iPhone or iPad in Airplane Mode, record,
   loop, overdub, play, undo, save, terminate, and reopen without data loss.
+- Build one universal app first with purpose-specific, simple experiences:
+  Voice Song Builder (Voice Melody and Voice Percussion), Singing Practice,
+  Rhythm Practice and Note Recognition. See
+  [the mobile product definition](projects/ios/PRODUCT_APPS.md).
+- Use a shared one-octave digital piano with octave down/up rather than shrinking
+  a full keyboard onto the phone. Touch and the built-in microphone are baseline
+  inputs; external MIDI is optional later.
 
-## Near-term build sequence (agreed 2026-11-17)
+## Near-term build sequence (updated 2026-11-19)
 
-Runs alongside milestone 1's hardware checks: the H4n, the MIDI keyboard and the
-timing matrix in `projects/quality/TIMING_TEST_PLAN.md`.
+External H4n/physical-MIDI procedures remain documented but are deferred until
+the user has connectors/hardware. Continue built-in-device and virtual-MIDI
+checks where useful; missing external hardware does not block settings, mobile
+UI, instruments, library, practice or project work.
 
 1. **Settings foundation:**
    - a global registry of every interface/sound variable (see
@@ -202,8 +211,9 @@ verification. Starting unrelated backend systems does not satisfy completion.
 ### 1. Stabilize the existing Studio on real hardware
 
 Scope: reconcile Rust/TypeScript contracts; verify capture/transport/playback
-lifecycle; built-in devices and Zoom H4n Pro; physical MIDI keyboard; monitoring
-off by default; loopback calibration; two-clock drift and restart preservation.
+lifecycle on available built-in devices; monitoring off by default; restart
+preservation and all non-cable checks. Keep Zoom H4n Pro, physical MIDI keyboard,
+cable loopback and independent-clock procedures ready for later hardware access.
 
 Acceptance:
 
@@ -211,10 +221,12 @@ Acceptance:
   regression-tested without changing the visible layout.
 - Pause/resume retains the working session and microphone state; stopping or a
   device restart does not silently discard loops.
-- Free and synced loops, overdubs, undo/redo, mute/solo and calibration pass the
-  hardware procedures in the project docs.
-- H4n routing/channel/rate behavior and keyboard timing are recorded with
-  device/OS versions; limitations remain explicit.
+- Free and synced loops, overdubs, undo/redo, mute/solo and calibration pass
+  every procedure possible with the available built-in devices; cable-only
+  procedures remain deferred as listed below.
+- H4n routing/channel/rate, physical keyboard timing, cable loopback and
+  independent-clock results remain explicitly **DEFERRED: hardware/connector
+  unavailable**, not incorrectly marked failed or verified.
 - Required Mac checks pass and the native app is relaunched and exercised.
 
 ### 2. Complete project safety and interchange UI
@@ -251,9 +263,12 @@ per-layer nudge buttons. See
 
 ### 5. Prove VoiceLoop Pocket offline on a physical device
 
-Install full Xcode; build the smallest Tauri iOS shell; implement/verify the
-AVAudioSession boundary; meter, record, loop, save and reopen locally in
-Airplane Mode. Add hands-free controls only after the audio/storage proof.
+First build the one-octave keyboard and focused mobile routes against the mock
+engine. Then install full Xcode; build the smallest Tauri iOS shell;
+implement/verify the AVAudioSession boundary; meter, record, loop, save and
+reopen locally in Airplane Mode. Add Voice Song Builder and the three focused
+practice experiences incrementally after the audio/storage proof. Hands-free
+controls come later.
 
 ### 6. Improve pitch personalization
 
@@ -262,8 +277,9 @@ practice, colour customization and carefully smoothed optional reactive themes.
 
 ### 7. Establish MIDI playback and one internal instrument
 
-Prove one polyphonic synth track from physical and virtual keyboards plus MIDI
-clip playback. This becomes the common foundation for composition and live
+Prove one polyphonic instrument track from the touch/virtual one-octave keyboard
+plus MIDI clip playback. Physical MIDI keyboard verification is deferred until
+hardware is available. This becomes the common foundation for composition and live
 performance rather than separate instrument systems. Follow the incremental
 contract in [track-system](projects/track-system/README.md) rather than building
 a general graph before the second renderer is proven.

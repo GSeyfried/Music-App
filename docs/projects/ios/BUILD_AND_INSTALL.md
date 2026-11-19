@@ -1,10 +1,10 @@
 # Build and install on iPad / iPhone
 
-From a Mac with only Command Line Tools to VoiceLoop running in the iOS
-Simulator and on your own iPad and iPhone. **None of these steps has been run
-yet** (no Xcode on the build Mac). Commands come from the Tauri 2 docs, the
-local `tauri-cli 2.12.5 --help`, and Apple documentation. Expected results are
-stated so a deviation is easy to spot.
+From the current Mac to VoiceLoop running in the iOS Simulator and on your own
+iPad and iPhone. As of 2026-11-19, Xcode 27.2 is selected, iOS device and
+Simulator SDK/runtime 27.2 are installed, both ARM Rust targets are installed,
+and about 62 GB is free. CocoaPods/XcodeGen, the generated Apple project,
+signing and device execution remain unfinished.
 
 > **Simulator success is not evidence that realtime audio works.** The
 > Simulator runs x86/arm code on the Mac and routes audio through the Mac's
@@ -20,18 +20,15 @@ bash scripts/ios-setup-check.sh            # read-only; installs nothing
 bash scripts/ios-setup-check.sh --compile  # + cargo check of the Rust crates for iOS
 ```
 
-On 2026-11-17 it reported: only Command Line Tools, no iOS SDKs, no simulator
-runtime, no cocoapods, Node from nvm, **13 GB free disk**, and the Rust iOS
-targets installed.
+On 2026-11-19 it reported that Xcode, SDKs, runtime, disk and Rust targets are
+ready; CocoaPods is missing, XcodeGen is not on PATH, Node comes from nvm,
+`src-tauri/gen/apple` is absent, and no Apple development team is configured.
 
 ## 1. Free disk space (user)
 
-Xcode is a large download (the `.xip` plus expansion) and the iOS platform and
-Simulator runtime add several more GB. Budget **about 40 GB free** before you
-start. The Mac had about 13-14 GB free, which is **not enough**. Options: delete
-old simulators and caches, move `reference-packages/` (about 1 GB) off the
-disk, or run `cargo clean` for old `target/` content (`target/` was 4.5 GB).
-Coordinate `cargo clean` with other agents because it forces full rebuilds.
+Xcode and the iOS runtime are installed and the Mac currently has about 62 GB
+free, above the recommended 40 GB working margin. Keep monitoring free space
+as generated Xcode builds and device symbols accumulate.
 
 ## 2. Install Xcode (user)
 

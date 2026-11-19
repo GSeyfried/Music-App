@@ -3,12 +3,15 @@
 Owner: iOS platform agent (workstation build-out). Date: 2026-11-17.
 Related: [COMPATIBILITY_MATRIX.md](COMPATIBILITY_MATRIX.md),
 [BUILD_AND_INSTALL.md](BUILD_AND_INSTALL.md), [TOUCH_UI.md](TOUCH_UI.md),
+[PRODUCT_APPS.md](PRODUCT_APPS.md),
 `scripts/ios-setup-check.sh`, `src-tauri/Info.ios.plist`.
 
-**Nothing in this document has run on an iPhone, iPad, or simulator.** Full
-Xcode is not installed on the build Mac (Command Line Tools only), so the
-strongest evidence available is `cargo check` for the iOS targets. Labels used
-throughout:
+**Nothing in this document has run on an iPhone, iPad, or simulator.** The
+toolchain snapshot changed on 2026-11-19: Xcode 27.2 is selected, iPhoneOS and
+Simulator SDK/runtime 27.2 are installed, both Rust ARM iOS targets are
+installed, and about 62 GB is free. CocoaPods and XcodeGen remain missing,
+`src-tauri/gen/apple` has not been generated, and a development team is not
+configured. Labels used throughout:
 
 - **compiles**: `cargo check --target aarch64-apple-ios[-sim]` succeeded here.
 - **documented**: a primary source (Apple, Tauri, or CPAL source/changelog) says so.
@@ -27,11 +30,11 @@ remain unimplemented or unverified.
 | Question | Answer |
 | --- | --- |
 | Can the engine target iOS? | **Yes, at the earlier type-check level.** `voiceloop-analysis` and `voiceloop-engine` passed `cargo check` for `aarch64-apple-ios` and `aarch64-apple-ios-sim`. The current CPAL 0.18.2 working tree needs the same check rerun once the iOS SDK/tooling environment is available. Linking needs the iOS SDK. |
-| Can the Tauri shell target iOS? | **Not checkable without Xcode.** Build scripts (`objc2-exception-helper`, `swift-rs`) run `xcrun --sdk iphoneos/iphonesimulator`, which fails with Command Line Tools only. Tauri 2 documents iOS as supported. |
+| Can the Tauri shell target iOS? | The former Xcode/SDK blocker is resolved. Full shell generation/build is still pending CocoaPods/XcodeGen and signing configuration. |
 | Is the CPAL base current? | **Partly.** CPAL 0.18.2 is now adopted. It improves interruption, route/device-loss, fixed-buffer and latency support, but it still does not replace VoiceLoop's required AVAudioSession policy layer. |
 | What remains? | Add the **thin AVAudioSession layer in Rust (objc2-avf-audio)** for category/mode, preferred rate and buffer, activation, input selection, permission and app lifecycle. A prototype compiles for iOS (§5), but it is not integrated. |
 | Biggest architectural gap | Physical-device proof: interruption/route recovery, background/screen-lock behavior, Bluetooth/automotive routes, latency and offline save/reopen. Looper park/restore now addresses the earlier state-loss design gap but still needs app/device verification. |
-| Can the user test on their iPad/iPhone today? | No. Xcode must be installed first, and the Mac has **~13-14 GB free**, which is not enough for Xcode plus the iOS platform. See [BUILD_AND_INSTALL.md](BUILD_AND_INSTALL.md). |
+| Can the user test on their iPad/iPhone today? | Not yet. Xcode/SDK/disk are ready; CocoaPods/XcodeGen, project generation, signing, AVAudioSession integration and a device build remain. See [BUILD_AND_INSTALL.md](BUILD_AND_INSTALL.md). |
 
 ## 2. Compile-level proof (precise results)
 

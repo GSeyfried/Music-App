@@ -1,7 +1,9 @@
 # Settings
 
-Status: **proposed (2026-11-17), not started.** Design notes only. Nothing here
-compiles, has tests, or has been verified on hardware.
+Status: **registry implemented and actively used.** Many app, project and
+internal defaults are typed in `src/settings/registry.ts`, rendered in the
+settings UI, and indexed below. Cross-language schema generation, generalized
+project/track overrides, and hardware verification remain pending.
 
 ## Principle
 
@@ -33,10 +35,11 @@ Settings are split into three tiers by how often they are used:
    - Example: `transport.overdubStart` belongs here or in the advanced pop-up,
      not in the transport bar where it sits today.
 
-Most Preferences values act as **defaults**. PENDING: whether tracks (or
-projects) can override some of them with their own options, for example a
-per-track overdub start or monitoring. Add a "Tier" column to the index once
-the tiers are settled.
+Most Preferences values act as **defaults**. Per-track loop settings and effect
+chains already override their defaults. A generalized precedence model for
+tool modes, templates, presets and track/session overrides is proposed in
+[track-system](../track-system/README.md). Add a "Tier" column to the index
+once the remaining surfaces are settled.
 
 ## Proposed structure
 
