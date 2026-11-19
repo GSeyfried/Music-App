@@ -2293,11 +2293,11 @@ mod tests {
         let Ok(ArrangementReply::View(v)) = ask(&mut fresh, ArrangementRequest::Get) else { panic!("get") };
         assert_eq!(v.assets[0].peaks.len(), 1_024);
 
-        // Removing every lane drops the asset; New starts empty.
+        // Removing every lane keeps the asset (undo can bring it back); New starts empty.
         let mut empty = st.doc.clone();
         empty.tracks.clear();
         ask(&mut fresh, ArrangementRequest::Set { arrangement: empty }).unwrap();
-        assert!(fresh.arrangement().assets.is_empty() && fresh.has_unsaved_changes());
+        assert!(fresh.arrangement().assets.len() == 1 && fresh.has_unsaved_changes());
         fresh.request(ProjectRequest::New { name: "x".into() }, None, &lib).unwrap();
         assert_eq!(fresh.arrangement().doc, ArrangementDoc { sample_rate: 8_000, ..Default::default() });
     }

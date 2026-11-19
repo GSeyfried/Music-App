@@ -315,6 +315,96 @@ fn practice_import_library(
     engine.practice_import_library(library, replace)
 }
 
+// ---- PRODUCE arrangement (docs/projects/produce/README.md, "Contract") -----------
+
+use voiceloop_engine::arrangement::ArrangementDoc;
+use voiceloop_engine::arrangement::{
+    ArrangementReply, ArrangementRequest, ArrangementView, Bounced, FrameRange, SentToLooper,
+};
+
+/// Run an arrangement request off the main thread (capture, send and bounce
+/// wait for their operation to finish).
+async fn arrangement(engine: &Engine, request: ArrangementRequest) -> Result<ArrangementReply, EngineError> {
+    let engine = engine.clone();
+    tauri::async_runtime::spawn_blocking(move || engine.arrangement(request))
+        .await
+        .map_err(|_| EngineError::EngineStopped)?
+}
+
+fn unexpected() -> EngineError {
+    EngineError::Invalid("unexpected arrangement reply".into())
+}
+
+async fn arrangement_view(engine: &Engine, request: ArrangementRequest) -> Result<ArrangementView, EngineError> {
+    match arrangement(engine, request).await? {
+        ArrangementReply::View(v) => Ok(v),
+        _ => Err(unexpected()),
+    }
+}
+
+#[tauri::command]
+async fn arrangement_get(engine: State<'_, Engine>) -> Result<ArrangementView, EngineError> {
+    arrangement_view(&engine, ArrangementRequest::Get).await
+}
+
+/// Replace the arrangement (validated; marks the project unsaved).
+#[tauri::command]
+async fn arrangement_set(
+    engine: State<'_, Engine>,
+    arrangement: ArrangementDoc,
+) -> Result<ArrangementView, EngineError> {
+    arrangement_view(&engine, ArrangementRequest::Set { arrangement }).await
+}
+
+/// Render looper tracks to assets and append a lane per track (or per layer).
+#[tauri::command]
+async fn arrangement_capture_from_looper(
+    engine: State<'_, Engine>,
+    tracks: Vec<u32>,
+    per_layer: bool,
+    repeats: u32,
+    start_frame: u64,
+) -> Result<ArrangementView, EngineError> {
+    arrangement_view(&engine, ArrangementRequest::CaptureFromLooper { tracks, per_layer, repeats, start_frame }).await
+}
+
+/// Load a rendered region into a looper track (a new one when `looperTrack` is null).
+#[tauri::command]
+async fn arrangement_send_to_looper(
+    engine: State<'_, Engine>,
+    region_id: String,
+    looper_track: Option<u32>,
+) -> Result<SentToLooper, EngineError> {
+    match arrangement(&engine, ArrangementRequest::SendToLooper { region_id, looper_track }).await? {
+        ArrangementReply::Sent(s) => Ok(s),
+        _ => Err(unexpected()),
+    }
+}
+
+/// Play the arrangement from `fromFrame` (stops the looper transport).
+#[tauri::command]
+async fn arrangement_play(engine: State<'_, Engine>, from_frame: u64) -> Result<(), EngineError> {
+    arrangement(&engine, ArrangementRequest::Play { from_frame }).await.map(|_| ())
+}
+
+#[tauri::command]
+async fn arrangement_stop(engine: State<'_, Engine>) -> Result<(), EngineError> {
+    arrangement(&engine, ArrangementRequest::Stop).await.map(|_| ())
+}
+
+/// Offline render of the arrangement (or `range`) to a mono 24-bit WAV at `path`.
+#[tauri::command]
+async fn arrangement_bounce(
+    engine: State<'_, Engine>,
+    path: String,
+    range: Option<FrameRange>,
+) -> Result<Bounced, EngineError> {
+    match arrangement(&engine, ArrangementRequest::Bounce { path, range }).await? {
+        ArrangementReply::Bounced(b) => Ok(b),
+        _ => Err(unexpected()),
+    }
+}
+
 /// Menu actions forwarded to the frontend as `app://menu` with the item id.
 pub const MENU_EVENT: &str = "app://menu";
 const MENU_SETTINGS: &str = "settings";
@@ -406,7 +496,14 @@ pub fn run() {
             practice_import_file,
             preview_play,
             preview_stop,
-            set_input_needs
+            set_input_needs,
+            arrangement_get,
+            arrangement_set,
+            arrangement_capture_from_looper,
+            arrangement_send_to_looper,
+            arrangement_play,
+            arrangement_stop,
+            arrangement_bounce
         ])
         .build(tauri::generate_context!())
         .expect("error while building VoiceLoop");

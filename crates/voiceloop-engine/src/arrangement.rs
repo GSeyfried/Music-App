@@ -27,9 +27,8 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 use serde::{Deserialize, Serialize};
-use voiceloop_project::arrangement::{
-    audible_gain, region_envelope, region_source, scale_frames, ArrangementDoc, AudioAssetDoc,
-};
+use voiceloop_project::arrangement::{audible_gain, region_envelope, region_source, scale_frames};
+pub use voiceloop_project::arrangement::{ArrangementDoc, AudioAssetDoc};
 use voiceloop_project::package::{AssetAudio, Samples};
 use voiceloop_project::resample;
 
@@ -138,7 +137,9 @@ impl ArrangementState {
         ArrangementView { arrangement: self.doc.clone(), assets: self.assets.clone() }
     }
 
-    /// Replace the document (assets stay). Unused assets are dropped.
+    /// Replace the document. Assets stay, used or not, so the UI's undo/redo
+    /// (e.g. of a bring-in) can bring regions back that refer to them; they
+    /// are saved with the project.
     pub fn set(&mut self, mut doc: ArrangementDoc) -> Result<(), EngineError> {
         if doc.sample_rate == 0 {
             doc.sample_rate = self.rate();
@@ -152,16 +153,7 @@ impl ArrangementState {
         }
         doc.validate(&self.assets, self.rate()).map_err(|e| EngineError::Invalid(e.to_string()))?;
         self.doc = doc;
-        self.prune_assets();
         Ok(())
-    }
-
-    /// Drop assets no region uses any more (their files go at the next save).
-    fn prune_assets(&mut self) {
-        let used: std::collections::HashSet<&str> = self.doc.regions().map(|r| r.asset_id.as_str()).collect();
-        self.assets.retain(|a| used.contains(a.id.as_str()));
-        let keep: std::collections::HashSet<String> = self.assets.iter().map(|a| a.id.clone()).collect();
-        self.audio.retain(|id, _| keep.contains(id));
     }
 
     /// Add a new asset for `samples` (at the arrangement's rate); returns its id.
@@ -365,6 +357,8 @@ pub struct ArrangementPlayer {
     pos: u64,
     playing: bool,
     stopping: bool,
+    /// Position when Stop arrived (reported once the fade-out ends).
+    stop_frame: Option<u64>,
     looping: bool,
     level: f32,
     step: f32,
@@ -385,6 +379,7 @@ pub fn arrangement_pair() -> (ArrangementControl, ArrangementPlayer) {
         pos: 0,
         playing: false,
         stopping: false,
+        stop_frame: None,
         looping: false,
         level: 0.0,
         step: 1.0 / ARRANGEMENT_DECLICK_FRAMES.max(1) as f32,
@@ -479,10 +474,16 @@ impl ArrangementPlayer {
                     self.set_schedule(s);
                     self.playing = true;
                     self.stopping = false;
+                    self.stop_frame = None;
                     self.level = 0.0;
                 }
                 Message::Update(s) => self.set_schedule(s),
-                Message::Stop => self.stopping = true,
+                Message::Stop => {
+                    if !self.stopping {
+                        self.stop_frame = Some(self.pos);
+                    }
+                    self.stopping = true;
+                }
             }
         }
     }
@@ -539,6 +540,9 @@ impl ArrangementPlayer {
             *o = soft_limit(*o + v * self.level);
         }
         if self.stopping && self.level == 0.0 {
+            if let Some(at) = self.stop_frame.take() {
+                self.pos = at; // the playhead stays where Stop was asked for
+            }
             self.playing = false;
         }
         self.schedule = Some(s);
@@ -638,7 +642,11 @@ mod tests {
         let out = run(&mut p, 256, 64);
         assert!(out[D..].iter().all(|&v| v == 0.0), "silent after the declick fade");
         assert!(!c.position().playing);
-        assert_eq!(c.position_event(), Some(ArrangementPosition { frame: 700 + 64, playing: false }));
+        assert_eq!(
+            c.position_event(),
+            Some(ArrangementPosition { frame: 700, playing: false }),
+            "where Stop was asked"
+        );
         assert_eq!(c.position_event(), None, "only one final event");
         c.collect();
     }
@@ -680,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn set_validates_and_prunes_unused_assets() {
+    fn set_validates_and_keeps_unused_assets_for_undo() {
         let (mut st, id) = state();
         let mut doc = st.doc.clone();
         doc.tracks[0].regions.push(region("r1", &id, 0, 2_000));
@@ -689,8 +697,10 @@ mod tests {
         st.set(doc.clone()).unwrap();
         assert_eq!(st.assets.len(), 1);
         doc.tracks[0].regions.clear();
+        st.set(doc.clone()).unwrap();
+        assert_eq!((st.assets.len(), st.audio.len()), (1, 1), "kept: an undo may bring the region back");
+        doc.tracks[0].regions.push(region("r1", &id, 0, 1_000));
         st.set(doc).unwrap();
-        assert!(st.assets.is_empty() && st.audio.is_empty());
     }
 
     #[test]

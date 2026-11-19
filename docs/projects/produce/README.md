@@ -142,3 +142,83 @@ Event: `{ type: "arrangementPosition", payload: { frame: number, playing: boolea
 5. Later (PENDING): MIDI regions, time-stretch/warp (signalsmith-stretch, MIT,
    is the candidate), automation, effects, stereo/pan, recording straight
    into PRODUCE, tempo changes.
+
+## Engine status (2026-11-18)
+
+Slices 2 and 3 are built. Every Tauri command and the event in the contract
+exist.
+
+| Piece | Where |
+| --- | --- |
+| `ArrangementDoc`, `ArrangementTrackDoc`, `RegionDoc`, `MarkerDoc`, `LoopRangeDoc`, `AudioAssetDoc`, validation, peaks, shared per-sample rules (`region_source`, `region_envelope`), offline `render_range`, rate scaling | `crates/voiceloop-project/src/arrangement.rs` |
+| `ProjectDoc.arrangement` + `ProjectDoc.assets` (serde defaults: older projects open with an empty arrangement); asset WAVs `audio/asset-<hash>.wav`, checksummed, garbage-collected like layers; `package::load_assets` | `doc.rs`, `package.rs`, `recovery.rs` |
+| Engine-side state (`ArrangementState`), capture helper (`looper_track_audio`), realtime `ArrangementPlayer` / `ArrangementControl` | `crates/voiceloop-engine/src/arrangement.rs` |
+| Requests: get, set, capture, send to looper, play, stop, bounce; save / open / autosave carry the arrangement; unsaved-work tracking | `crates/voiceloop-engine/src/project.rs` (`ProjectGlue::arrangement_request`) |
+| `Engine::arrangement`, `arrangementPosition` event, looper ↔ arrangement transport exclusion | `crates/voiceloop-engine/src/engine.rs` |
+| Player mixed after the looper (before the preview) | `crates/voiceloop-engine/src/looper/io.rs` |
+| Tauri commands `arrangement_*` (async; run on a blocking worker) | `src-tauri/src/lib.rs` |
+
+How it behaves:
+
+- **Rates.** `Arrangement.sampleRate` is the engine rate once audio has run
+  (it is converted, assets resampled, when the device rate differs). Send
+  frames at the `sampleRate` you last received; `arrangement_set` refuses
+  another rate. A project saved before PRODUCE has `sampleRate: 0` on disk,
+  read as the project rate.
+- **Assets** stay in the project even when no region uses them, so the UI's
+  undo/redo (e.g. of a bring-in) can bring regions back with `arrangement_set`.
+  PENDING: a "remove unused assets" command.
+- **Capture** (`arrangement_capture_from_looper`) needs running audio and a
+  looper that is not recording. Each asset is one loop cycle (the track's own
+  loop period for per-track loops), layers placed at their nudge offsets, at
+  unity gain. The lane gets the looper track's gain and is muted when the
+  looper track is muted or stopped. The region repeats `repeats` (1..1024)
+  cycles: `lengthFrames = round(repeats × period)`, `repeat: true`. Track
+  names come from the project; per-layer lanes are named "<track> layer N".
+  Played through the lane, this is bit-for-bit what the looper plays (tested).
+- **Send to looper** renders the region (trim, repeat, fades, region gain;
+  not lane gain/mute) and loads it through the import machinery as the base
+  layer of a new looper track (or the chosen one, which must be empty), with a
+  Free `TrackLoop` of exactly the region's length. The looper transport must
+  be stopped. Other tracks keep their content, offsets and loop clocks.
+- **Bounce** writes mono 24-bit WAV at the arrangement rate through the
+  output limiter. `range: null` means frame 0 to the end of the last region.
+- **Playback.** `arrangement_play` stops the looper transport first; looper
+  `play`, `resume`, `restart`, `record` and `overdub` stop the arrangement.
+  `arrangement_play` without running audio output is refused (`invalid`).
+  Start and stop use a 64-frame declick fade; after `arrangement_stop` the
+  final `arrangementPosition` reports `playing: false` at the frame where stop
+  was asked. Loop off is `loopRange: null`. With a `loopRange` and a start
+  before its end, playback wraps at the range end; otherwise it stops by itself
+  after the last region (one final `arrangementPosition` with
+  `playing: false`). Edits while playing take effect at once without moving
+  the playhead. The event is sent with the ~30 Hz level/looper events while
+  audio runs.
+- **Overlapping regions** on one lane are summed (no "last one wins").
+- **Realtime.** Schedules (regions plus `Arc` handles on the asset samples)
+  are built on the control thread, handed over through an rtrb ring and
+  returned to be dropped there. A counting-allocator test proves `process`
+  never allocates or frees (`crates/voiceloop-engine/tests/arrangement_no_alloc.rs`).
+
+### Engine deviations from the contract
+
+- `AudioAsset` also carries `checksum` (`fnv1a64:…`). The UI can ignore it.
+- Every JSON object keeps unknown fields (`extra`), like the rest of
+  `project.json`.
+- Validation is strict: `fadeInFrames + fadeOutFrames ≤ lengthFrames`;
+  non-repeating regions must end inside their asset; repeating regions need
+  `sourceOffsetFrames < asset.frames`; ids are unique across lanes, regions
+  and markers; `loopRange.startFrame < endFrame`.
+- Capture and send-to-looper also emit `project` events (op kinds
+  `arrangementCapture`, `arrangementSendToLooper`, `arrangementBounce`) in
+  addition to the command's own result.
+
+### PENDING
+
+- Pan is stored only (the engine is mono).
+- Rate conversion of an arrangement after an audio restart at a new rate runs
+  on the control thread when the next arrangement request arrives (fine for
+  short songs; move it to a worker if it is ever slow).
+- Not exercised against real hardware yet: playback through the device,
+  position events in the running app, the async Tauri commands.
+- Arrangement undo is the UI's job (`arrangement_set` with the previous doc).

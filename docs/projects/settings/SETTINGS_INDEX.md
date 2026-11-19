@@ -220,3 +220,13 @@ tuning; only the first few are likely user-facing.
 | `looper.timing.minimumSpacingMs` | Timing hit spacing | Minimum distance between detected attacks. | 80 ms | app | Track Details timing readout | exists (engine internal) |
 | `looper.timing.maxHits` | Timing hit limit | Maximum attack offsets carried in one layer-timing event. | 32 | app | Track Details timing readout | exists (engine internal) |
 | `looper.timing.wholeBeatToleranceFrames` | Whole-beat tolerance | Maximum period mismatch allowed before beat-relative timing is withheld. | 1 frame | app | Track Details timing readout | exists (engine internal) |
+
+## PRODUCE engine (exists: `crates/voiceloop-engine/src/arrangement.rs`, `voiceloop-project/src/arrangement.rs`; see [produce](../produce/README.md))
+
+| ID | Label | Description | Default | Scope | Connected element | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| (engine) `arrangement::ARRANGEMENT_DECLICK_FRAMES` | Arrangement start/stop fade | Fade when arrangement playback starts or stops, so starting inside a region or stopping never clicks. Not user-facing. | 64 frames | app | PRODUCE play/stop | exists (engine internal) |
+| (engine) `arrangement::MAX_SCHEDULED_REGIONS` | Audible region limit | Most audible regions one playback schedule holds. Not user-facing. | 4096 | project | PRODUCE playback | exists (engine internal) |
+| (project) `arrangement::MAX_PEAK_BINS` | Asset waveform resolution | Peak bins stored per asset for drawing regions (part of the engine/UI contract). | 1024 | project | PRODUCE region waveforms | exists (engine internal) |
+| (engine) bounce format | Bounce format | `arrangement_bounce` writes mono 24-bit WAV at the arrangement rate. PENDING: a user choice like the export options. | mono, 24-bit | app | PRODUCE Bounce | exists (engine internal) |
+| (engine) capture repeats range | Bring-in repeats | Loop cycles one captured region spans (clamped). The UI default lives in its own `produce.*` setting. | 1..1024 | session | PRODUCE browser "Bring in from Play" | exists (engine internal) |
