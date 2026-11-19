@@ -18,6 +18,12 @@
 //! - Per-sample rules (trim, repeat, fades) are the ones in
 //!   `voiceloop_project::arrangement`, shared with bounce, so a bounce is
 //!   exactly what playback sounds like (before the output limiter).
+//! - **Effects.** Each lane with an effect chain is mixed into its own
+//!   buffer, run through its `ChainDsp` (built with the schedule), then
+//!   scaled by the lane gain. An `update` while playing moves each lane's
+//!   chain state into the new schedule when the lane and the chain's
+//!   structure are unchanged (tails continue; params glide), so editing never
+//!   restarts a reverb. Structural chain edits restart that lane's effects.
 //! - With a loop range set and playback started before its end, playback
 //!   wraps from the range end to its start; otherwise it stops by itself at
 //!   the end of the last region.
@@ -27,6 +33,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 use serde::{Deserialize, Serialize};
+use voiceloop_dsp::{ChainDsp, ChainSpec};
 use voiceloop_project::arrangement::{audible_gain, region_envelope, region_source, scale_frames, RangeRenderer};
 pub use voiceloop_project::arrangement::{ArrangementDoc, AudioAssetDoc};
 use voiceloop_project::package::{AssetAudio, Samples};
@@ -208,7 +215,7 @@ impl ArrangementState {
 
     /// A playback schedule for the realtime player.
     pub fn schedule(&self) -> Result<Box<ArrangementSchedule>, EngineError> {
-        ArrangementSchedule::build(&self.doc, &self.audio).map(Box::new)
+        ArrangementSchedule::build(&self.doc, &self.audio, self.bpm).map(Box::new)
     }
 }
 
@@ -260,23 +267,49 @@ struct Scheduled {
     asset: usize,
 }
 
+/// One lane of a schedule. Without effects, the lane gain is folded into
+/// each region's gain and the lane mixes straight into the output; with
+/// effects, regions mix into a lane buffer, through `chain`, then × `post`.
+#[derive(Debug)]
+struct Lane {
+    /// Hash of the lane id (matches lanes across schedule updates).
+    key: u64,
+    regions: Box<[Scheduled]>,
+    chain: Option<Box<ChainDsp>>,
+    spec: ChainSpec,
+    post: f32,
+}
+
 /// Regions and their samples, prepared for the output callback.
 #[derive(Debug)]
 pub struct ArrangementSchedule {
-    regions: Box<[Scheduled]>,
+    lanes: Box<[Lane]>,
     assets: Box<[Samples]>,
     end: u64,
     loop_range: Option<(u64, u64)>,
 }
 
+fn lane_key(id: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut h);
+    h.finish()
+}
+
 impl ArrangementSchedule {
-    /// Audible regions only (mute, solo and track gain folded in), sorted by start.
-    pub fn build(doc: &ArrangementDoc, audio: &AssetAudio) -> Result<Self, EngineError> {
+    /// Audible regions only (mute, solo and track gain folded in), sorted by
+    /// start within each lane; lane effects built at the arrangement rate.
+    pub fn build(doc: &ArrangementDoc, audio: &AssetAudio, bpm: f64) -> Result<Self, EngineError> {
         let mut assets: Vec<Samples> = Vec::new();
         let mut ids: Vec<&str> = Vec::new();
-        let mut regions = Vec::new();
+        let mut lanes = Vec::new();
+        let mut count = 0usize;
+        let rate = if doc.sample_rate == 0 { 48_000 } else { doc.sample_rate };
         for t in &doc.tracks {
             let tg = audible_gain(doc, t);
+            let fx = !t.effects.is_empty() && tg > 0.0;
+            let pre = if fx { 1.0 } else { tg };
+            let mut regions = Vec::new();
             for r in t.regions.iter().filter(|r| !r.muted && tg > 0.0 && r.gain > 0.0) {
                 let Some(samples) = audio.get(&r.asset_id) else {
                     return Err(EngineError::Invalid(format!("region {} has no audio loaded", r.id)));
@@ -296,27 +329,78 @@ impl ArrangementSchedule {
                     repeat: r.repeat,
                     fade_in: r.fade_in_frames,
                     fade_out: r.fade_out_frames,
-                    gain: r.gain * tg,
+                    gain: r.gain * pre,
                     asset,
                 });
             }
+            if regions.is_empty() && !fx {
+                continue;
+            }
+            count += regions.len();
+            regions.sort_by_key(|r| r.start);
+            let spec = t.effects.all_layers(); // a lane is one signal
+            lanes.push(Lane {
+                key: lane_key(&t.id),
+                regions: regions.into(),
+                chain: fx.then(|| Box::new(ChainDsp::new(&spec, rate, bpm))),
+                spec,
+                post: if fx { tg } else { 1.0 },
+            });
         }
-        if regions.len() > MAX_SCHEDULED_REGIONS {
+        if count > MAX_SCHEDULED_REGIONS {
             return Err(EngineError::ResourceLimit(format!("at most {MAX_SCHEDULED_REGIONS} audible regions")));
         }
-        regions.sort_by_key(|r| r.start);
         Ok(Self {
             end: doc.end_frame(),
-            regions: regions.into(),
+            lanes: lanes.into(),
             assets: assets.into(),
             loop_range: doc.loop_range.map(|l| (l.start_frame, l.end_frame)),
         })
     }
 
-    /// Add frames `[pos, pos + out.len())` of the schedule into `out`. Realtime-safe.
-    fn mix_into(&self, pos: u64, out: &mut [f32]) {
+    /// Audible regions in the schedule.
+    pub fn region_count(&self) -> usize {
+        self.lanes.iter().map(|l| l.regions.len()).sum()
+    }
+
+    /// Move each lane's effect state from `old` into this schedule where the
+    /// lane and its chain's structure are unchanged; params then glide to
+    /// the new values. Swaps boxes only: realtime-safe.
+    fn adopt_effects(&mut self, old: &mut ArrangementSchedule) {
+        for lane in self.lanes.iter_mut() {
+            let Some(prev) = old.lanes.iter_mut().find(|l| l.key == lane.key) else { continue };
+            if let (Some(new), Some(kept)) = (lane.chain.as_mut(), prev.chain.as_mut()) {
+                if kept.can_apply(&lane.spec) {
+                    std::mem::swap(new, kept);
+                    new.apply(&lane.spec, true);
+                }
+            }
+        }
+    }
+
+    /// Add frames `[pos, pos + out.len())` of the schedule into `out`, using
+    /// `lane_buf` (at least `out.len()`) for lanes with effects. Realtime-safe.
+    fn mix_into(&mut self, pos: u64, out: &mut [f32], lane_buf: &mut [f32]) {
+        let assets = &self.assets;
+        for lane in self.lanes.iter_mut() {
+            match lane.chain.as_mut() {
+                None => Self::mix_regions(&lane.regions, assets, pos, out),
+                Some(chain) => {
+                    let buf = &mut lane_buf[..out.len()];
+                    buf.fill(0.0);
+                    Self::mix_regions(&lane.regions, assets, pos, buf);
+                    chain.process_block(buf);
+                    for (o, v) in out.iter_mut().zip(buf.iter()) {
+                        *o += v * lane.post;
+                    }
+                }
+            }
+        }
+    }
+
+    fn mix_regions(regions: &[Scheduled], assets: &[Samples], pos: u64, out: &mut [f32]) {
         let to = pos + out.len() as u64;
-        for r in self.regions.iter() {
+        for r in regions.iter() {
             if r.start >= to {
                 break; // sorted by start
             }
@@ -324,7 +408,7 @@ impl ArrangementSchedule {
             if end <= pos {
                 continue;
             }
-            let data = &self.assets[r.asset][..];
+            let data = &assets[r.asset][..];
             let n = data.len() as u64;
             for f in r.start.max(pos)..end.min(to) {
                 let k = f - r.start;
@@ -374,6 +458,8 @@ pub struct ArrangementPlayer {
     level: f32,
     step: f32,
     scratch: Box<[f32]>,
+    /// One lane's signal before its effects.
+    lane: Box<[f32]>,
     shared: Arc<Shared>,
 }
 
@@ -395,6 +481,7 @@ pub fn arrangement_pair() -> (ArrangementControl, ArrangementPlayer) {
         level: 0.0,
         step: 1.0 / ARRANGEMENT_DECLICK_FRAMES.max(1) as f32,
         scratch: vec![0.0; MAX_BLOCK].into_boxed_slice(),
+        lane: vec![0.0; MAX_BLOCK].into_boxed_slice(),
         shared,
     };
     (control, player)
@@ -466,7 +553,12 @@ impl ArrangementPlayer {
         }
     }
 
-    fn set_schedule(&mut self, s: Box<ArrangementSchedule>) {
+    fn set_schedule(&mut self, mut s: Box<ArrangementSchedule>, keep_effects: bool) {
+        if keep_effects {
+            if let Some(old) = self.schedule.as_mut() {
+                s.adopt_effects(old);
+            }
+        }
         self.retire();
         if let Some(old) = self.schedule.take() {
             // The return ring is sized for every message, so this is unreachable;
@@ -482,13 +574,13 @@ impl ArrangementPlayer {
             match m {
                 Message::Play(s, from) => {
                     self.pos = from;
-                    self.set_schedule(s);
+                    self.set_schedule(s, false);
                     self.playing = true;
                     self.stopping = false;
                     self.stop_frame = None;
                     self.level = 0.0;
                 }
-                Message::Update(s) => self.set_schedule(s),
+                Message::Update(s) => self.set_schedule(s, true),
                 Message::Stop => {
                     if !self.stopping {
                         self.stop_frame = Some(self.pos);
@@ -516,7 +608,7 @@ impl ArrangementPlayer {
     }
 
     fn process_chunk(&mut self, out: &mut [f32]) {
-        let Some(s) = self.schedule.take() else {
+        let Some(mut s) = self.schedule.take() else {
             self.playing = false;
             return;
         };
@@ -536,7 +628,7 @@ impl ArrangementPlayer {
                 }
                 _ => None,
             };
-            s.mix_into(self.pos, &mut scratch[i..i + m]);
+            s.mix_into(self.pos, &mut scratch[i..i + m], &mut self.lane[..m]);
             self.pos += m as u64;
             i += m;
             if let Some((ls, le)) = wrap {
@@ -693,7 +785,7 @@ mod tests {
         t2.regions.push(region("r2", &id, 0, 10));
         t2.solo = true;
         st.doc.tracks.push(t2);
-        assert_eq!(st.schedule().unwrap().regions.len(), 1, "solo excludes the other lane");
+        assert_eq!(st.schedule().unwrap().region_count(), 1, "solo excludes the other lane");
         st.audio.clear();
         assert!(st.schedule().is_err());
     }

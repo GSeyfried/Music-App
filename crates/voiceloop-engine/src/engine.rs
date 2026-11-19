@@ -1008,10 +1008,12 @@ impl ControlLoop {
                 self.record_grace_until = Some(Instant::now() + MIC_GRACE);
             }
         }
+        let latest = self.latest_snapshot;
         let result = match self.playback.as_mut() {
-            Some(p) => {
-                p.handles.commands.push(command).map_err(|_| EngineError::Busy("looper command queue is full".into()))
-            }
+            Some(p) => p
+                .handles
+                .send(command, latest.as_ref())
+                .map_err(|_| EngineError::Busy("looper command queue is full".into())),
             None => Err(EngineError::Invalid("start audio input before using the looper".into())),
         };
         if result.is_ok() {
@@ -1216,7 +1218,12 @@ impl ControlLoop {
         let Some(p) = self.playback.as_mut() else { return };
         // Zero released layers here, off the audio thread.
         p.handles.recycler.service();
+        // And drop effect DSP the callback has finished with.
+        p.handles.collect_effects();
         while let Ok(notice) = p.handles.notices.pop() {
+            if matches!(notice, LooperNotice::Rejected { .. }) {
+                p.handles.forget_sent(); // the looper's chains may differ from what was sent
+            }
             (self.sink)(EngineEvent::LooperNotice(notice));
         }
         while let Ok(summary) = p.handles.summaries.pop() {
@@ -1227,6 +1234,11 @@ impl ControlLoop {
         }
         while let Ok(snapshot) = p.handles.snapshots.pop() {
             self.latest_snapshot = Some(snapshot);
+        }
+        if let Some(s) = self.latest_snapshot.as_ref() {
+            // Chains without DSP (after a duplicate, restore, or a lost race) get it now.
+            p.handles.heal_effects(s);
+            self.project.set_song_tempo(s.transport.bpm);
         }
     }
 

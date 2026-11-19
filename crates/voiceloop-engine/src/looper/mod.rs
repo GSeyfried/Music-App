@@ -51,6 +51,16 @@ pub use processor::{
 /// 16 is ample for "at least 10 usable tracks" and keeps snapshots small.
 pub const MAX_TRACKS: usize = 16;
 
+/// Crossfade (ms) when a track's effect chain changes structure (an effect
+/// added, removed, reordered, or a choice param changed), when its DSP is
+/// installed, and when a freeze swaps the rendered layer in. Also the time a
+/// layer takes to move into or out of the chain's scope.
+pub const EFFECT_CROSSFADE_MS: f32 = 10.0;
+/// Frames of a `FreezeTrack` render done per callback (bounded work).
+pub const FREEZE_FRAMES_PER_BLOCK: usize = 8_192;
+/// Effect chains in flight to (and back from) the output callback.
+pub const EFFECT_RING_CAPACITY: usize = 64;
+
 /// Fixed wire-format resolution of one completed layer around its loop.
 pub const LAYER_SUMMARY_BINS: usize = 128;
 /// Fixed upper bound for timing hits sent for one layer.
