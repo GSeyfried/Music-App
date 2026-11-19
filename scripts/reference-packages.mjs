@@ -9,8 +9,8 @@
 //   node scripts/reference-packages.mjs status            print name / SHA / license-file table
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -36,9 +36,21 @@ function licenseFiles(dir) {
   return readdirSync(dir).filter((f) => /^(licen[cs]e|copying|notice)/i.test(f));
 }
 
+function prunePackage(pkg, dir) {
+  for (const path of pkg.prune ?? []) {
+    const target = join(dir, path);
+    const within = relative(dir, target);
+    if (!within || within.startsWith("..") || isAbsolute(within)) {
+      throw new Error(`Unsafe prune path for ${pkg.name}: ${path}`);
+    }
+    rmSync(target, { recursive: true, force: true });
+  }
+}
+
 function fetchPackage(pkg) {
   const dir = join(refsDir, pkg.dir);
   if (existsSync(join(dir, ".git"))) {
+    prunePackage(pkg, dir);
     console.log(`= ${pkg.name}: already present at ${headSha(dir)?.slice(0, 12)}`);
     return true;
   }
@@ -65,6 +77,7 @@ function fetchPackage(pkg) {
       return false;
     }
   }
+  prunePackage(pkg, dir);
   console.log(`+ ${pkg.name}: ${headSha(dir)?.slice(0, 12)}`);
   return true;
 }

@@ -35,7 +35,7 @@ npm run app:dev                   # first Tauri compile (3–10 min), opens the 
 Optional:
 
 ```sh
-npm run refs:fetch                # restore the 14 reference repos (~1 GB, shallow); not needed to build
+npm run refs:fetch                # restore the 25 reference repos (~1.2 GB, shallow); not needed to build
 npm run app:build                 # release .app + .dmg in target/release/bundle/
 ```
 

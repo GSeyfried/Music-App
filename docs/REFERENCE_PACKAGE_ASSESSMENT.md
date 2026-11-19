@@ -1,7 +1,8 @@
 # Reference package assessment
 
 Evaluation of the repositories in `reference-packages/` (exact commits in
-`reference-packages/manifest.json`). Assessed on 2026-11-16.
+`reference-packages/manifest.json`). Initial assessment 2026-11-16; expanded
+2026-11-19 for Vochlea/mobile workflow research.
 
 **Evidence levels used below**
 
@@ -30,6 +31,17 @@ Recommendations: **Adopt** (use as a dependency), **Evaluate Further**
 | essentia.js | **AGPL-3.0** | **Reference Only** | Onset/beat/pitch algorithm survey |
 | tone.js | MIT | **Reference Only** | Musical time and transport API design |
 | rnnoise | BSD-3-Clause | **Evaluate Further** (optional, off by default) | Speech-oriented noise clean-up |
+| audiokit | MIT | **Reference / Evaluate Further** | Apple audio-session, recording and MIDI patterns |
+| dswaveformimage | MIT | **Reference Only** | Native iOS/macOS waveform rendering and live waveform UI |
+| whisper.cpp | MIT | **Evaluate Further** (optional background job) | Local lyric/speech transcription |
+| tract | MIT OR Apache-2.0 | **Evaluate Further** | Pure-Rust ONNX/TensorFlow inference |
+| linfa | MIT OR Apache-2.0 | **Evaluate Further** | Small per-user trigger-classifier experiments |
+| midly | Unlicense | **Evaluate for adoption** | Standard MIDI File parsing and writing |
+| aubio | **GPL-3.0** | **Reference Only** | Pitch/onset/tempo comparison |
+| librosa | ISC | **Research Only** | Offline MIR prototypes and golden-vector generation |
+| basic-pitch | Apache-2.0 | **Research / Evaluate Further** | Audio-to-MIDI transcription and cleanup comparison |
+| beat-this | MIT | **Research Only** | Beat/downbeat benchmark for free takes |
+| audioset-tagging-cnn | MIT | **Research Only** | Audio tags and embeddings |
 
 ## Native Rust audio
 
@@ -150,6 +162,41 @@ Assessment:
 - **Use:** API vocabulary for our transport (subdivision names, loop points, swing). Its timing depends on the Web Audio clock and JS timers, which our architecture rules out for realtime.
 - **License:** MIT. **Activity:** 2026-11-14.
 
+## 2026-11-19 mobile and voice-workflow expansion
+
+The additional repositories cover gaps exposed by the Dubler 2, DubBox,
+Dubnote, and Pitch survey. They are pinned in the manifest and locally verified;
+tracked model/test artifacts are removed after checkout by manifest `prune`
+lists, and no external model weights or datasets are retained.
+
+VoiceLoop's production backend is predominantly Rust, while many of these
+references are Python, Swift, C, or C++. They therefore are not drop-in engine
+components: useful behavior must usually be reimplemented behind VoiceLoop's
+Rust realtime and background-job boundaries. That architectural separation
+reduces accidental coupling, but changing programming language does **not**
+remove copyright or licence obligations. GPL/AGPL code must not be copied or
+translated; implement those concepts independently from documented behavior,
+public algorithms/papers, and permissively licensed sources. Permissive code may
+be reused or ported only with its required notices and a recorded design choice.
+
+- **Apple/mobile audio:** AudioKit is an architecture and possible platform-layer
+  reference, not permission to create a second audio engine beside CPAL.
+  DSWaveformImage is a native waveform-UI reference if the shared React surface
+  proves insufficient on iPhone.
+- **Personal trigger recognition:** librosa is the offline feature/prototyping
+  oracle; linfa can test small per-user KNN/SVM-style classifiers; tract is a
+  candidate runtime only if a compact trained neural model becomes justified.
+  None is a ready DubBox-style recognizer.
+- **Derived MIDI:** midly is a focused candidate for MIDI files. Basic Pitch is a
+  heavier offline transcription/cleanup comparison, not a live controller.
+- **Tempo and timing:** aubio (GPL, reference only), librosa, and Beat This form
+  comparison points for onset, tempo, beat, and downbeat estimates. VoiceLoop's
+  actual implementation must remain native and realtime-safe.
+- **Mobile idea enrichment:** whisper.cpp covers optional local transcription;
+  AudioSet Tagging CNN is an embeddings/tagging research source. Both must run as
+  bounded background jobs, and their model files require separate licensing and
+  device-budget review.
+
 ## Looper comparison
 
 | Concern | mloop [src] | Tracktion Engine [src] | Tone.js [src] | VoiceLoop plan (M1) |
@@ -168,10 +215,11 @@ Assessment:
 
 ## Conclusion
 
-Use the permissively licensed Rust crates (cpal, rtrb, midir, rubato, later
-fundsp) as dependencies. Treat Tracktion/JUCE as the design reference for
-session, clip, and recording architecture, and mloop as the behavioural
-reference for looper UX. Copy code from neither: GPL/AGPL/AGPL. The hard
-parts we must still build ourselves are input/output latency measurement,
-the looper state machine in the callback, and native pitch/onset analysis.
-None of these is provided under a licence we can ship today.
+Use focused permissive Rust crates (cpal, rtrb, midir, rubato, and potentially
+midly/fundsp) where they replace a well-bounded subsystem. Treat Tracktion/JUCE,
+mloop, Essentia, and aubio as design or behavior references where their licences
+prevent closed-product reuse. The new ML/MIR checkouts are evaluation material,
+not an authorization to put Python, model inference, allocation, or blocking
+work into the realtime path. The hard product-specific parts remain duplex
+alignment, realtime looper behavior, honest pitch/onset analysis, per-user
+trigger training, and an understandable workflow around derived artifacts.

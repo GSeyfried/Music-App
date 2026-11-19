@@ -154,6 +154,155 @@
       "capabilities": "Musical transport (BPM, time signature, loop points), lookahead scheduling, Time notation ('4n', '1m'), synths, effects.",
       "integration": "Reference for musical time abstractions and transport API design. Not used for realtime audio.",
       "limitations": "Web Audio based; scheduling depends on the browser audio clock and JS timers."
+    },
+    {
+      "name": "audiokit",
+      "dir": "audiokit",
+      "url": "https://github.com/AudioKit/AudioKit.git",
+      "category": "ios-audio",
+      "sha": "c358c15fdcdd0e78c4b4988f5c532c7cfb5c2eeb",
+      "license": "MIT",
+      "capabilities": "Swift audio framework for Apple platforms: AVAudioEngine graph helpers, recording, playback, MIDI, taps, effects and offline rendering.",
+      "integration": "Architecture and platform-layer reference for VoiceLoop Pocket. A narrowly scoped Swift dependency is possible if the future iOS audio session layer needs it.",
+      "limitations": "Apple-platform Swift stack, not reusable in the Rust realtime engine. Large framework; adopting it could create a second audio graph beside CPAL."
+    },
+    {
+      "name": "dswaveformimage",
+      "dir": "dswaveformimage",
+      "url": "https://github.com/dmrschmidt/DSWaveformImage.git",
+      "category": "ios-audio-ui",
+      "sha": "bc1b2b1e7fce2eb46150c64045c720782d18595d",
+      "license": "MIT",
+      "capabilities": "SwiftUI/UIKit waveform analysis, static waveform rendering, and live microphone waveform views for iOS and macOS.",
+      "integration": "Mobile interaction and rendering reference. Direct use only if VoiceLoop Pocket develops a native Swift waveform surface rather than the shared React UI.",
+      "limitations": "Visualization only; no pitch, onset, recording model or editing engine. Native Swift views do not drop directly into the Tauri webview."
+    },
+    {
+      "name": "whisper.cpp",
+      "dir": "whisper.cpp",
+      "url": "https://github.com/ggml-org/whisper.cpp.git",
+      "category": "speech-transcription",
+      "sha": "ca19af2449df7a7f4d482fae9d809b9d0817b636",
+      "license": "MIT",
+      "prune": [
+        "models/for-tests-ggml-tiny.en.bin",
+        "models/for-tests-ggml-medium.bin",
+        "models/for-tests-ggml-tiny.bin",
+        "models/for-tests-ggml-base.en.bin",
+        "models/for-tests-ggml-large.bin",
+        "models/for-tests-silero-v6.2.0-ggml.bin",
+        "models/for-tests-ggml-small.bin",
+        "models/for-tests-ggml-parakeet-tdt.bin",
+        "models/for-tests-ggml-base.bin",
+        "models/for-tests-ggml-small.en.bin",
+        "models/for-tests-ggml-parakeet-tdt-bad-nfft0.bin",
+        "models/for-tests-ggml-medium.en.bin",
+        "samples/jfk.mp3",
+        "samples/jfk.wav",
+        "bindings/go/samples/jfk.wav"
+      ],
+      "capabilities": "Local Whisper inference in C/C++ with Apple acceleration, quantization, timestamps, VAD options and iOS examples.",
+      "integration": "Candidate offline engine for optional lyric/speech transcription on recorded ideas. Run outside realtime callbacks through a bounded background job.",
+      "limitations": "Model files are not fetched and can be hundreds of MB. Speech transcription is not melody transcription; CPU, memory, battery and multilingual accuracy require device testing."
+    },
+    {
+      "name": "tract",
+      "dir": "tract",
+      "url": "https://github.com/sonos/tract.git",
+      "category": "ml-inference",
+      "sha": "3303188d89f9bec40f190b9426f0d0eaaf13ceda",
+      "license": "MIT OR Apache-2.0",
+      "capabilities": "Pure-Rust inference engine for ONNX and TensorFlow models with tractable graphs and CPU execution.",
+      "integration": "Candidate runtime for a small on-device percussion or audio-tagging model while preserving the Rust engine boundary.",
+      "limitations": "Inference runtime only: it does not supply a trained model, feature design or training pipeline. Model execution must stay off the realtime callback."
+    },
+    {
+      "name": "linfa",
+      "dir": "linfa",
+      "url": "https://github.com/rust-ml/linfa.git",
+      "category": "ml-training",
+      "sha": "3b411a4c985cdf6b83430d9c44f11e338d300c50",
+      "license": "MIT OR Apache-2.0",
+      "capabilities": "Rust classical machine-learning toolkit including clustering, nearest neighbours, linear models, SVMs and preprocessing.",
+      "integration": "Reference/candidate for training a tiny per-user trigger classifier from extracted onset features outside the audio callback.",
+      "limitations": "General ML toolkit, not an audio classifier. We must define realtime-safe features, validation, persistence and a compact inference path."
+    },
+    {
+      "name": "midly",
+      "dir": "midly",
+      "url": "https://github.com/kovaxis/midly.git",
+      "category": "midi-file",
+      "sha": "0f652b5880248a62c3cafeaa6b084f8ea02e5ac4",
+      "license": "Unlicense",
+      "capabilities": "Low-level, allocation-conscious Standard MIDI File parsing and writing in Rust, including no_std support.",
+      "integration": "Candidate direct dependency for deterministic MIDI clip export/import after event cleanup and clock mapping.",
+      "limitations": "File representation only; no realtime MIDI ports, quantization, note cleanup, tempo inference or musical semantics."
+    },
+    {
+      "name": "aubio",
+      "dir": "aubio",
+      "url": "https://github.com/aubio/aubio.git",
+      "category": "analysis",
+      "sha": "ad5cf975aed08cc4562dd008cf9f83b12b82ffb8",
+      "license": "GPL-3.0",
+      "capabilities": "Mature C implementations of onset detection, beat/tempo tracking, pitch detection, silence detection, notes and spectral descriptors.",
+      "integration": "Algorithm and behavior reference only unless GPL obligations are accepted. Useful comparison target for onset, tempo and monophonic pitch tests.",
+      "limitations": "GPL-3.0: do not copy, translate or link into a closed build. C/Python project and not a ready per-user beatbox classifier."
+    },
+    {
+      "name": "librosa",
+      "dir": "librosa",
+      "url": "https://github.com/librosa/librosa.git",
+      "category": "offline-analysis",
+      "sha": "e099b8933a34d968f5b4c652e4ccfa3acef9d64e",
+      "license": "ISC",
+      "capabilities": "Python music-information-retrieval toolkit: STFT, mel/MFCC, chroma, onset strength, beat tracking, tempo, pitch and effects.",
+      "integration": "Permissive offline research oracle for feature experiments, classifier prototypes and golden-vector generation; not an app dependency.",
+      "limitations": "Python/NumPy stack is unsuitable for the realtime engine and mobile shipping path. Production algorithms still need native independent implementations or suitable crates."
+    },
+    {
+      "name": "basic-pitch",
+      "dir": "basic-pitch",
+      "url": "https://github.com/spotify/basic-pitch.git",
+      "category": "audio-to-midi",
+      "sha": "fa5997af0a8210982619003269994a1be25eddf3",
+      "license": "Apache-2.0",
+      "prune": [
+        "basic_pitch/saved_models",
+        "tests/resources"
+      ],
+      "capabilities": "Neural audio-to-MIDI transcription with pitch bends and polyphonic note events, plus model and post-processing reference code.",
+      "integration": "Offline comparison/reference for derived MIDI capture and cleanup. Evaluate model conversion and performance before any optional background integration.",
+      "limitations": "Python/TensorFlow-oriented and not designed as a low-latency live controller. Model inference is heavier than VoiceLoop's current monophonic YIN path."
+    },
+    {
+      "name": "beat-this",
+      "dir": "beat-this",
+      "url": "https://github.com/CPJKU/beat_this.git",
+      "category": "beat-tracking",
+      "sha": "b95c8ab0c58c2d9fcfd40508ae8dffbc05ac4f5c",
+      "license": "MIT",
+      "prune": [
+        "tests/It Don't Mean A Thing - Kings of Swing.mp3"
+      ],
+      "capabilities": "State-of-the-art neural beat and downbeat tracking with pretrained checkpoints and evaluation code.",
+      "integration": "Offline benchmark/reference for free-take BPM/grid detection and beat placement quality.",
+      "limitations": "Python/PyTorch model is too heavy for the realtime callback and likely too heavy for default mobile use. Checkpoint size and license must be reviewed separately."
+    },
+    {
+      "name": "audioset-tagging-cnn",
+      "dir": "audioset-tagging-cnn",
+      "url": "https://github.com/qiuqiangkong/audioset_tagging_cnn.git",
+      "category": "audio-tagging",
+      "sha": "d2f4b8c18eab44737fcc0de1248ae21eb43f6aa4",
+      "license": "MIT",
+      "prune": [
+        "resources/R9_ZSCveAHg_7s.mp3",
+        "resources/R9_ZSCveAHg_7s.wav"
+      ],
+      "capabilities": "PANNs training and inference for AudioSet-scale audio tagging, embeddings and sound-event detection.",
+      "integration": "Research reference for optional instrument/content tags and embedding-based search of recorded ideas.",
+      "limitations": "Python/PyTorch and pretrained checkpoints are not fetched. General AudioSet tags are not song-section labels and may be too broad for personal music search."
     }
   ]
 }
