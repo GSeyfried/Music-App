@@ -42,6 +42,7 @@ interface Drag {
   ids: string[];
   moved: boolean;
   resultIds: string[];
+  copy: boolean;
 }
 
 interface Props {
@@ -100,7 +101,7 @@ export const Region = memo(function Region({ region, trackId, asset, selected, c
     if (!selected) store.clickRegion(region.id, trackId, false);
     else store.select({ trackId });
     const ids = kind === "move" && selected ? snapshot.selection.regionIds : [region.id];
-    drag.current = { kind, x0: e.clientX, y0: e.clientY, base, ids, moved: false, resultIds: ids };
+    drag.current = { kind, x0: e.clientX, y0: e.clientY, base, ids, moved: false, resultIds: ids, copy: false };
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
@@ -126,6 +127,7 @@ export const Region = memo(function Region({ region, trackId, asset, selected, c
         const laneDelta = Math.round(dy / g.trackHeight);
         const out = moveRegions(d.base, d.ids, delta, laneDelta, e.altKey);
         d.resultIds = out.ids;
+        d.copy = e.altKey;
         draft = out.arrangement;
         break;
       }
@@ -152,7 +154,7 @@ export const Region = memo(function Region({ region, trackId, asset, selected, c
     const d = drag.current;
     drag.current = null;
     if (!d || !d.moved) return;
-    if (commit) store.commitDraft(d.kind === "move" && d.resultIds !== d.ids ? "Copy" : LABELS[d.kind], { regionIds: d.resultIds });
+    if (commit) store.commitDraft(d.kind === "move" && d.copy ? "Copy" : LABELS[d.kind], { regionIds: d.resultIds });
     else store.setDraft(null);
   };
 

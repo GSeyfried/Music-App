@@ -12,11 +12,13 @@ import { nextName, newTrack, regionFromAsset } from "./model";
 import { useArrangementState, useArrangementStore } from "./ProduceContext";
 import { ASSET_MIME } from "./Timeline";
 
+const NO_NAMES: string[] = [];
+
 function PlayTracks() {
   const store = useArrangementStore();
   const engine = useEngineStore();
   const looper = useEngineState((s) => s.looper);
-  const trackNames = useProject((s) => s.project?.trackNames ?? []);
+  const trackNames = useProject((s) => s.project?.trackNames ?? NO_NAMES);
   const perLayer = useAppSetting("produce.bringInPerLayer");
   const repeats = useAppSetting("produce.defaultRepeats");
   const atPlayhead = useAppSetting("produce.bringInAtPlayhead");

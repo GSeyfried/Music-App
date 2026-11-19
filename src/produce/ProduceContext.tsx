@@ -11,6 +11,9 @@ import type { Timing } from "./model";
 
 const stores = new WeakMap<EngineClient, ArrangementStore>();
 
+/** The PRODUCE store already made for this client (tests and debugging). */
+export const arrangementStoreFor = (client: EngineClient): ArrangementStore | undefined => stores.get(client);
+
 const Ctx = createContext<ArrangementStore | null>(null);
 
 export function ProduceProvider({ children }: { children: ReactNode }) {
