@@ -35,6 +35,17 @@ behaviours), build both behind a setting with a sensible default instead of
 picking one or asking. The exception is when doing both would roughly triple
 the work; then build one, record the other as `PENDING`, and say so.
 
+## Reference check per tool
+
+Every new tool or major extension gets a lightweight reference check: about
+30–45 minutes, before building and briefly after. Compare 2–4 similar
+existing tools, skim their forums and issue trackers for recurring problems,
+and record gaps and known problems (handled, PENDING or not applicable) as a
+`## Reference check` section in the tool's project doc. Process, template and
+the planned audit of existing tools are in
+`docs/projects/quality/REFERENCE_AUDIT.md`. Study GPL/AGPL tools for behaviour
+only.
+
 ## Checks
 
 On the Mac: `npm run engine:test`, `npm run typecheck`, `cargo build -p voiceloop`, `npm run refs:verify`.
