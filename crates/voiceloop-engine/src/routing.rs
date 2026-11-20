@@ -110,6 +110,19 @@ pub enum MissingDevicePolicy {
     UseDefault,
 }
 
+/// iOS audio-session mode (ignored on macOS).
+/// - `measurement`: no system voice processing or automatic mic gain; the
+///   flattest signal (desktop/looper default). On iPhone it also lowers the
+///   built-in speaker and makes the built-in mic quiet.
+/// - `default`: system mic gain on, full speaker level (Pocket's default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionMode {
+    #[default]
+    Measurement,
+    Default,
+}
+
 /// Everything chosen when audio starts. Omitted fields mean "default".
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -132,6 +145,8 @@ pub struct AudioConfig {
     pub input_route: InputRoute,
     pub output_route: OutputRoute,
     pub monitor: MonitorConfig,
+    /// iOS session mode (setting `audio.ios.sessionMode`).
+    pub session_mode: SessionMode,
 }
 
 impl InputRoute {
@@ -368,7 +383,8 @@ mod tests {
                 "sampleRate": null, "bufferSize": null,
                 "inputRoute": {"type": "mixAll"},
                 "outputRoute": {"type": "pair", "left": 0, "right": 1},
-                "monitor": {"enabled": false, "gain": 1.0}
+                "monitor": {"enabled": false, "gain": 1.0},
+                "sessionMode": "measurement"
             })
         );
         let config: AudioConfig = serde_json::from_str(

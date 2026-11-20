@@ -14,6 +14,8 @@ typedef struct VlEngine VlEngine;
 typedef void (*VlEventCallback)(void *context, const char *event_json);
 
 /// Start the engine. `context` must stay valid until vl_engine_destroy returns.
+/// Returns NULL if the engine failed to start. Rust panics never unwind across
+/// this interface; vl_engine_call reports one as {"error":{"kind":"internal",...}}.
 VlEngine *vl_engine_create(VlEventCallback callback, void *context);
 
 /// Shut down (releases audio devices) and free the engine.

@@ -45,7 +45,7 @@ use crate::noise::{
 use crate::platform::{self, MicPermission, SessionEvent, SessionInfo, SessionRequest};
 use crate::practice::{self, Practice, PracticeIo, PracticeProgress, PracticeStatus, PracticeTakeEvent, TransportMap};
 use crate::preview::{PreviewRequest, PreviewStarted, SampleBank};
-use crate::song::{LocateClocks, SongLocation, SongPosition, SongSpec, SongTrigger};
+use crate::song::{LocateClocks, SongLocation, SongPosition, SongRelease, SongSpec, SongTrigger};
 use crate::project::{ProjectEvent, ProjectGlue, ProjectReply, ProjectRequest};
 use crate::routing::{AudioConfig, InputRoute, MonitorConfig, OutputRoute};
 use crate::settings::AudioSettings;
@@ -230,6 +230,7 @@ enum Command {
     SongPlay(f64, Reply<()>),
     SongStop(Reply<()>),
     SongTrigger(SongTrigger, Reply<()>),
+    SongRelease(SongRelease, Reply<()>),
     SongLocate(Option<u64>, f64, Reply<Option<SongLocation>>),
     Arrangement(ArrangementRequest, Reply<ArrangementReply>),
     SetInputNeeds(InputNeeds, Reply<EngineStatus>),
@@ -435,6 +436,11 @@ impl Engine {
     /// Play one sound of a part now (pads, voice monitoring, piano keys).
     pub fn song_trigger(&self, trigger: SongTrigger) -> Result<(), EngineError> {
         self.request(|r| Command::SongTrigger(trigger, r))
+    }
+
+    /// Release notes started with `hold` (live voice → piano).
+    pub fn song_release(&self, release: SongRelease) -> Result<(), EngineError> {
+        self.request(|r| Command::SongRelease(release, r))
     }
 
     /// The song beat the performer heard at input frame `input_frame` (a mic
@@ -877,6 +883,10 @@ impl ControlLoop {
                 };
                 let _ = reply.send(result);
             }
+            Command::SongRelease(release, reply) => {
+                let result = self.playback.as_mut().map_or(Ok(()), |p| p.song.release(&release));
+                let _ = reply.send(result);
+            }
             Command::SongLocate(input_frame, extra_ms, reply) => {
                 let result = self.playback.as_ref().and_then(|p| {
                     let clocks = LocateClocks::read(
@@ -1176,7 +1186,8 @@ impl ControlLoop {
         self.stop_audio();
 
         // The platform session (iOS) must be configured before any device query.
-        let session = SessionRequest::for_start(config.sample_rate, config.buffer_size);
+        let mut session = SessionRequest::for_start(config.sample_rate, config.buffer_size);
+        session.measurement = config.session_mode == crate::routing::SessionMode::Measurement;
         if let Some(info) = platform::prepare_audio(&session)? {
             (self.sink)(EngineEvent::AudioSessionInfo(info));
         }

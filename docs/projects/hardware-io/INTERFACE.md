@@ -123,6 +123,8 @@ export interface AudioConfig {
   inputRoute: InputRoute;          // default mixAll
   outputRoute: OutputRoute;        // default pair 0/1
   monitor: MonitorConfig;          // default off
+  sessionMode: "measurement" | "default"; // iOS only; default "measurement" (flat, no AGC, but quieter
+                                   // built-in mic and speaker); Pocket sends "default"
 }
 
 export interface AudioSettings {

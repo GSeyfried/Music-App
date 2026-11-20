@@ -41,6 +41,8 @@ pub const MAX_SONG_PARTS: usize = 8;
 /// Voices sounding at once (drum tails overlap; the quietest is stolen).
 pub const MAX_SONG_VOICES: usize = 64;
 /// Events in one song.
+/// `frames` of a held note: plays until released.
+const HELD: u32 = u32::MAX;
 pub const MAX_SONG_EVENTS: usize = 8_192;
 /// Messages queued to the audio thread.
 const QUEUE: usize = 64;
@@ -97,7 +99,8 @@ pub struct SongPart {
     /// Linear, 0..=2.
     #[serde(default = "one")]
     pub gain: f32,
-    /// FX preset id (see [`FX_PRESETS`]); unknown = clean.
+    /// FX preset id (see [`FX_PRESETS`]), or several joined with `+` and run
+    /// in that order (`"room+punch"`, at most [`MAX_FX_PER_PART`]); unknown = clean.
     #[serde(default)]
     pub fx: String,
     #[serde(default)]
@@ -116,6 +119,10 @@ pub struct SongSpec {
     pub click_gain: f32,
     #[serde(default = "master_gain")]
     pub master_gain: f32,
+    /// Make-up gain into the master soft limiter, dB (0…12). Louder on small
+    /// speakers at the cost of squashing peaks (`songBuilder.loudnessDb`).
+    #[serde(default)]
+    pub loudness_db: f32,
     /// Audible parts only (the app resolves mute and solo).
     #[serde(default)]
     pub parts: Vec<SongPart>,
@@ -166,6 +173,18 @@ pub struct SongTrigger {
     pub velocity: f32,
     #[serde(default)]
     pub length_beats: f64,
+    /// Hold a melody note until `song_release` (live voice → piano). Ignores `lengthBeats`.
+    #[serde(default)]
+    pub hold: bool,
+}
+
+/// Release held notes of a part: one `midi`, or all of them.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SongRelease {
+    pub part_id: u32,
+    #[serde(default)]
+    pub midi: Option<u8>,
 }
 
 /// Sent as the `songPosition` event (~30 Hz while playing, once on stop).
@@ -246,7 +265,7 @@ pub const DRUM_KITS: [DrumKit; 3] = [
         label: "Studio",
         gain: 0.9,
         tone_hz: 20_000.0,
-        kick: KickSpec { start_hz: 140.0, end_hz: 52.0, sweep_seconds: 0.07, decay_seconds: 0.32, click: 0.35, drive: 0.15 },
+        kick: KickSpec { start_hz: 180.0, end_hz: 55.0, sweep_seconds: 0.06, decay_seconds: 0.42, click: 0.5, drive: 0.55 },
         snare: SnareSpec { tone_hz: 190.0, tone: 0.45, noise: 0.75, noise_hz: 1_800.0, decay_seconds: 0.18 },
         hat: HatSpec { cutoff_hz: 7_500.0, decay_seconds: 0.05, metallic: 0.3 },
         open_hat: HatSpec { cutoff_hz: 7_000.0, decay_seconds: 0.32, metallic: 0.3 },
@@ -257,7 +276,7 @@ pub const DRUM_KITS: [DrumKit; 3] = [
         label: "808",
         gain: 0.85,
         tone_hz: 20_000.0,
-        kick: KickSpec { start_hz: 95.0, end_hz: 45.0, sweep_seconds: 0.05, decay_seconds: 0.75, click: 0.15, drive: 0.35 },
+        kick: KickSpec { start_hz: 120.0, end_hz: 48.0, sweep_seconds: 0.05, decay_seconds: 0.8, click: 0.25, drive: 0.6 },
         snare: SnareSpec { tone_hz: 240.0, tone: 0.6, noise: 0.55, noise_hz: 2_600.0, decay_seconds: 0.14 },
         hat: HatSpec { cutoff_hz: 8_500.0, decay_seconds: 0.035, metallic: 0.85 },
         open_hat: HatSpec { cutoff_hz: 8_000.0, decay_seconds: 0.38, metallic: 0.85 },
@@ -268,7 +287,7 @@ pub const DRUM_KITS: [DrumKit; 3] = [
         label: "Lo-fi",
         gain: 0.95,
         tone_hz: 4_200.0,
-        kick: KickSpec { start_hz: 110.0, end_hz: 55.0, sweep_seconds: 0.06, decay_seconds: 0.28, click: 0.1, drive: 0.5 },
+        kick: KickSpec { start_hz: 130.0, end_hz: 56.0, sweep_seconds: 0.06, decay_seconds: 0.32, click: 0.15, drive: 0.75 },
         snare: SnareSpec { tone_hz: 175.0, tone: 0.5, noise: 0.6, noise_hz: 1_300.0, decay_seconds: 0.2 },
         hat: HatSpec { cutoff_hz: 5_500.0, decay_seconds: 0.06, metallic: 0.15 },
         open_hat: HatSpec { cutoff_hz: 5_000.0, decay_seconds: 0.25, metallic: 0.15 },
@@ -357,6 +376,27 @@ pub const FX_PRESETS: [(&str, &str, &str); 7] = [
     ("lofi", "Lo-fi", "Crunchy, dull and narrow, like an old sampler."),
     ("radio", "Radio", "Thin telephone/radio band."),
 ];
+
+/// Presets that can be stacked on one part (`songBuilder.fxPerPart`).
+pub const MAX_FX_PER_PART: usize = 3;
+
+/// The chain for a part's `fx`: presets joined with `+`, in order. Effects past
+/// the chain's capacity are dropped.
+pub fn fx_stack(ids: &str) -> ChainSpec {
+    let mut out = ChainSpec::EMPTY;
+    for (i, id) in ids.split('+').map(str::trim).filter(|s| !s.is_empty()).take(MAX_FX_PER_PART).enumerate() {
+        for e in fx_preset(id).effects() {
+            let mut e = *e;
+            // Unique ids across the stack: "0rv", "1rv", ...
+            let tag = format!("{i}{}", e.id.as_str());
+            e.id = voiceloop_dsp::EffectId::new(&tag).unwrap_or(e.id);
+            if !out.push(e) {
+                return out;
+            }
+        }
+    }
+    out
+}
 
 /// The effect chain of an FX preset (built from the desktop effect blocks).
 pub fn fx_preset(id: &str) -> ChainSpec {
@@ -746,6 +786,8 @@ enum Msg {
     Play { count_in_frames: u64 },
     Stop,
     Trigger { slot: u8, start: VoiceStart },
+    /// Release held notes on `slot` (`midi` 255 = all).
+    Release { slot: u8, midi: u8 },
 }
 
 enum Garbage {
@@ -861,6 +903,18 @@ impl SongPlayer {
                     }
                 }
                 Msg::Trigger { slot, start } => self.start_voice(slot, start),
+                Msg::Release { slot, midi } => {
+                    for v in &mut self.voices {
+                        if !v.active || v.slot != slot {
+                            continue;
+                        }
+                        if let VoiceStart::Note { midi: m, ref mut frames, .. } = v.start {
+                            if *frames == HELD && (midi == u8::MAX || m == midi) {
+                                *frames = v.t.max(1);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1026,7 +1080,7 @@ impl SongControl {
             let entry = self.slots.get_mut(&part.id).expect("inserted above");
             if entry.1 != part.fx {
                 entry.1 = part.fx.clone();
-                chains.push((slot, Box::new(ChainDsp::new(&fx_preset(&part.fx), self.sample_rate, spec.bpm))));
+                chains.push((slot, Box::new(ChainDsp::new(&fx_stack(&part.fx), self.sample_rate, spec.bpm))));
             }
             gains[slot as usize] = part.gain.clamp(0.0, 2.0);
             used[slot as usize] = true;
@@ -1060,7 +1114,7 @@ impl SongControl {
             beats_per_bar: spec.beats_per_bar,
             click: spec.click,
             click_gain: spec.click_gain.clamp(0.0, 1.0),
-            master_gain: spec.master_gain.clamp(0.0, 1.5),
+            master_gain: spec.master_gain.clamp(0.0, 1.5) * 10f32.powf(spec.loudness_db.clamp(0.0, 12.0) / 20.0),
             gains,
             used,
             events,
@@ -1099,11 +1153,16 @@ impl SongControl {
                 voice: voice_index(instrument),
                 midi: midi.min(127),
                 velocity,
-                frames: (t.length_beats.max(0.05) * fpb).round() as u32,
+                frames: if t.hold { HELD } else { ((t.length_beats.max(0.05) * fpb).round() as u32).min(HELD - 1) },
             },
             _ => return Err(EngineError::Invalid("song: a drum part needs `lane`, a melody part `midi`".into())),
         };
         self.send(Msg::Trigger { slot, start })
+    }
+
+    pub fn release(&mut self, r: &SongRelease) -> Result<(), EngineError> {
+        let slot = self.slots.get(&r.part_id).map(|s| s.0).ok_or_else(|| EngineError::Invalid("song: no such part".into()))?;
+        self.send(Msg::Release { slot, midi: r.midi.map(|m| m.min(127)).unwrap_or(u8::MAX) })
     }
 
     /// Drop finished schedules and chains (control thread).
@@ -1233,6 +1292,7 @@ mod tests {
             click: false,
             click_gain: 0.45,
             master_gain: 1.0,
+            loudness_db: 0.0,
             parts: vec![SongPart { id: 7, sound: PartSound::Drums { kit: "studio".into() }, gain: 1.0, fx: "clean".into(), events }],
         }
     }
@@ -1324,7 +1384,7 @@ mod tests {
                 s.parts[0].fx = fx.into();
                 c.set(&s).unwrap();
                 for lane in [DrumLane::Kick, DrumLane::Snare, DrumLane::Hat, DrumLane::Clap, DrumLane::OpenHat] {
-                    c.trigger(&SongTrigger { part_id: 7, lane: Some(lane), midi: None, velocity: 1.0, length_beats: 0.0 }).unwrap();
+                    c.trigger(&SongTrigger { part_id: 7, lane: Some(lane), midi: None, velocity: 1.0, length_beats: 0.0, hold: false }).unwrap();
                 }
                 let out = render(&mut p, SR as usize / 2);
                 assert!(out.iter().all(|v| v.is_finite() && v.abs() <= 1.0), "{} {fx}", kit.id);
@@ -1336,11 +1396,37 @@ mod tests {
             let mut s = spec(vec![]);
             s.parts[0].sound = PartSound::Melody { instrument: voice.id.into() };
             c.set(&s).unwrap();
-            c.trigger(&SongTrigger { part_id: 7, lane: None, midi: Some(60), velocity: 0.8, length_beats: 1.0 }).unwrap();
+            c.trigger(&SongTrigger { part_id: 7, lane: None, midi: Some(60), velocity: 0.8, length_beats: 1.0, hold: false }).unwrap();
             let out = render(&mut p, SR as usize);
             assert!(out.iter().any(|v| v.abs() > 0.01), "{} silent", voice.id);
             assert!(out[SR as usize - 100..].iter().all(|v| v.abs() < 1e-3), "{} did not release", voice.id);
         }
+    }
+
+    #[test]
+    fn held_notes_sustain_until_released() {
+        let (mut c, mut p) = song_pair(SR);
+        let mut s = spec(vec![]);
+        s.parts[0].sound = PartSound::Melody { instrument: "softSynth".into() };
+        c.set(&s).unwrap();
+        c.trigger(&SongTrigger { part_id: 7, lane: None, midi: Some(64), velocity: 0.8, length_beats: 0.0, hold: true }).unwrap();
+        let held = render(&mut p, SR as usize * 3);
+        let tail = &held[held.len() - 2_000..];
+        assert!(tail.iter().any(|v| v.abs() > 0.01), "a held note keeps sounding after 3 s");
+        c.release(&SongRelease { part_id: 7, midi: Some(64) }).unwrap();
+        let out = render(&mut p, SR as usize);
+        assert!(out[out.len() - 100..].iter().all(|v| v.abs() < 1e-3), "released note fades out");
+        assert!(c.release(&SongRelease { part_id: 99, midi: None }).is_err());
+    }
+
+    #[test]
+    fn fx_stack_chains_presets_in_order_with_unique_ids() {
+        let chain = fx_stack("room+punch");
+        let ids: Vec<&str> = chain.effects().iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["0rv", "1cp", "1st"]);
+        assert_eq!(fx_stack("room+room+room+room").effects().len(), MAX_FX_PER_PART);
+        assert!(fx_stack("").effects().is_empty());
+        assert_eq!(fx_stack("punch").effects().len(), fx_preset("punch").effects().len());
     }
 
     #[test]

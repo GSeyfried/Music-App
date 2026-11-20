@@ -60,5 +60,5 @@ pub use engine::{Engine, EngineEvent, EngineStatus, EngineWarning, EventSink, Pi
 pub use error::EngineError;
 pub use looper::{LooperCommand, LooperConfig, LooperState};
 pub use project::{ProjectEvent, ProjectReply, ProjectRequest};
-pub use routing::{AudioConfig, InputRoute, MonitorConfig, OutputRoute};
+pub use routing::{AudioConfig, InputRoute, MonitorConfig, OutputRoute, SessionMode};
 pub use settings::AudioSettings;

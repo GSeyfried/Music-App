@@ -17,7 +17,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use voiceloop_engine::mic::InputNeeds;
 use voiceloop_engine::preview::PreviewRequest;
-use voiceloop_engine::song::{SongSpec, SongTrigger};
+use voiceloop_engine::song::{SongRelease, SongSpec, SongTrigger};
 use voiceloop_engine::{AnalysisConfig, AudioConfig, Engine, EngineError, LooperCommand};
 
 /// Receives one engine event as a NUL-terminated UTF-8 JSON string.
@@ -35,20 +35,26 @@ unsafe impl Send for Context {}
 unsafe impl Sync for Context {}
 
 /// Start the engine. Events are delivered to `callback(context, json)`.
-/// Returns null only if `callback` is null.
+/// Returns null if `callback` is null or the engine failed to start (a panic is never
+/// unwound across this boundary; `vl_engine_call` reports one as an `internal` error).
 #[no_mangle]
 pub extern "C" fn vl_engine_create(callback: Option<VlEventCallback>, context: *mut c_void) -> *mut VlEngine {
     let Some(callback) = callback else { return std::ptr::null_mut() };
     let context = Context(context);
-    let engine = Engine::start(Box::new(move |event| {
-        let ctx = &context;
-        if let Ok(text) = serde_json::to_string(&event) {
-            if let Ok(c) = CString::new(text) {
-                callback(ctx.0, c.as_ptr());
+    let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        Engine::start(Box::new(move |event| {
+            let ctx = &context;
+            if let Ok(text) = serde_json::to_string(&event) {
+                if let Ok(c) = CString::new(text) {
+                    callback(ctx.0, c.as_ptr());
+                }
             }
-        }
+        }))
     }));
-    Box::into_raw(Box::new(VlEngine { engine }))
+    match started {
+        Ok(engine) => Box::into_raw(Box::new(VlEngine { engine })),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 /// Shut the engine down (releases audio devices) and free it.
@@ -62,7 +68,7 @@ pub unsafe extern "C" fn vl_engine_destroy(engine: *mut VlEngine) {
     }
     // SAFETY: per the contract above, the pointer is a live Box from vl_engine_create.
     let boxed = unsafe { Box::from_raw(engine) };
-    boxed.engine.shutdown();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || boxed.engine.shutdown()));
 }
 
 /// Run a command. `args_json` may be null or `{}` for commands without
@@ -86,9 +92,11 @@ pub unsafe extern "C" fn vl_engine_call(engine: *const VlEngine, command: *const
             let text = unsafe { CStr::from_ptr(args_json) }.to_string_lossy();
             serde_json::from_str(&text).unwrap_or(Value::Null)
         };
-        match dispatch(engine, &command, &args) {
-            Ok(v) => json!({ "ok": v }),
-            Err(e) => json!({ "error": e }),
+        // A Rust panic must never unwind into Swift/C: report it as an error instead.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(engine, &command, &args))) {
+            Ok(Ok(v)) => json!({ "ok": v }),
+            Ok(Err(e)) => json!({ "error": e }),
+            Err(_) => json!({ "error": { "kind": "internal", "message": format!("engine panicked in `{command}`") } }),
         }
     };
     CString::new(reply.to_string()).map(CString::into_raw).unwrap_or(std::ptr::null_mut())
@@ -142,6 +150,7 @@ fn dispatch(engine: &Engine, command: &str, args: &Value) -> Result<Value, Engin
         "song_play" => ok(engine.song_play(arg::<Option<f64>>(args, "countInBars")?.unwrap_or(0.0))?),
         "song_stop" => ok(engine.song_stop()?),
         "song_trigger" => ok(engine.song_trigger(arg::<SongTrigger>(args, "trigger")?)?),
+        "song_release" => ok(engine.song_release(arg::<SongRelease>(args, "release")?)?),
         "song_locate" => ok(engine.song_locate(
             arg::<Option<u64>>(args, "inputFrame")?,
             arg::<Option<f64>>(args, "extraMs")?.unwrap_or(0.0),

@@ -81,6 +81,8 @@ export interface AudioConfig {
   inputRoute: InputRoute;
   outputRoute: OutputRoute;
   monitor: MonitorConfig;
+  /** iOS session mode; desktop ignores it. Omitted = "measurement". */
+  sessionMode?: "measurement" | "default";
 }
 
 /** The engine's defaults for every omitted AudioConfig field. */
