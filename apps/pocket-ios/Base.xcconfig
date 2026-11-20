@@ -1,0 +1,7 @@
+// Shared build settings for VoiceLoop Pocket (referenced from project.yml).
+// Signing: put your team in Local.xcconfig (git-ignored), e.g.
+//   DEVELOPMENT_TEAM = ABCDE12345
+// Find the ID in Xcode › Settings › Accounts › (your Apple ID) › team, or
+// developer.apple.com › Membership. A free personal team works for your own phone.
+CODE_SIGN_STYLE = Automatic
+#include? "Local.xcconfig"
