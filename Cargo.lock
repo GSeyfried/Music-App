@@ -4260,6 +4260,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "voiceloop-ffi"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "voiceloop-engine",
+]
+
+[[package]]
 name = "voiceloop-project"
 version = "0.1.0"
 dependencies = [

@@ -282,6 +282,8 @@ export type InputReason =
   | "pitch"
   | "practice"
   | "game"
+  /** Pocket Song Builder is listening for voice drums. */
+  | "songBuilder"
   | "meter"
   | "record"
   | "monitor"
@@ -694,6 +696,23 @@ export interface Onset {
   riseDb: number;
 }
 
+/** Mirrors voiceloop-analysis `percussion::HitTimbre`: what an onset sounded like. */
+export interface HitTimbre {
+  frame: number;
+  sampleRate: number;
+  levelDb: number;
+  riseDb: number;
+  /** Fractions of spectral energy in the low / mid / high bands (sum 1). */
+  low: number;
+  mid: number;
+  high: number;
+  centroidHz: number;
+  /** Sign changes per sample, 0..1. */
+  zeroCrossingRate: number;
+  /** Second-half energy over first-half energy of the window, dB. */
+  decayDb: number;
+}
+
 /** Mirrors voiceloop-analysis `theory::ChordQuality`. */
 export type ChordQuality =
   | "major"
@@ -799,6 +818,7 @@ export interface AnalysisConfig {
     lookbackSeconds?: number;
     minIntervalSeconds?: number;
   };
+  hits?: { enabled?: boolean; windowSeconds?: number; lowHz?: number; highHz?: number };
   chords?: ChordStreamConfig;
 }
 
@@ -816,6 +836,9 @@ export type EngineEvent =
   | { type: "pitch"; payload: PitchUpdate }
   | { type: "note"; payload: NoteEvent }
   | { type: "onset"; payload: Onset }
+  | { type: "hit"; payload: HitTimbre }
+  /** Pocket Song Builder playhead (VoiceLoop Pocket only; the desktop app ignores it). */
+  | { type: "songPosition"; payload: { playing: boolean; beat: number; pass: number; outputFrame: number | null } }
   | { type: "chord"; payload: ChordEvent }
   | { type: "devicesChanged"; payload: DevicesChanged }
   | { type: "midiPorts"; payload: MidiPortInfo[] }
@@ -846,6 +869,8 @@ export const EVENT_TYPES: readonly EngineEventType[] = [
   "pitch",
   "note",
   "onset",
+  "hit",
+  "songPosition",
   "chord",
   "devicesChanged",
   "midiPorts",

@@ -503,7 +503,7 @@ impl Practice {
                     r.mark_gap(frames);
                 }
             }
-            AnalysisOutput::Note(_) | AnalysisOutput::Chord(_) => {}
+            AnalysisOutput::Note(_) | AnalysisOutput::Chord(_) | AnalysisOutput::Hit(_) => {}
         }
     }
 

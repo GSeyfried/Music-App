@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use voiceloop_analysis::{NoteEvent, Onset, PitchFrame};
+use voiceloop_analysis::{HitTimbre, NoteEvent, Onset, PitchFrame};
 
 use crate::analysis::{AnalysisConfig, AnalysisOutput, AnalysisWorker, ChordEvent};
 use crate::arrangement::{ArrangementPosition, ArrangementReply, ArrangementRequest};
@@ -45,6 +45,7 @@ use crate::noise::{
 use crate::platform::{self, MicPermission, SessionEvent, SessionInfo, SessionRequest};
 use crate::practice::{self, Practice, PracticeIo, PracticeProgress, PracticeStatus, PracticeTakeEvent, TransportMap};
 use crate::preview::{PreviewRequest, PreviewStarted, SampleBank};
+use crate::song::{LocateClocks, SongLocation, SongPosition, SongSpec, SongTrigger};
 use crate::project::{ProjectEvent, ProjectGlue, ProjectReply, ProjectRequest};
 use crate::routing::{AudioConfig, InputRoute, MonitorConfig, OutputRoute};
 use crate::settings::AudioSettings;
@@ -116,6 +117,8 @@ pub enum EngineEvent {
     Error(EngineError),
     /// Non-fatal advisory.
     Warning(EngineWarning),
+    /// Pocket Song Builder playhead: ~30 Hz while the song plays, once more when it stops.
+    SongPosition(SongPosition),
     Looper(LooperState),
     LooperNotice(LooperNotice),
     /// Exact 128-bin peak envelope for one completed immutable loop layer.
@@ -128,6 +131,8 @@ pub enum EngineEvent {
     Note(NoteEvent),
     /// An attack was detected in the input.
     Onset(Onset),
+    /// Timbre of an onset ~40 ms after it, for voice drums (see `voiceloop_analysis::percussion`).
+    Hit(HitTimbre),
     /// The live chord changed (or a ≤ 4 Hz refresh of it; see `analysis::ChordStream`).
     Chord(ChordEvent),
     /// The set of audio devices changed (hot-plug).
@@ -221,6 +226,11 @@ enum Command {
     UsePreviewSamples(std::path::PathBuf, Reply<u32>),
     PreviewPlay(PreviewRequest, Reply<PreviewStarted>),
     PreviewStop(Reply<()>),
+    SongSet(Box<SongSpec>, Reply<()>),
+    SongPlay(f64, Reply<()>),
+    SongStop(Reply<()>),
+    SongTrigger(SongTrigger, Reply<()>),
+    SongLocate(Option<u64>, f64, Reply<Option<SongLocation>>),
     Arrangement(ArrangementRequest, Reply<ArrangementReply>),
     SetInputNeeds(InputNeeds, Reply<EngineStatus>),
     Noise(NoiseRequest, Reply<NoiseReply>),
@@ -408,6 +418,32 @@ impl Engine {
         self.request(Command::PreviewStop)
     }
 
+    /// Pocket Song Builder: replace the song (see `song.rs`). Kept across audio restarts.
+    pub fn song_set(&self, spec: SongSpec) -> Result<(), EngineError> {
+        self.request(|r| Command::SongSet(Box::new(spec), r))
+    }
+
+    /// Start the song after `count_in_bars` bars of click (audio output must be running).
+    pub fn song_play(&self, count_in_bars: f64) -> Result<(), EngineError> {
+        self.request(|r| Command::SongPlay(count_in_bars, r))
+    }
+
+    pub fn song_stop(&self) -> Result<(), EngineError> {
+        self.request(Command::SongStop)
+    }
+
+    /// Play one sound of a part now (pads, voice monitoring, piano keys).
+    pub fn song_trigger(&self, trigger: SongTrigger) -> Result<(), EngineError> {
+        self.request(|r| Command::SongTrigger(trigger, r))
+    }
+
+    /// The song beat the performer heard at input frame `input_frame` (a mic
+    /// hit), or right now with `None` (a touch). `extra_ms` is removed as well.
+    /// `None` while the song is not playing.
+    pub fn song_locate(&self, input_frame: Option<u64>, extra_ms: f64) -> Result<Option<SongLocation>, EngineError> {
+        self.request(|r| Command::SongLocate(input_frame, extra_ms, r))
+    }
+
     /// PRODUCE arrangement requests (`docs/projects/produce/README.md`).
     /// Capture, send-to-looper and bounce block until their operation ends.
     pub fn arrangement(&self, request: ArrangementRequest) -> Result<ArrangementReply, EngineError> {
@@ -458,6 +494,10 @@ struct ControlLoop {
     practice: Practice,
     /// Preview instrument samples, handed to each output stream.
     preview_bank: Option<Arc<SampleBank>>,
+    /// The last Song Builder song, handed to each new output stream.
+    song_spec: Option<SongSpec>,
+    /// A `songPosition` event was sent while playing (one more is sent on stop).
+    song_was_playing: bool,
     latest: Option<MeterFrame>,
     peak_since_emit: f32,
     channel_peaks: [f32; crate::meter::MAX_METER_CHANNELS],
@@ -508,6 +548,8 @@ impl ControlLoop {
             project: ProjectGlue::new(),
             practice: Practice::default(),
             preview_bank: None,
+            song_spec: None,
+            song_was_playing: false,
             latest: None,
             peak_since_emit: 0.0,
             channel_peaks: [0.0; crate::meter::MAX_METER_CHANNELS],
@@ -564,6 +606,7 @@ impl ControlLoop {
             self.drain_looper();
             if let Some(p) = self.playback.as_mut() {
                 p.preview.collect(); // drop finished previews off the audio thread
+                p.song.collect(); // and replaced song schedules / effect chains
                 p.arrangement.collect(); // and finished arrangement schedules
             }
             let epoch = self.latest_snapshot.map(|s| s.epoch);
@@ -592,6 +635,7 @@ impl ControlLoop {
                 self.emit_level();
                 self.emit_looper();
                 self.emit_arrangement_position();
+                self.emit_song_position();
                 self.emit_pitch();
                 self.practice.emit_progress();
                 self.flush_practice();
@@ -804,6 +848,46 @@ impl ControlLoop {
             Command::PreviewStop(reply) => {
                 let result = self.playback.as_mut().map_or(Ok(()), |p| p.preview.stop());
                 let _ = reply.send(result);
+            }
+            Command::SongSet(spec, reply) => {
+                let result = match self.playback.as_mut() {
+                    Some(p) => p.song.set(&spec),
+                    None => spec.validate(),
+                };
+                if result.is_ok() {
+                    self.song_spec = Some(*spec);
+                }
+                let _ = reply.send(result);
+            }
+            Command::SongPlay(count_in, reply) => {
+                let result = match self.playback.as_mut() {
+                    Some(p) => p.song.play(count_in),
+                    None => Err(EngineError::Invalid("audio output is not running".into())),
+                };
+                let _ = reply.send(result);
+            }
+            Command::SongStop(reply) => {
+                let result = self.playback.as_mut().map_or(Ok(()), |p| p.song.stop());
+                let _ = reply.send(result);
+            }
+            Command::SongTrigger(trigger, reply) => {
+                let result = match self.playback.as_mut() {
+                    Some(p) => p.song.trigger(&trigger),
+                    None => Err(EngineError::Invalid("audio output is not running".into())),
+                };
+                let _ = reply.send(result);
+            }
+            Command::SongLocate(input_frame, extra_ms, reply) => {
+                let result = self.playback.as_ref().and_then(|p| {
+                    let clocks = LocateClocks::read(
+                        Some((&*p.stats, p.info.sample_rate)),
+                        self.capture.as_ref().map(|c| (&*c.stats, c.info.sample_rate)),
+                        extra_ms,
+                        crate::clock::host_now_ns(),
+                    );
+                    p.song.locate(input_frame, &clocks)
+                });
+                let _ = reply.send(Ok(result));
             }
             Command::Arrangement(request, reply) => {
                 if matches!(request, ArrangementRequest::Play { .. }) && self.playback.is_some() {
@@ -1105,6 +1189,9 @@ impl ControlLoop {
         if let (Some(p), Some(bank)) = (self.playback.as_mut(), self.preview_bank.clone()) {
             let _ = p.preview.set_bank(bank);
         }
+        if let (Some(p), Some(spec)) = (self.playback.as_mut(), self.song_spec.as_ref()) {
+            let _ = p.song.set(spec);
+        }
         self.latest_snapshot = None;
         self.hw.reset_clock();
         for warning in warnings {
@@ -1364,9 +1451,19 @@ impl ControlLoop {
                 }
                 AnalysisOutput::Note(note) => (self.sink)(EngineEvent::Note(note)),
                 AnalysisOutput::Onset(onset) => (self.sink)(EngineEvent::Onset(onset)),
+                AnalysisOutput::Hit(hit) => (self.sink)(EngineEvent::Hit(hit)),
                 AnalysisOutput::Chord(chord) => (self.sink)(EngineEvent::Chord(chord)),
                 AnalysisOutput::Gap { .. } => {}
             }
+        }
+    }
+
+    fn emit_song_position(&mut self) {
+        let Some(p) = self.playback.as_ref() else { return };
+        let position = p.song.position();
+        if position.playing || self.song_was_playing {
+            self.song_was_playing = position.playing;
+            (self.sink)(EngineEvent::SongPosition(position));
         }
     }
 

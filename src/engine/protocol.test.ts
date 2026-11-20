@@ -109,6 +109,8 @@ describe("engine events parse from the Rust JSON", () => {
         "pitch",
         "note",
         "onset",
+        "hit",
+        "songPosition",
         "chord",
         "devicesChanged",
         "midiPorts",

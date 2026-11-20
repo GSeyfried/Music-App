@@ -91,6 +91,7 @@ export const MIC_REASON_LABELS: Record<InputReason, string> = {
   pitch: "live pitch",
   practice: "Practice Lab",
   game: "game",
+  songBuilder: "voice drums",
   meter: "input meter",
   record: "recording",
   monitor: "monitoring",

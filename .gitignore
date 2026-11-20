@@ -16,3 +16,11 @@ reference-packages/*/
 .DS_Store
 Thumbs.db
 *.log
+
+# Local build tools (xcodegen for Tauri iOS)
+.tools/
+
+# Generated Xcode project for VoiceLoop Pocket (from apps/pocket-ios/project.yml)
+apps/pocket-ios/*.xcodeproj/
+apps/pocket-ios/build/
+apps/pocket-ios/Local.xcconfig

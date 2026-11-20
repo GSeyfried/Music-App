@@ -52,6 +52,7 @@ pub mod preview;
 pub mod project;
 pub mod routing;
 pub mod settings;
+pub mod song;
 pub mod transport;
 
 pub use analysis::AnalysisConfig;

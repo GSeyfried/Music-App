@@ -1814,7 +1814,17 @@ export class MockEngine implements EngineTransport {
       this.noteIndex = cycleIndex;
       this.noteDetune = (this.rand() - 0.5) * 0.5; // up to a quarter-tone flat or sharp at the attack
       if (step.midi !== null) {
-        this.emit({ type: "onset", payload: { frame, levelDb: -18 + this.rand() * 4, riseDb: 24 + this.rand() * 10 } });
+        const levelDb = -18 + this.rand() * 4;
+        const riseDb = 24 + this.rand() * 10;
+        this.emit({ type: "onset", payload: { frame, levelDb, riseDb } });
+        // Simulated voice-drum timbre: a random kick / snare / hat shape (percussion::HitTimbre).
+        const shapes = [
+          { low: 0.75, mid: 0.2, high: 0.05, centroidHz: 220, zeroCrossingRate: 0.01, decayDb: -6 },
+          { low: 0.15, mid: 0.6, high: 0.25, centroidHz: 1_600, zeroCrossingRate: 0.12, decayDb: -4 },
+          { low: 0.03, mid: 0.2, high: 0.77, centroidHz: 6_500, zeroCrossingRate: 0.45, decayDb: -14 },
+        ];
+        const shape = shapes[Math.floor(this.rand() * shapes.length)] ?? shapes[0];
+        this.emit({ type: "hit", payload: { frame, sampleRate: this.sampleRate, levelDb, riseDb, ...shape } });
       }
     }
     const unpitched = (reason: Unpitched, rmsDb: number, clarity: number): PitchFrame => ({

@@ -361,6 +361,10 @@ export class EngineStore {
       case "onset":
         live.onsets.push(event.payload);
         return;
+      case "hit":
+      case "songPosition":
+        // Pocket (Song Builder) events; the desktop store keeps nothing for them.
+        return;
       case "chord":
         live.chord = event.payload;
         live.chordAt = now;

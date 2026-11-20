@@ -33,6 +33,7 @@ use crate::clock::{self, add_saturating, Anchor, StreamStats, XrunDetector};
 use crate::devices;
 use crate::error::EngineError;
 use crate::preview::{preview_pair, PreviewControl, PreviewPlayer};
+use crate::song::{song_pair, SongControl, SongPlayer};
 use crate::routing::{MonitorCell, MonitorConfig, OutputRoute, RouteCell};
 use crate::transport::TransportState;
 
@@ -149,6 +150,8 @@ pub struct LooperPlayback {
     calibration_rx: Consumer<CalibrationJob>,
     /// Reference/scale preview instrument, mixed into the output only.
     pub preview: PreviewControl,
+    /// Pocket Song Builder playback, mixed into the output only.
+    pub song: SongControl,
     /// PRODUCE arrangement playback, mixed into the output after the looper.
     pub arrangement: ArrangementControl,
     /// Attach / detach the input stream while this output keeps running.
@@ -197,12 +200,14 @@ impl LooperPlayback {
         let (calibration_tx, cal_in) = rtrb::RingBuffer::<CalibrationJob>::new(1);
         let (cal_out, calibration_rx) = rtrb::RingBuffer::<CalibrationJob>::new(1);
         let (preview, preview_player) = preview_pair(None, sample_rate); // the engine sets the bank
+        let (song, song_player) = song_pair(sample_rate);
         let (arrangement, arrangement_player) = arrangement_pair();
         let (input_control, input_port) = input_link_pair(sample_rate, input);
         clock::init_epoch();
 
         let parts = Parts {
             preview: preview_player,
+            song: song_player,
             arrangement: arrangement_player,
             input: input_port,
             bridge: bridge.clone(),
@@ -257,6 +262,7 @@ impl LooperPlayback {
             calibration_tx,
             calibration_rx,
             preview,
+            song,
             arrangement,
             input: input_control,
         })
@@ -314,6 +320,7 @@ impl LooperPlayback {
 
 struct Parts {
     preview: PreviewPlayer,
+    song: SongPlayer,
     arrangement: ArrangementPlayer,
     /// Input from the attached input stream (silence while none is attached).
     input: InputPort,
@@ -359,6 +366,7 @@ where
 {
     let Parts {
         mut preview,
+        mut song,
         mut arrangement,
         mut input,
         bridge: bridge_stats,
@@ -426,6 +434,7 @@ where
                 // After the looper: heard, never recorded.
                 arrangement.process(&mut out_buf[..n]);
                 preview.process(&mut out_buf[..n]);
+                song.process(&mut out_buf[..n], frames_out + done as u64);
                 if let Some(job) = calibration.as_mut() {
                     job.process(&mut out_buf[..n], &in_buf[..n]);
                 }

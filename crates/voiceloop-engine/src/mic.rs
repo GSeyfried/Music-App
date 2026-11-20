@@ -42,6 +42,8 @@ pub enum InputReason {
     Practice,
     /// Games that listen to the microphone.
     Game,
+    /// Pocket Song Builder is listening for voice drums.
+    SongBuilder,
     /// The input level meter is wanted (e.g. the input settings panel is open).
     Meter,
     /// Engine: a track is armed, recording or overdubbing, or a record command waits.

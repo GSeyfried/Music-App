@@ -25,8 +25,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use voiceloop_analysis::theory::{Chord, ChordQuality};
 use voiceloop_analysis::{
-    ChordAnalyzer, ChordConfig, ChordSmoother, NoteConfig, NoteEvent, NoteSegmenter, Onset, OnsetConfig, OnsetDetector,
-    PitchFrame, PitchTracker, TrackerConfig,
+    ChordAnalyzer, ChordConfig, ChordSmoother, HitConfig, HitDescriber, HitTimbre, NoteConfig, NoteEvent, NoteSegmenter,
+    Onset, OnsetConfig, OnsetDetector, PitchFrame, PitchTracker, TrackerConfig,
 };
 
 use crate::error::EngineError;
@@ -47,6 +47,8 @@ pub struct AnalysisConfig {
     pub tracker: TrackerConfig,
     pub notes: NoteConfig,
     pub onsets: OnsetConfig,
+    /// Timbre of each onset (voice drums); see `voiceloop_analysis::percussion`.
+    pub hits: HitConfig,
     pub chords: ChordStreamConfig,
 }
 
@@ -57,6 +59,7 @@ impl Default for AnalysisConfig {
             tracker: TrackerConfig::default(),
             notes: NoteConfig::default(),
             onsets: OnsetConfig::default(),
+            hits: HitConfig::default(),
             chords: ChordStreamConfig::default(),
         }
     }
@@ -167,6 +170,8 @@ pub enum AnalysisOutput {
     /// A note that has just ended.
     Note(NoteEvent),
     Onset(Onset),
+    /// What an onset sounded like (emitted `hits.windowSeconds` after it).
+    Hit(HitTimbre),
     /// The smoothed chord changed (or a low-rate refresh of it).
     Chord(ChordEvent),
     /// The input callback dropped `frames` of input (the analysis ring was
@@ -363,6 +368,7 @@ pub struct Analyzer {
     tracker: PitchTracker,
     segmenter: NoteSegmenter,
     onsets: OnsetDetector,
+    hits: HitDescriber,
     /// `None` when `chords.enabled` is false.
     chords: Option<ChordStream>,
 }
@@ -373,6 +379,7 @@ impl Analyzer {
         let tracker = PitchTracker::new(config.tracker, sample_rate).map_err(invalid)?;
         let segmenter = NoteSegmenter::new(config.notes, sample_rate, tracker.hop_frames());
         let onsets = OnsetDetector::new(config.onsets, sample_rate).map_err(invalid)?;
+        let hits = HitDescriber::new(config.hits, sample_rate, MAX_CHUNK).map_err(invalid)?;
         // Validated even when disabled, so a bad value is reported when it is set.
         config.chords.validate().map_err(invalid)?;
         let chords = if config.chords.enabled {
@@ -380,12 +387,17 @@ impl Analyzer {
         } else {
             None
         };
-        Ok(Self { tracker, segmenter, onsets, chords })
+        Ok(Self { tracker, segmenter, onsets, hits, chords })
     }
 
     /// Analyse the next samples. Outputs are emitted in time order per kind.
     pub fn process(&mut self, samples: &[f32], mut emit: impl FnMut(AnalysisOutput)) {
-        self.onsets.push(samples, |o| emit(AnalysisOutput::Onset(o)));
+        let hits = &mut self.hits;
+        self.onsets.push(samples, |o| {
+            hits.onset(o);
+            emit(AnalysisOutput::Onset(o));
+        });
+        self.hits.push(samples, |h| emit(AnalysisOutput::Hit(h)));
         let segmenter = &mut self.segmenter;
         self.tracker.push(samples, |frame| {
             segmenter.push(&frame, |note| emit(AnalysisOutput::Note(note)));
@@ -402,6 +414,7 @@ impl Analyzer {
         self.segmenter.flush(|note| emit(AnalysisOutput::Note(note)));
         self.tracker.reset(frame);
         self.onsets.reset(frame);
+        self.hits.reset(frame);
         if let Some(chords) = self.chords.as_mut() {
             chords.reset(frame, |c| emit(AnalysisOutput::Chord(c)));
         }

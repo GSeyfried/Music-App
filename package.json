@@ -19,7 +19,9 @@
     "refs:verify": "node scripts/reference-packages.mjs verify",
     "refs:status": "node scripts/reference-packages.mjs status",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "pocket:project": "cd apps/pocket-ios && (command -v xcodegen >/dev/null && xcodegen generate || ../../.tools/xcodegen/bin/xcodegen generate)",
+    "pocket:engine": "PLATFORM_NAME=iphonesimulator scripts/build-pocket-engine.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.5",
