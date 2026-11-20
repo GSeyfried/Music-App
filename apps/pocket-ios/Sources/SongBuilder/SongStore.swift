@@ -36,6 +36,16 @@ final class SongStore: ObservableObject {
     @Published private(set) var profile: VoiceProfile = [:]
     /// Training in progress: which sound and how many examples so far.
     @Published private(set) var training: (lane: DrumLane, count: Int)?
+    /// Voice → piano: the key sounding now (after snapping) and the sung pitch.
+    @Published private(set) var voiceKey: Int?
+    @Published private(set) var sungMidi: Double?
+    /// Output is the phone speaker (or other open air), so playback leaks into the mic. True until the engine reports a route.
+    @Published private(set) var outputIsSpeaker = true
+    /// Live voice monitoring allowed now: never on the speaker unless the setting says so.
+    var monitorVoice: Bool { settings.voiceMonitor && (!outputIsSpeaker || settings.monitorOnSpeaker) }
+
+    /// Mic input level (dBFS RMS) while listening, for the sensitivity meter.
+    @Published private(set) var inputLevelDb: Double?
 
     let settings: PocketSettings
 
@@ -79,6 +89,7 @@ final class SongStore: ObservableObject {
             Task { @MainActor in self?.handle(event, arrival: arrival) }
         }
         engine = bridge
+        let sessionMode = settings.sessionMode
         let settingsPath = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             .map { dir -> String in
                 try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -94,7 +105,8 @@ final class SongStore: ObservableObject {
             do {
                 if let settingsPath { try? timed("use_settings_file") { _ = try bridge.call("use_settings_file", ["path": settingsPath]) } }
                 try timed("set_input_needs") { _ = try bridge.call("set_input_needs", ["needs": ["reasons": [String](), "holdMs": 3000]]) }
-                try timed("start_input") { _ = try bridge.call("start_input", ["deviceId": NSNull()]) }
+                // Session mode "default" keeps iOS mic gain and full speaker level (see audio.ios.sessionMode).
+                try timed("start_audio") { _ = try bridge.call("start_audio", ["config": ["sessionMode": sessionMode]]) }
                 await MainActor.run {
                     guard let self else { return }
                     self.engineReady = true
@@ -121,6 +133,14 @@ final class SongStore: ObservableObject {
             }
         case .hit(let h):
             onHit(h)
+        case .pitch(let p):
+            onPitch(p)
+        case .session(let info):
+            outputIsSpeaker = info.outputIsOpenAir
+            if !monitorVoice { endVoiceNote(at: nil) }
+            syncEngine()
+        case .level(let l):
+            inputLevelDb = listening ? l.rmsDb : nil
         case .error(let text):
             lastError = text
         default:
@@ -172,11 +192,15 @@ final class SongStore: ObservableObject {
         updateListening()
     }
 
-    func addPart(_ kind: PartKind) {
+    func addPart(_ template: TrackTemplate) {
+        guard template.available else { return }
         var id = 0
-        edit { id = $0.addPart(kind, kit: settings.defaultKit) }
+        edit { id = $0.addPart(template, kit: settings.defaultKit) }
         select(id)
     }
+
+    /// True while the mic is recording into the song: the other parts may be muted (no headphones → bleed).
+    var micRecording: Bool { recording && listening && training == nil }
 
     func deletePart(_ id: Int) {
         edit { s in s.parts.removeAll { $0.id == id } }
@@ -190,7 +214,15 @@ final class SongStore: ObservableObject {
     private func syncEngine() {
         guard let engine, engineReady else { return }
         let s = song
-        let parts: [[String: Any]] = s.audibleParts.map { part in
+        var audible = s.audibleParts
+        if micRecording {
+            switch settings.voiceRecordMute {
+            case "all": audible = []
+            case "others": audible = audible.filter { $0.id == selectedPartId }
+            default: break
+            }
+        }
+        let parts: [[String: Any]] = audible.map { part in
             let sound: [String: Any] = part.kind == .drums ? ["kind": "drums", "kit": part.kit] : ["kind": "melody", "instrument": part.instrument.rawValue]
             let events: [[String: Any]] = part.kind == .drums
                 ? part.hits.map { h in
@@ -205,10 +237,12 @@ final class SongStore: ObservableObject {
                 }
             return ["id": part.id, "sound": sound, "gain": part.level, "fx": part.fx, "events": events]
         }
-        let click = settings.clickMode == .always || (settings.clickMode == .recording && recording)
+        var click = settings.clickMode == .always || (settings.clickMode == .recording && recording)
+        // Through the speaker the click leaks into the mic and records as hits: drop it while the mic records.
+        if micRecording && outputIsSpeaker && !settings.clickOnSpeakerWhileMic { click = false }
         let spec: [String: Any] = [
             "bpm": s.bpm, "beatsPerBar": s.beatsPerBar, "loopBeats": s.loopBeats,
-            "click": click, "clickGain": settings.clickVolume, "masterGain": settings.masterVolume, "parts": parts,
+            "click": click, "clickGain": settings.clickVolume, "masterGain": settings.masterVolume, "loudnessDb": settings.loudnessDb, "parts": parts,
         ]
         do { try engine.call("song_set", ["song": spec]) } catch { lastError = "\(error)" }
     }
@@ -244,10 +278,12 @@ final class SongStore: ObservableObject {
 
     func stop() {
         try? engine?.call("song_stop")
+        endVoiceNote(at: nil)
         playing = false
         recording = false
         beat = 0
         pass = -1
+        syncEngine() // un-mute parts muted while recording
     }
 
     /// Settings that change the engine song (click, volume) were edited.
@@ -277,6 +313,7 @@ final class SongStore: ObservableObject {
     }
 
     func tapPad(_ lane: DrumLane) {
+        // Touch input never mutes the song; only mic recording does.
         guard let part = selectedPart, part.kind == .drums else { return }
         trigger(part.id, lane: lane, velocity: settings.padVelocity)
         flashLane(lane)
@@ -286,13 +323,33 @@ final class SongStore: ObservableObject {
         }
     }
 
-    func tapKey(_ midi: Int) {
-        guard let part = selectedPart, part.kind == .melody, let engine else { return }
-        let length = settings.melodyNoteBeats
-        try? engine.call("song_trigger", ["trigger": ["partId": part.id, "midi": midi, "velocity": 0.85, "lengthBeats": length]])
-        record(inputFrame: nil, extraMs: settings.touchLatencyMs) { s, beat in
-            s.addNote(part.id, midi: midi, beat: beat, length: length, velocity: 0.85)
+    /// Keys held down now: when each was pressed (for the recorded length).
+    private var heldKeys: [Int: (partId: Int, pressed: Date)] = [:]
+
+    /// Touch-down on a piano key: the note sounds until `keyUp`.
+    func keyDown(_ midi: Int) {
+        guard let part = selectedPart, part.kind == .melody, let engine, heldKeys[midi] == nil else { return }
+        heldKeys[midi] = (part.id, Date())
+        try? engine.call("song_trigger", ["trigger": ["partId": part.id, "midi": midi, "velocity": settings.padVelocity, "hold": true]])
+    }
+
+    /// Touch-up: release the note and, when recording, add it with the length it was held.
+    func keyUp(_ midi: Int) {
+        guard let held = heldKeys.removeValue(forKey: midi) else { return }
+        try? engine?.call("song_release", ["release": ["partId": held.partId, "midi": midi]])
+        let seconds = Date().timeIntervalSince(held.pressed)
+        let length = max(settings.melodyNoteBeats * 0.25, seconds / song.secondsPerBeat)
+        let v = settings.padVelocity
+        // Placed where the press was heard: "now" minus how long it was held.
+        record(inputFrame: nil, extraMs: settings.touchLatencyMs + seconds * 1000) { s, beat in
+            s.addNote(held.partId, midi: midi, beat: beat, length: length, velocity: v)
         }
+    }
+
+    /// A quick tap (accessibility, tests): press and release.
+    func tapKey(_ midi: Int) {
+        keyDown(midi)
+        keyUp(midi)
     }
 
     /// Add or remove a hit in one grid cell (step editing).
@@ -326,12 +383,17 @@ final class SongStore: ObservableObject {
     }
 
     private func updateListening() {
-        let want = engineReady && settings.voiceListen && (selectedPart?.kind == .drums || training != nil)
+        let want = engineReady && settings.voiceListen && (selectedPart?.input == .voice || training != nil)
         guard want != listening, let engine else { return }
         listening = want
+        if !want { endVoiceNote(at: nil) }
+        defer { syncEngine() } // mic recording mutes or un-mutes parts
         let reasons = want ? ["songBuilder"] : [String]()
         _ = try? engine.call("set_input_needs", ["needs": ["reasons": reasons]])
-        _ = try? engine.call("set_analysis_config", ["config": ["enabled": want]])
+        _ = try? engine.call("set_analysis_config", ["config": [
+            "enabled": want,
+            "onsets": ["riseDb": settings.onsetRiseDb, "floorDb": settings.onsetFloorDb],
+        ]])
         if want { _ = try? engine.call("request_mic_permission") }
     }
 
@@ -341,7 +403,7 @@ final class SongStore: ObservableObject {
             profile = VoiceDrums.train(profile, lane: t.lane, h)
             SongStore.saveProfile(profile)
             flashLane(t.lane)
-            if let part = selectedPart, part.kind == .drums { trigger(part.id, lane: t.lane, velocity: 0.8) }
+            if monitorVoice, let part = selectedPart, part.kind == .drums { trigger(part.id, lane: t.lane, velocity: 0.8) }
             let count = t.count + 1
             if count >= settings.trainingHits {
                 let i = DrumLane.voiceLanes.firstIndex(of: t.lane) ?? 0
@@ -352,15 +414,82 @@ final class SongStore: ObservableObject {
             }
             return
         }
-        guard let part = selectedPart, part.kind == .drums else { return }
+        guard let part = selectedPart, part.kind == .drums, part.input == .voice else { return }
         let lane = VoiceDrums.classify(h, mode: settings.classifier, profile: profile, rules: settings.rules, minExamples: settings.trainingHits)
         lastHeard = (lane, h.centroidHz)
         flashLane(lane)
-        let velocity = VoiceDrums.velocity(levelDb: h.levelDb, minLevelDb: settings.minLevelDb)
-        if settings.voiceMonitor { trigger(part.id, lane: lane, velocity: velocity) }
+        let velocity = VoiceDrums.velocity(levelDb: h.levelDb, minLevelDb: settings.minLevelDb, floor: settings.minVelocity)
+        if monitorVoice { trigger(part.id, lane: lane, velocity: velocity) }
         record(inputFrame: h.frame, extraMs: settings.voiceLatencyMs) { s, beat in
             s.addHit(part.id, lane: lane, beat: beat, velocity: velocity, source: .voice)
         }
+    }
+
+    // MARK: Voice → piano
+
+    private struct VoiceNote { let partId: Int; let key: Int; let startFrame: UInt64; let velocity: Double }
+    private var voiceNote: VoiceNote?
+    /// A key waiting to become the note: how many frames in a row it has been heard.
+    private var pendingKey: (key: Int, frames: Int, firstFrame: UInt64)?
+    private var unpitchedFrames = 0
+    private var pitchRate = 48_000
+
+    /// Pitch frames (≈ every 10 ms) → held notes on the nearest enabled key.
+    private func onPitch(_ update: PitchUpdate) {
+        pitchRate = update.sampleRate
+        guard listening, training == nil, let part = selectedPart, part.kind == .melody, part.input == .voice else { return }
+        for f in update.frames {
+            let loud = (f.rmsDb ?? -120) >= settings.voicePianoMinLevelDb
+            let clear = (f.clarity ?? 0) >= settings.voicePianoMinClarity
+            guard let midi = f.midi, loud, clear else {
+                sungMidi = nil
+                pendingKey = nil
+                unpitchedFrames += 1
+                if unpitchedFrames >= settings.voicePianoReleaseFrames { endVoiceNote(at: f.frame) }
+                continue
+            }
+            unpitchedFrames = 0
+            sungMidi = midi
+            let key = KeySnap.snap(midi + Double(part.transpose), enabled: part.enabledKeys, tie: settings.voicePianoTie,
+                                   current: voiceNote?.key, hysteresis: settings.voicePianoHysteresis)
+            if key == voiceNote?.key { pendingKey = nil; continue }
+            let p = pendingKey?.key == key ? (key, pendingKey!.frames + 1, pendingKey!.firstFrame) : (key, 1, f.frame)
+            pendingKey = p
+            guard p.1 >= settings.voicePianoStartFrames else { continue }
+            pendingKey = nil
+            endVoiceNote(at: p.2)
+            let velocity = VoiceDrums.velocity(levelDb: f.rmsDb ?? -30, minLevelDb: settings.voicePianoMinLevelDb, floor: settings.minVelocity)
+            voiceNote = VoiceNote(partId: part.id, key: key, startFrame: p.2, velocity: velocity)
+            voiceKey = key
+            if monitorVoice {
+                try? engine?.call("song_trigger", ["trigger": ["partId": part.id, "midi": key, "velocity": velocity, "hold": true]])
+            }
+        }
+    }
+
+    /// Release the sounding voice note and, when recording, add it to the part.
+    private func endVoiceNote(at endFrame: UInt64?) {
+        guard let n = voiceNote else { return }
+        voiceNote = nil
+        voiceKey = nil
+        try? engine?.call("song_release", ["release": ["partId": n.partId, "midi": n.key]])
+        guard let endFrame, endFrame > n.startFrame else { return }
+        let seconds = Double(endFrame - n.startFrame) / Double(max(1, pitchRate))
+        guard seconds >= settings.voicePianoMinNoteSeconds else { return } // a blip, not a note
+        let length = seconds / song.secondsPerBeat
+        record(inputFrame: n.startFrame, extraMs: settings.voiceLatencyMs) { s, beat in
+            s.addNote(n.partId, midi: n.key, beat: beat, length: length, velocity: n.velocity)
+        }
+    }
+
+    func setKeyEnabled(_ pitchClass: Int, _ on: Bool) {
+        guard let id = selectedPart?.id, (0..<12).contains(pitchClass) else { return }
+        edit { $0.update(id) { $0.enabledKeys[pitchClass] = on } }
+    }
+
+    func setFx(_ partId: Int, _ ids: [String]) {
+        let list = ids.filter { $0 != "clean" }.prefix(3)
+        edit { $0.update(partId) { $0.fx = list.isEmpty ? "clean" : list.joined(separator: "+") } }
     }
 
     func startTraining() {
@@ -422,8 +551,13 @@ final class SongStore: ObservableObject {
     /// transport/voice state without an engine. Ignored on a real store.
     func posePreview(playing: Bool = false, recording: Bool = false, beat: Double = 0, pass: Int64 = -1,
                      micState: String = "off", lastHeard: (lane: DrumLane, centroidHz: Double)? = nil,
-                     training: (lane: DrumLane, count: Int)? = nil, profile: VoiceProfile? = nil, error: String? = nil) {
+                     training: (lane: DrumLane, count: Int)? = nil, profile: VoiceProfile? = nil, error: String? = nil,
+                     listening: Bool = false, voiceKey: Int? = nil, sungMidi: Double? = nil, inputLevelDb: Double? = nil) {
         guard !persists else { return }
+        self.listening = listening
+        self.voiceKey = voiceKey
+        self.sungMidi = sungMidi
+        self.inputLevelDb = inputLevelDb
         self.playing = playing
         self.recording = recording
         self.beat = beat

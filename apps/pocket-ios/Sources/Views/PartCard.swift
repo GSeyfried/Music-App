@@ -12,7 +12,9 @@ struct PartCard: View {
     let song: Song
     let selected: Bool
     let playhead: Double?
-    @State private var confirmDelete = false
+    @State private var showFx = false
+    @State private var showStarter = false
+    @State private var showMore = false
 
     private var tint: Color { settings.partColor(part.kind) }
     private var anySolo: Bool { song.parts.contains { $0.solo } }
@@ -28,10 +30,15 @@ struct PartCard: View {
                         store.toggleStep(partId: part.id, lane: lane, step: step)
                     }
                     if part.hits.isEmpty {
-                        hint("Tap the pads or beatbox, then press Record. Or start from a beat below.")
+                        hint(part.input == .voice ? "Tap the pads or beatbox, then press Record. Or start from a beat below."
+                                                  : "Tap the pads or the grid, then press Record. Or start from a beat below.")
                     }
                 } else {
                     MelodyStrip(song: song, part: part, playhead: playhead)
+                    if part.notes.isEmpty {
+                        hint(part.input == .voice ? "Sing a note to hear it on the nearest enabled key. Press Record to keep it."
+                                                  : "Hold a key to play it. Press Record to keep what you play.")
+                    }
                 }
                 controls
             } else {
@@ -41,19 +48,13 @@ struct PartCard: View {
         }
         .pocketCard(accent: selected ? tint : nil)
         .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .onTapGesture {
-            guard !selected else { return }
+        // Selecting by tapping the card only while it is collapsed: on the selected card the
+        // gesture is masked off (`.subviews`) so it can't swallow taps meant for its menus.
+        .gesture(TapGesture().onEnded {
             Haptics.tick(settings)
             withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { store.select(part.id) }
-        }
+        }, including: selected ? .subviews : .all)
         .accessibilityAddTraits(selected ? .isSelected : [])
-        .confirmationDialog("Delete “\(part.name)”?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Delete part", role: .destructive) {
-                withAnimation(.spring(response: 0.4)) { store.deletePart(part.id) }
-            }
-        } message: {
-            Text("You can bring it back with Undo.")
-        }
     }
 
     // MARK: Header
@@ -63,7 +64,7 @@ struct PartCard: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(tint.opacity(silent ? 0.25 : 1))
-                Image(systemName: part.kind == .drums ? "waveform" : "pianokeys")
+                Image(systemName: part.systemImage)
                     .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(.white)
             }
@@ -100,25 +101,25 @@ struct PartCard: View {
             : "\(part.notes.count) \(part.notes.count == 1 ? "note" : "notes")"
         let sound = part.kind == .drums ? (Catalog.kits.first { $0.id == part.kit }?.label ?? part.kit) : part.instrument.label
         var s = "\(sound) · \(count)"
-        if part.fx != "clean", let fx = Catalog.fx.first(where: { $0.id == part.fx }) { s += " · \(fx.label)" }
+        if let fx = part.fxLabel { s += " · \(fx)" }
         if silent { s += anySolo && !part.solo ? " · not soloed" : " · muted" }
         return s
     }
 
     // MARK: Selected controls
 
+    // Frequent controls sit in a wrapping row of plain buttons (no Menu inside a
+    // horizontal ScrollView: owner report + REFERENCE_EVAL_2026-11-19.md finding 4).
     private var controls: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ScrollViewIfNeeded {
-                HStack(spacing: 8) {
-                    soundMenu
-                    fxMenu
-                    if part.kind == .drums { starterMenu }
-                    moreMenu
-                }
+        VStack(alignment: .leading, spacing: 8) {
+            soundPicker
+            FlowRow {
+                fxButton
+                if part.kind == .drums { starterButton }
+                moreButton
             }
-            if let fx = Catalog.fx.first(where: { $0.id == part.fx }), fx.id != "clean" {
-                hint("\(fx.label): \(fx.help)")
+            if let fx = part.fxLabel {
+                hint("FX: \(fx). \(part.fxList.count == 1 ? (Catalog.fx.first { $0.id == part.fxList[0] }?.help ?? "") : "Runs left to right.")")
             }
             HStack(spacing: 10) {
                 Image(systemName: "speaker.fill").font(.footnote).foregroundStyle(.secondary)
@@ -135,69 +136,79 @@ struct PartCard: View {
                     .accessibilityHidden(true)
             }
         }
+        .sheet(isPresented: $showFx) {
+            FxSheet(partId: part.id).preferredColorScheme(settings.appearance.colorScheme)
+        }
     }
 
-    private var soundMenu: some View {
-        PocketMenu {
+    /// Kit (drums) or sound (melody): every option visible, one tap.
+    private var soundPicker: some View {
+        HStack(spacing: 10) {
+            Text(part.kind == .drums ? "Kit" : "Sound")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 48, alignment: .leading)
+                .accessibilityHidden(true)
             if part.kind == .drums {
-                Picker("Kit", selection: binding(\.kit)) {
-                    ForEach(Catalog.kits, id: \.id) { Text($0.label).tag($0.id) }
+                Segments(options: Catalog.kits.map(\.id), selection: part.kit, label: { id in Catalog.kits.first { $0.id == id }?.label ?? id },
+                         height: 38, fill: true) { id in
+                    Haptics.tick(settings)
+                    store.edit { $0.update(part.id) { $0.kit = id } }
                 }
+                .accessibilityLabel("Kit")
             } else {
-                Picker("Sound", selection: binding(\.instrument)) {
-                    ForEach(MelodyInstrument.allCases) { Text($0.label).tag($0) }
+                Segments(options: MelodyInstrument.allCases, selection: part.instrument, label: { $0.label }, height: 38, fill: true) { i in
+                    Haptics.tick(settings)
+                    store.edit { $0.update(part.id) { $0.instrument = i } }
                 }
+                .accessibilityLabel("Sound")
             }
-        } label: {
-            ChipLabel(systemImage: part.kind == .drums ? "square.grid.2x2.fill" : "music.note",
-                      text: part.kind == .drums ? (Catalog.kits.first { $0.id == part.kit }?.label ?? part.kit) : part.instrument.label,
-                      chevron: true)
         }
-        .accessibilityLabel(part.kind == .drums ? "Kit" : "Sound")
     }
 
-    private var fxMenu: some View {
-        PocketMenu {
-            Picker("Effect", selection: binding(\.fx)) {
-                ForEach(Catalog.fx, id: \.id) { fx in
-                    Text(fx.label).tag(fx.id)
-                }
-            }
-        } label: {
-            ChipLabel(systemImage: "sparkles", text: Catalog.fx.first { $0.id == part.fx }?.label ?? "FX", chevron: true)
+    private var fxButton: some View {
+        Button { showFx = true } label: {
+            ChipLabel(systemImage: "sparkles", text: part.fxLabel ?? "FX: clean", chevron: true)
         }
-        .accessibilityLabel("Effect")
+        .buttonStyle(PressScale())
+        .accessibilityLabel("Effects")
+        .accessibilityValue(part.fxLabel ?? "Clean")
     }
 
-    private var starterMenu: some View {
-        PocketMenu {
-            Section("Replace this part's hits with") {
-                ForEach(StarterBeat.all) { beat in
-                    Button(beat.label) { store.edit { $0.applyStarter(beat, to: part.id) } }
-                }
-            }
-        } label: {
-            ChipLabel(systemImage: "wand.and.stars", text: "Starter", chevron: true)
+    private var starterButton: some View {
+        Button { showStarter = true } label: {
+            ChipLabel(systemImage: "wand.and.stars", text: "Starter beat", chevron: true)
         }
+        .buttonStyle(PressScale())
         .accessibilityLabel("Starter beat")
+        .confirmationDialog("Replace this part's hits with", isPresented: $showStarter, titleVisibility: .visible) {
+            ForEach(StarterBeat.all) { beat in
+                Button(beat.label) { store.edit { $0.applyStarter(beat, to: part.id) } }
+            }
+        } message: {
+            Text("You can bring the old hits back with Undo.")
+        }
     }
 
-    private var moreMenu: some View {
-        PocketMenu {
-            Button {
-                store.edit { $0.update(part.id) { $0.hits.removeAll(); $0.notes.removeAll() } }
-            } label: { Label("Clear", systemImage: "eraser") }
-                .disabled(part.eventCount == 0)
-            Button {
-                store.edit { $0.duplicatePart(part.id) }
-            } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
-            Button(role: .destructive) {
-                confirmDelete = true
-            } label: { Label("Delete…", systemImage: "trash") }
-        } label: {
+    private var moreButton: some View {
+        Button { showMore = true } label: {
             ChipLabel(systemImage: "ellipsis", text: "More")
         }
+        .buttonStyle(PressScale())
         .accessibilityLabel("More actions for \(part.name)")
+        .confirmationDialog(part.name, isPresented: $showMore, titleVisibility: .visible) {
+            if part.eventCount > 0 {
+                Button("Clear \(part.kind == .drums ? "hits" : "notes")") {
+                    store.edit { $0.update(part.id) { $0.hits.removeAll(); $0.notes.removeAll() } }
+                }
+            }
+            Button("Duplicate") { store.edit { $0.duplicatePart(part.id) } }
+            Button("Delete part", role: .destructive) {
+                withAnimation(.spring(response: 0.4)) { store.deletePart(part.id) }
+            }
+        } message: {
+            Text("Undo brings back a cleared or deleted part.")
+        }
     }
 
     private func binding<T>(_ key: WritableKeyPath<Part, T>) -> Binding<T> {
@@ -233,14 +244,5 @@ struct MSButton: View {
         .buttonStyle(PressScale())
         .accessibilityLabel(label)
         .accessibilityValue(on ? "On" : "Off")
-    }
-}
-
-/// Horizontal scroll for a chip row (plain row in snapshot mode).
-struct ScrollViewIfNeeded<Content: View>: View {
-    @ViewBuilder var content: Content
-    @Environment(\.isSnapshot) private var isSnapshot
-    var body: some View {
-        if isSnapshot { content } else { ScrollView(.horizontal, showsIndicators: false) { content } }
     }
 }

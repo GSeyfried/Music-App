@@ -56,6 +56,37 @@ extension DrumLane {
     }
 }
 
+extension DrumLane {
+    /// What the big voice pad says (Ba, Da, K, Ts).
+    var syllable: String? {
+        switch self {
+        case .kick: "Ba"
+        case .clap: "Da"
+        case .snare: "K"
+        case .hat: "Ts"
+        case .openHat: nil
+        }
+    }
+}
+
+extension Part {
+    /// Icon for the card header, matching the track template it came from.
+    var systemImage: String {
+        switch (kind, input) {
+        case (.drums, .voice): TrackTemplate.voiceDrums.systemImage
+        case (.drums, .touch): TrackTemplate.drumPads.systemImage
+        case (.melody, .voice): TrackTemplate.voicePiano.systemImage
+        case (.melody, .touch): TrackTemplate.piano.systemImage
+        }
+    }
+    var usesVoice: Bool { input == .voice }
+    /// FX chain as labels, in order ("Room + Punch"), or nil when clean.
+    var fxLabel: String? {
+        let labels = fxList.map { id in Catalog.fx.first { $0.id == id }?.label ?? id }
+        return labels.isEmpty ? nil : labels.joined(separator: " + ")
+    }
+}
+
 enum NoteName {
     static let names = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"]
     static let spoken = ["C", "C sharp", "D", "D sharp", "E", "F", "F sharp", "G", "G sharp", "A", "A sharp", "B"]
@@ -66,8 +97,14 @@ enum NoteName {
 // MARK: Snapshot flag
 
 private struct SnapshotKey: EnvironmentKey { static let defaultValue = false }
+private struct SnapshotPoseKey: EnvironmentKey { static let defaultValue: String? = nil }
 
 extension EnvironmentValues {
+    /// Snapshot mode only: view-local state to start in (e.g. "editKeys").
+    var snapshotPose: String? {
+        get { self[SnapshotPoseKey.self] }
+        set { self[SnapshotPoseKey.self] = newValue }
+    }
     /// True while rendering debug snapshots: scroll views become plain stacks.
     var isSnapshot: Bool {
         get { self[SnapshotKey.self] }
@@ -78,11 +115,15 @@ extension EnvironmentValues {
 /// A vertical scroll view, or a plain stack in snapshot mode (ImageRenderer cannot draw UIScrollView).
 struct LiveScroll<Content: View>: View {
     @Environment(\.isSnapshot) private var isSnapshot
+    @Environment(\.snapshotPose) private var snapshotPose
     var axis: Axis.Set = .vertical
     @ViewBuilder var content: Content
     var body: some View {
         if isSnapshot {
-            VStack(spacing: 0) { content }.frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top).clipped()
+            // Pose "scrollBottom" shows the end of the content, as if scrolled down.
+            VStack(spacing: 0) { content }
+                .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: snapshotPose == "scrollBottom" ? .bottom : .top)
+                .clipped()
         } else {
             ScrollView(axis, showsIndicators: false) { content }
         }
@@ -278,6 +319,53 @@ struct CapsuleToggle: View {
         }
         .buttonStyle(PressScale())
         .accessibilityRepresentation { Toggle(label, isOn: $isOn) }
+    }
+}
+
+/// Lays children out left to right and wraps to a new line when the row is full
+/// (chip rows: no horizontal ScrollView competing with the buttons' gestures).
+struct FlowRow: Layout {
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(width: proposal.width ?? .infinity, subviews)
+        let w = rows.map(\.width).max() ?? 0
+        let h = rows.map(\.height).reduce(0, +) + lineSpacing * CGFloat(max(0, rows.count - 1))
+        return CGSize(width: proposal.width ?? w, height: h)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in arrange(width: bounds.width, subviews) {
+            var x = bounds.minX
+            for i in row.items {
+                let s = subviews[i].sizeThatFits(.unspecified)
+                subviews[i].place(at: CGPoint(x: x, y: y + (row.height - s.height) / 2), proposal: ProposedViewSize(s))
+                x += s.width + spacing
+            }
+            y += row.height + lineSpacing
+        }
+    }
+
+    private struct Row { var items: [Int] = []; var width: CGFloat = 0; var height: CGFloat = 0 }
+
+    private func arrange(width: CGFloat, _ subviews: Subviews) -> [Row] {
+        var rows: [Row] = []
+        var row = Row()
+        for (i, v) in subviews.enumerated() {
+            let s = v.sizeThatFits(.unspecified)
+            let add = row.items.isEmpty ? s.width : row.width + spacing + s.width
+            if add > width, !row.items.isEmpty {
+                rows.append(row)
+                row = Row()
+            }
+            row.width = row.items.isEmpty ? s.width : row.width + spacing + s.width
+            row.height = max(row.height, s.height)
+            row.items.append(i)
+        }
+        if !row.items.isEmpty { rows.append(row) }
+        return rows
     }
 }
 

@@ -9,6 +9,8 @@ struct SongControls: View {
     @EnvironmentObject private var settings: PocketSettings
     @Binding var draftTightness: Double?
     @State private var showTempo = false
+    @State private var showBars = false
+    @State private var showGrid = false
 
     private var song: Song { store.song }
 
@@ -26,23 +28,30 @@ struct SongControls: View {
                     TempoPopover().presentationCompactAdaptation(.popover)
                 }
 
-                PocketMenu {
-                    Picker("Bars", selection: Binding(get: { song.bars }, set: { n in store.edit { $0.setBars(n) } })) {
-                        ForEach([1, 2, 4, 8], id: \.self) { Text("\($0) \($0 == 1 ? "bar" : "bars")").tag($0) }
-                    }
-                } label: {
+                // Plain buttons + dialogs, not Menus: this row is inside the vertical scroll view.
+                Button { showBars = true } label: {
                     ChipLabel(text: "\(song.bars) \(song.bars == 1 ? "bar" : "bars")", chevron: true).fixedSize()
                 }
+                .buttonStyle(PressScale())
                 .accessibilityLabel("Loop length, \(song.bars) bars")
-
-                PocketMenu {
-                    Picker("Grid", selection: Binding(get: { song.grid }, set: { g in store.edit { $0.grid = g } })) {
-                        ForEach(Grid.allCases) { Text($0.label).tag($0) }
+                .confirmationDialog("Loop length", isPresented: $showBars, titleVisibility: .visible) {
+                    ForEach([1, 2, 4, 8], id: \.self) { n in
+                        Button("\(n) \(n == 1 ? "bar" : "bars")\(n == song.bars ? " ✓" : "")") { store.edit { $0.setBars(n) } }
                     }
-                } label: {
+                } message: {
+                    Text("Longer repeats what's there; shorter drops what falls outside (Undo restores).")
+                }
+
+                Button { showGrid = true } label: {
                     ChipLabel(text: "Grid \(song.grid.label)", chevron: true).fixedSize()
                 }
+                .buttonStyle(PressScale())
                 .accessibilityLabel("Grid, \(song.grid.label)")
+                .confirmationDialog("Grid", isPresented: $showGrid, titleVisibility: .visible) {
+                    ForEach(Grid.allCases) { g in
+                        Button("\(g.label)\(g == song.grid ? " ✓" : "")") { store.edit { $0.grid = g } }
+                    }
+                }
 
                 Spacer(minLength: 0)
 

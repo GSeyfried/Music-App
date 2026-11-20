@@ -8,6 +8,9 @@ import Foundation
 struct RuleThresholds {
     var kickMinLow: Double
     var kickMaxCentroidHz: Double
+    /// Voiced kicks ("bah", "boots"): low zero-crossing rate and little hiss.
+    var kickMaxZcr: Double
+    var kickMaxHigh: Double
     var hatMinHigh: Double
     var hatMinCentroidHz: Double
 }
@@ -27,8 +30,9 @@ enum VoiceDrums {
     }
 
     static func byRules(_ h: HitTimbre, _ t: RuleThresholds) -> DrumLane {
-        if h.low >= t.kickMinLow || h.centroidHz < t.kickMaxCentroidHz { return .kick }
         if h.high >= t.hatMinHigh || h.centroidHz > t.hatMinCentroidHz { return .hat }
+        let voiced = h.zeroCrossingRate < t.kickMaxZcr && h.high < t.kickMaxHigh
+        if h.low >= t.kickMinLow || h.centroidHz < t.kickMaxCentroidHz || voiced { return .kick }
         return .snare
     }
 
@@ -44,7 +48,7 @@ enum VoiceDrums {
     }
 
     static func ready(_ profile: VoiceProfile, minExamples: Int) -> Bool {
-        DrumLane.voiceLanes.allSatisfy { (profile[$0]?.count ?? 0) >= minExamples }
+        DrumLane.coreVoiceLanes.allSatisfy { (profile[$0]?.count ?? 0) >= minExamples }
     }
 
     static func classify(_ h: HitTimbre, mode: ClassifierMode, profile: VoiceProfile, rules: RuleThresholds, minExamples: Int) -> DrumLane {
@@ -69,8 +73,9 @@ enum VoiceDrums {
         h.levelDb >= minLevelDb && h.riseDb >= minRiseDb
     }
 
-    static func velocity(levelDb: Double, minLevelDb: Double) -> Double {
+    static func velocity(levelDb: Double, minLevelDb: Double, floor: Double) -> Double {
         let span = max(1, -6 - minLevelDb)
-        return min(1, max(0.35, 0.35 + 0.65 * (levelDb - minLevelDb) / span))
+        let f = min(1, max(0, floor))
+        return min(1, max(f, f + (1 - f) * (levelDb - minLevelDb) / span))
     }
 }

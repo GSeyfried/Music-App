@@ -38,8 +38,24 @@ struct EngineStatus: Decodable {
     let input: InputStatus?
 }
 
-struct PitchFrameLite: Decodable { let frame: UInt64 }
+struct PitchFrameLite: Decodable {
+    let frame: UInt64
+    /// Fractional MIDI pitch; nil when the frame isn't confidently pitched.
+    let midi: Double?
+    let clarity: Double?
+    let rmsDb: Double?
+}
 struct PitchUpdate: Decodable { let frames: [PitchFrameLite]; let sampleRate: Int }
+
+/// The granted iOS audio route (engine `audioSessionInfo` event).
+struct SessionInfoLite: Decodable {
+    struct Port: Decodable { let portType: String }
+    let outputs: [Port]
+    /// Open air: what plays can reach the microphone (phone speaker, earpiece, AirPlay, car, HDMI).
+    var outputIsOpenAir: Bool {
+        outputs.isEmpty || outputs.contains { ["Speaker", "Receiver", "AirPlay", "HDMIOutput", "CarAudio"].contains($0.portType) }
+    }
+}
 
 struct LevelReading: Decodable { let rmsDb: Double?; let peakDb: Double? }
 
@@ -50,6 +66,7 @@ enum EngineEvent {
     case pitch(PitchUpdate)
     case level(LevelReading)
     case songPosition(SongPosition)
+    case session(SessionInfoLite)
     case warning(String)
     case error(String)
     case other(String)
@@ -107,6 +124,7 @@ final class EngineBridge: @unchecked Sendable {
         case "pitch": return p(PitchUpdate.self).map(EngineEvent.pitch)
         case "level": return p(LevelReading.self).map(EngineEvent.level)
         case "songPosition": return p(SongPosition.self).map(EngineEvent.songPosition)
+        case "audioSessionInfo": return p(SessionInfoLite.self).map(EngineEvent.session)
         case "warning", "error":
             let text = String(data: data, encoding: .utf8) ?? env.type
             return env.type == "warning" ? .warning(text) : .error(text)

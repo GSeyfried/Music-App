@@ -9,6 +9,7 @@ import SwiftUI
 struct SongBuilderView: View {
     @EnvironmentObject private var store: SongStore
     @EnvironmentObject private var settings: PocketSettings
+    @Environment(\.snapshotPose) private var snapshotPose
     @State private var showSettings = false
     /// Tightness while its slider is being dragged (previewed, committed on release).
     @State private var draftTightness: Double?
@@ -27,6 +28,12 @@ struct SongBuilderView: View {
             TransportCard(showSettings: $showSettings)
                 .padding(.horizontal, 12)
 
+            if store.micRecording && settings.voiceRecordMute != "none" {
+                MicMuteBanner(click: store.outputIsSpeaker && !settings.clickOnSpeakerWhileMic)
+                    .padding(.horizontal, 12)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
             if let error = store.lastError {
                 ErrorBanner(text: error) { withAnimation { store.clearError() } }
                     .padding(.horizontal, 12)
@@ -43,7 +50,8 @@ struct SongBuilderView: View {
                             .id(part.id)
                             .transition(.asymmetric(insertion: .scale(scale: 0.95).combined(with: .opacity), removal: .opacity))
                     }
-                    addButtons
+                    AddTrackGrid()
+                        .padding(.top, 4)
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 12)
@@ -68,38 +76,12 @@ struct SongBuilderView: View {
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: store.song.parts.map(\.id))
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: store.selectedPartId)
         .animation(.easeInOut(duration: 0.25), value: store.lastError)
+        .animation(.easeInOut(duration: 0.25), value: store.micRecording)
         .sheet(isPresented: $showSettings) {
             SongSettingsSheet()
                 .preferredColorScheme(settings.appearance.colorScheme)
         }
         .preferredColorScheme(settings.appearance.colorScheme)
-    }
-
-    private var addButtons: some View {
-        HStack(spacing: 10) {
-            addButton("Voice drums", "waveform", .drums)
-            addButton("Melody", "pianokeys", .melody)
-        }
-    }
-
-    private func addButton(_ title: String, _ icon: String, _ kind: PartKind) -> some View {
-        let tint = settings.partColor(kind)
-        return Button {
-            Haptics.tick(settings)
-            store.addPart(kind)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "plus").font(.system(size: 14, weight: .heavy))
-                Image(systemName: icon).font(.system(size: 14, weight: .semibold))
-                Text(title).font(.subheadline.weight(.bold))
-            }
-            .foregroundStyle(tint)
-            .frame(maxWidth: .infinity, minHeight: 50)
-            .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(tint.opacity(0.1)))
-            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(tint.opacity(0.45), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])))
-        }
-        .buttonStyle(PressScale(scale: 0.96))
-        .accessibilityLabel("Add \(title.lowercased()) part")
     }
 
     // MARK: Performance dock
@@ -109,9 +91,10 @@ struct SongBuilderView: View {
         let content = Group {
             if let part = store.selectedPart {
                 if part.kind == .drums {
-                    DrumDock()
+                    DrumDock(part: part)
                 } else {
-                    PianoDock(part: part)
+                    PianoDock(part: part, startEditing: snapshotPose == "editKeys")
+                        .id(part.id) // fresh edit-keys state per part
                 }
             } else {
                 Text("Add a part to start your song.")
@@ -137,6 +120,26 @@ struct SongBuilderView: View {
                     .stroke(Color.pocketStroke, lineWidth: 1)
                     .ignoresSafeArea(edges: .bottom)
             }
+    }
+}
+
+/// While the mic records, the other parts are muted (no headphones → they'd bleed into the mic).
+struct MicMuteBanner: View {
+    /// The click is dropped too (phone speaker, songBuilder.voiceRecord.clickOnSpeaker off).
+    var click = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "speaker.slash.fill").foregroundStyle(.orange)
+            Text(click ? "Other parts and click muted while the mic records" : "Other parts muted while the mic records")
+                .font(.footnote.weight(.semibold))
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 12)
+        .frame(minHeight: 36)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.orange.opacity(0.14)))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.orange.opacity(0.4), lineWidth: 1))
+        .accessibilityElement(children: .combine)
     }
 }
 

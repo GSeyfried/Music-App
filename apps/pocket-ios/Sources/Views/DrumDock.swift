@@ -1,36 +1,44 @@
-// Drum performance area: three big voice pads (Kick, Snare, Hi-hat) and two
-// smaller ones (Clap, Open hat). Pads fire on touch-down. Pads flash on every
-// hit (touch, voice or training). Above them: mic status, "Use voice", the
-// last heard sound, and voice training.
+// Drum performance area.
+//
+// Voice drums: four big pads in voice order, Ba (kick), Da (clap), K (snare),
+// Ts (hi-hat), plus a small open-hat pad; above them the mic state, "Voice",
+// the last heard sound, Train, and the mic sensitivity meter.
+// Drum pads (touch): the same pads, bigger, with no mic UI at all.
+// Pads fire on touch-down and flash on every hit (touch, voice or training).
 
 import SwiftUI
 
 struct DrumDock: View {
     @EnvironmentObject private var store: SongStore
     @EnvironmentObject private var settings: PocketSettings
+    let part: Part
     /// Per-lane flash token; the pad is lit while its token is set.
     @State private var lit: [DrumLane: Int] = [:]
     @State private var confirmForget = false
+    @State private var showTrain = false
+
+    private var voice: Bool { part.input == .voice }
+    private static let touchLanes: [DrumLane] = [.kick, .snare, .hat, .clap]
 
     var body: some View {
-        VStack(spacing: 10) {
-            if let t = store.training {
-                TrainingBanner(lane: t.lane, count: t.count)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            } else {
-                voiceStatus
+        VStack(spacing: 8) {
+            if voice {
+                if let t = store.training {
+                    TrainingBanner(lane: t.lane, count: t.count)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                } else {
+                    voiceStatus
+                    MicSensitivityControl()
+                    SpeakerMonitorHint()
+                }
             }
 
-            HStack(spacing: 10) {
-                ForEach(DrumLane.voiceLanes) { lane in
-                    DrumPad(lane: lane, big: true, lit: lit[lane] != nil, target: store.training?.lane == lane) { hit(lane) }
+            HStack(spacing: 8) {
+                ForEach(voice ? DrumLane.voiceLanes : Self.touchLanes) { lane in
+                    DrumPad(lane: lane, size: voice ? .voice : .touch, lit: lit[lane] != nil, target: store.training?.lane == lane) { hit(lane) }
                 }
             }
-            HStack(spacing: 10) {
-                ForEach([DrumLane.clap, .openHat]) { lane in
-                    DrumPad(lane: lane, big: false, lit: lit[lane] != nil, target: false) { hit(lane) }
-                }
-            }
+            DrumPad(lane: .openHat, size: .small, lit: lit[.openHat] != nil, target: false) { hit(.openHat) }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: store.training?.lane)
         .onChange(of: store.flash.count) { _, _ in light(store.flash.lane) }
@@ -64,13 +72,10 @@ struct DrumDock: View {
                 .accessibilityHint("Turns your beatboxing into drum hits")
 
             VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 5) {
-                    Circle().fill(micDot).frame(width: 7, height: 7)
-                    Text(micText).font(.caption.weight(.semibold))
-                }
+                MicStatusLine()
                 Group {
                     if let heard = store.lastHeard {
-                        Text("Heard: \(heard.lane.label) · \(Int(heard.centroidHz.rounded())) Hz")
+                        Text("Heard: \(heard.lane.syllable.map { "\($0) · " } ?? "")\(heard.lane.label)")
                             .foregroundStyle(settings.laneColor(heard.lane))
                     } else {
                         Text(store.recognitionUsesTraining ? "Using your sounds" : "Built-in recognition")
@@ -85,36 +90,19 @@ struct DrumDock: View {
 
             Spacer(minLength: 0)
 
-            PocketMenu {
-                Button { store.startTraining() } label: {
-                    Label(store.voiceProfileReady ? "Train again" : "Train my sounds", systemImage: "waveform.badge.plus")
-                }
-                Button(role: .destructive) { confirmForget = true } label: {
-                    Label("Forget my sounds", systemImage: "trash")
-                }
-                .disabled(store.profile.isEmpty)
-            } label: {
+            Button { showTrain = true } label: {
                 ChipLabel(systemImage: "waveform.badge.plus", text: "Train", tint: .primary)
             }
+            .buttonStyle(PressScale())
             .accessibilityLabel("Train voice sounds")
-        }
-    }
-
-    private var micText: String {
-        guard settings.voiceListen else { return "Voice off · tap the pads" }
-        switch store.micState {
-        case "on": return "Listening"
-        case "opening": return "Opening mic…"
-        default: return store.engineReady ? "Mic off" : "Mic waiting for audio"
-        }
-    }
-
-    private var micDot: Color {
-        guard settings.voiceListen else { return .secondary.opacity(0.5) }
-        switch store.micState {
-        case "on": return .green
-        case "opening": return .yellow
-        default: return .secondary.opacity(0.5)
+            .confirmationDialog("Train your sounds", isPresented: $showTrain, titleVisibility: .visible) {
+                Button(store.voiceProfileReady ? "Train again" : "Train my sounds") { store.startTraining() }
+                if !store.profile.isEmpty {
+                    Button("Forget my sounds", role: .destructive) { DispatchQueue.main.async { confirmForget = true } }
+                }
+            } message: {
+                Text("Say each sound \(settings.trainingHits) times: Ba, Da, K, Ts.")
+            }
         }
     }
 }
@@ -123,8 +111,9 @@ struct DrumDock: View {
 struct DrumPad: View {
     @EnvironmentObject private var settings: PocketSettings
     @Environment(\.colorScheme) private var scheme
+    enum Size { case voice, touch, small }
     let lane: DrumLane
-    let big: Bool
+    let size: Size
     let lit: Bool
     let target: Bool
     let action: () -> Void
@@ -132,7 +121,8 @@ struct DrumPad: View {
 
     var body: some View {
         let color = settings.laneColor(lane)
-        let shape = RoundedRectangle(cornerRadius: big ? 24 : 18, style: .continuous)
+        let big = size != .small
+        let shape = RoundedRectangle(cornerRadius: big ? 22 : 16, style: .continuous)
         ZStack {
             shape.fill(color)
             shape.fill(LinearGradient(colors: [.white.opacity(0.12), .black.opacity(0.16)], startPoint: .top, endPoint: .bottom))
@@ -142,25 +132,30 @@ struct DrumPad: View {
                 shape.strokeBorder(Color.primary, style: StrokeStyle(lineWidth: 3, dash: [7, 5]))
                     .padding(-5)
             }
-            if big {
-                VStack(spacing: 4) {
-                    Text(lane.label)
-                        .font(.system(size: 21, weight: .heavy, design: .rounded))
-                    if let hint = lane.voiceHint {
-                        Text(hint)
-                            .font(.caption.weight(.semibold))
-                            .opacity(0.85)
-                    }
+            if size == .voice, let syllable = lane.syllable {
+                // Voice pads say what to beatbox; the drum name sits under it.
+                VStack(spacing: 2) {
+                    Text(syllable)
+                        .font(.system(size: 30, weight: .heavy, design: .rounded))
+                    Text(lane.shortLabel)
+                        .font(.caption.weight(.bold))
+                        .opacity(0.9)
                 }
                 .foregroundStyle(.white)
                 .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
+            } else if big {
+                Text(lane.shortLabel)
+                    .font(.system(size: 20, weight: .heavy, design: .rounded))
+                    .foregroundStyle(.white)
+                    .minimumScaleFactor(0.8)
+                    .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
             } else {
                 Text(lane.label)
                     .font(.system(size: 16, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
             }
         }
-        .frame(height: big ? 104 : 50)
+        .frame(height: size == .touch ? 128 : (big ? 88 : 42))
         .frame(maxWidth: .infinity)
         .shadow(color: color.opacity(lit ? 0.75 : (scheme == .dark ? 0.25 : 0.3)), radius: lit ? 18 : 8, y: lit ? 0 : 4)
         .scaleEffect(pressed ? 0.94 : (lit ? 1.02 : 1))
@@ -177,7 +172,7 @@ struct DrumPad: View {
         )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(lane.label) pad")
-        .accessibilityHint(lane.voiceHint.map { "Plays \(lane.label.lowercased()). Voice: \($0)" } ?? "Plays \(lane.label.lowercased())")
+        .accessibilityHint(size == .voice ? (lane.voiceHint.map { "Plays \(lane.label.lowercased()). Voice: \($0)" } ?? "") : "Plays \(lane.label.lowercased())")
         .accessibilityAddTraits([.isButton, .playsSound])
         .accessibilityAction { action() }
     }

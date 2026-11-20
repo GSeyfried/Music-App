@@ -19,16 +19,20 @@ enum DrumLane: String, Codable, CaseIterable, Identifiable {
         case .openHat: "Open hat"
         }
     }
-    /// What to say for voice drums.
+    /// What to say for voice drums (Ba, Da, K, Ts).
     var voiceHint: String? {
         switch self {
-        case .kick: "“b” / “boom”"
-        case .snare: "“psh” / “k”"
-        case .hat: "“ts” / “t”"
+        case .kick: "“ba” / “boots”"
+        case .clap: "“da”"
+        case .snare: "“k” / “psh”"
+        case .hat: "“ts”"
         default: nil
         }
     }
-    static let voiceLanes: [DrumLane] = [.kick, .snare, .hat]
+    /// Voice sounds in training order: Ba, Da, K, Ts.
+    static let voiceLanes: [DrumLane] = [.kick, .clap, .snare, .hat]
+    /// Sounds the untrained rules can tell apart; "Da" is recognised only once trained.
+    static let coreVoiceLanes: [DrumLane] = [.kick, .snare, .hat]
 }
 
 enum Grid: String, Codable, CaseIterable, Identifiable {
@@ -78,6 +82,81 @@ enum MelodyInstrument: String, Codable, CaseIterable, Identifiable {
 
 enum PartKind: String, Codable { case drums, melody }
 
+/// Where a part's events come from. Touch parts keep the song playing while
+/// you add to them; voice parts use the microphone (the others can auto-mute).
+enum PartInput: String, Codable { case touch, voice }
+
+/// One-tap "add a track" templates (docs/projects/track-system/README.md).
+enum TrackTemplate: String, CaseIterable, Identifiable {
+    case voiceDrums, voicePiano, drumPads, piano, voiceRaw, voiceTune
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .voiceDrums: "Voice drums"
+        case .voicePiano: "Voice → piano"
+        case .drumPads: "Drum pads"
+        case .piano: "Piano"
+        case .voiceRaw: "Voice"
+        case .voiceTune: "Voice + tune"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .voiceDrums: "Beatbox Ba, Da, K, Ts into drums"
+        case .voicePiano: "Sing; plays the nearest enabled key"
+        case .drumPads: "Tap drums"
+        case .piano: "Tap keys"
+        case .voiceRaw: "Record your voice with filters"
+        case .voiceTune: "Your voice, pitch-corrected"
+        }
+    }
+    var systemImage: String {
+        switch self {
+        case .voiceDrums: "waveform"
+        case .voicePiano: "music.mic"
+        case .drumPads: "square.grid.2x2.fill"
+        case .piano: "pianokeys"
+        case .voiceRaw: "mic.fill"
+        case .voiceTune: "wand.and.stars"
+        }
+    }
+    var kind: PartKind { (self == .voiceDrums || self == .drumPads) ? .drums : .melody }
+    var input: PartInput { (self == .drumPads || self == .piano) ? .touch : .voice }
+    /// Voice and Voice + tune need recorded audio in the engine (PENDING).
+    var available: Bool { self != .voiceRaw && self != .voiceTune }
+}
+
+/// How a sung pitch between two enabled keys is resolved (`songBuilder.voicePiano.tieBreak`).
+enum SnapTie: String, Codable, CaseIterable { case down, up }
+
+enum KeySnap {
+    static let names = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"]
+
+    /// The enabled key nearest to a fractional MIDI pitch. With no key enabled, every key counts.
+    /// `current` (the note already sounding) is kept until another enabled key is nearer by more than
+    /// `hysteresis` semitones, so the note doesn't flicker at the boundary. Exact ties go to `tie`.
+    static func snap(_ midi: Double, enabled: [Bool], tie: SnapTie, current: Int? = nil, hysteresis: Double = 0.15) -> Int {
+        let on = enabled.count == 12 && enabled.contains(true) ? enabled : Array(repeating: true, count: 12)
+        let nearest = nearestKey(midi, on, tie)
+        if let c = current, on[((c % 12) + 12) % 12], abs(midi - Double(c)) <= abs(midi - Double(nearest)) + hysteresis { return c }
+        return nearest
+    }
+
+    private static func nearestKey(_ midi: Double, _ on: [Bool], _ tie: SnapTie) -> Int {
+        let base = Int(midi.rounded(.down))
+        var best: (note: Int, dist: Double)?
+        for n in (base - 12)...(base + 13) where on[((n % 12) + 12) % 12] {
+            let d = abs(Double(n) - midi)
+            if let b = best {
+                if d < b.dist - 1e-6 || (abs(d - b.dist) <= 1e-6 && (tie == .up ? n > b.note : n < b.note)) { best = (n, d) }
+            } else {
+                best = (n, d)
+            }
+        }
+        return best?.note ?? Int(midi.rounded())
+    }
+}
+
 struct Part: Codable, Identifiable, Equatable {
     var id: Int
     var kind: PartKind
@@ -85,13 +164,53 @@ struct Part: Codable, Identifiable, Equatable {
     var level: Double = 1
     var muted = false
     var solo = false
+    /// FX presets run in order, joined with "+" (e.g. "room+punch"); the engine stacks up to 3.
     var fx = "clean"
     var kit = "studio"
     var instrument: MelodyInstrument = .piano
     var hits: [DrumHit] = []
     var notes: [MelodyNote] = []
+    var input: PartInput = .voice
+    /// Voice → piano: which of the 12 pitch classes (C…B) may sound.
+    var enabledKeys: [Bool] = Array(repeating: true, count: 12)
+    /// Voice → piano: semitones added to the sung note (e.g. -12 = an octave down).
+    var transpose = 0
 
     var eventCount: Int { kind == .drums ? hits.count : notes.count }
+    var fxList: [String] { fx.split(separator: "+").map(String.init).filter { $0 != "clean" } }
+
+    init(id: Int, kind: PartKind, name: String, kit: String = "studio", input: PartInput = .voice) {
+        self.id = id
+        self.kind = kind
+        self.name = name
+        self.kit = kit
+        self.input = input
+    }
+
+    // Lenient decoding: songs saved before a field existed still load.
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, name, level, muted, solo, fx, kit, instrument, hits, notes, input, enabledKeys, transpose
+    }
+
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int.self, forKey: .id)
+        kind = try c.decode(PartKind.self, forKey: .kind)
+        name = try c.decode(String.self, forKey: .name)
+        level = try c.decodeIfPresent(Double.self, forKey: .level) ?? 1
+        muted = try c.decodeIfPresent(Bool.self, forKey: .muted) ?? false
+        solo = try c.decodeIfPresent(Bool.self, forKey: .solo) ?? false
+        fx = try c.decodeIfPresent(String.self, forKey: .fx) ?? "clean"
+        kit = try c.decodeIfPresent(String.self, forKey: .kit) ?? "studio"
+        instrument = try c.decodeIfPresent(MelodyInstrument.self, forKey: .instrument) ?? .piano
+        hits = try c.decodeIfPresent([DrumHit].self, forKey: .hits) ?? []
+        notes = try c.decodeIfPresent([MelodyNote].self, forKey: .notes) ?? []
+        // Before inputs existed, drum parts were voice drums and melody parts were touch piano.
+        input = try c.decodeIfPresent(PartInput.self, forKey: .input) ?? (kind == .drums ? .voice : .touch)
+        let keys = try c.decodeIfPresent([Bool].self, forKey: .enabledKeys) ?? []
+        enabledKeys = keys.count == 12 ? keys : Array(repeating: true, count: 12)
+        transpose = try c.decodeIfPresent(Int.self, forKey: .transpose) ?? 0
+    }
 }
 
 struct Song: Codable, Equatable {
@@ -111,7 +230,7 @@ struct Song: Codable, Equatable {
 
     static func new(settings: PocketSettings) -> Song {
         var s = Song(bpm: settings.songBpm, beatsPerBar: settings.beatsPerBar, bars: settings.loopBars, grid: settings.grid, tightness: settings.tightness)
-        _ = s.addPart(.drums, kit: settings.defaultKit)
+        _ = s.addPart(.voiceDrums, kit: settings.defaultKit)
         return s
     }
 
@@ -148,12 +267,14 @@ struct Song: Codable, Equatable {
     // MARK: Editing
 
     @discardableResult
-    mutating func addPart(_ kind: PartKind, kit: String = "studio") -> Int {
+    mutating func addPart(_ template: TrackTemplate, kit: String = "studio") -> Int {
         let id = nextId
         nextId += 1
-        let count = parts.filter { $0.kind == kind }.count + 1
-        let name = kind == .drums ? (count == 1 ? "Voice drums" : "Voice drums \(count)") : (count == 1 ? "Melody" : "Melody \(count)")
-        parts.append(Part(id: id, kind: kind, name: name, kit: kit))
+        let same = parts.filter { $0.kind == template.kind && $0.input == template.input }.count + 1
+        let name = same == 1 ? template.label : "\(template.label) \(same)"
+        var part = Part(id: id, kind: template.kind, name: name, kit: kit, input: template.input)
+        if template == .voicePiano { part.instrument = .softSynth }
+        parts.append(part)
         return id
     }
 

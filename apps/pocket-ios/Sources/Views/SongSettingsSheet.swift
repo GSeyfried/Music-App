@@ -56,11 +56,47 @@ struct SongSettingsSheet: View {
                         }
                     }
 
-                    section("Voice drums", "mic") {
-                        toggleRow("Use voice", "Beatbox into the selected drum part.",
+                    section("Microphone", "mic") {
+                        toggleRow("Use voice", "Listen while a voice part is selected (voice drums, voice → piano).",
                                   Binding(get: { settings.voiceListen }, set: { store.setListen($0) }))
-                        toggleRow("Hear voice hits", "Play the drum as soon as a sound is recognised.",
-                                  Binding(get: { settings.voiceMonitor }, set: { settings.voiceMonitor = $0 }))
+                        MicSensitivityControl(compact: false)
+                        toggleRow("Hear voice hits", "Play the drum or note as soon as your voice is recognised.",
+                                  Binding(get: { settings.voiceMonitor }, set: { settings.voiceMonitor = $0; store.settingsChanged() }))
+                        toggleRow("Hear voice sounds through the speaker", "Off: on the phone speaker your voice sounds stay silent so they don't leak into the mic. Headphones always hear them.",
+                                  Binding(get: { settings.monitorOnSpeaker }, set: { settings.monitorOnSpeaker = $0; store.settingsChanged() }))
+                            .disabled(!settings.voiceMonitor)
+                            .opacity(settings.voiceMonitor ? 1 : 0.45)
+                        toggleRow("Click while the mic records (speaker)", "Off: on the phone speaker the click stops while the mic records. The count-in still plays.",
+                                  Binding(get: { settings.clickOnSpeakerWhileMic }, set: { settings.clickOnSpeakerWhileMic = $0; store.settingsChanged() }))
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("While recording from the mic").font(.subheadline.weight(.semibold))
+                            Segments(options: ["all", "others", "none"], selection: settings.voiceRecordMute, label: muteLabel, height: 36, fill: true) { m in
+                                settings.voiceRecordMute = m
+                                store.settingsChanged()
+                            }
+                            .accessibilityLabel("While recording from the mic")
+                            Text(muteHelp).font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Label("Use headphones to keep everything playing: sound from the speaker reaches the mic.", systemImage: "headphones")
+                            .font(.footnote).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    section("Voice → piano", "music.mic") {
+                        row("Between two keys") {
+                            Segments(options: SnapTie.allCases, selection: settings.voicePianoTie, label: { $0 == .down ? "Lower" : "Higher" }) { t in
+                                settings.voicePianoTie = t
+                            }
+                            .accessibilityLabel("Between two keys, play the")
+                        }
+                        Text("When you sing exactly between two enabled keys, play the lower or the higher one.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    section("Voice drums", "waveform") {
                         row("Recognition") {
                             Segments(options: ClassifierMode.allCases, selection: settings.classifier, label: { $0.rawValue.capitalized }) { settings.classifier = $0 }
                         }
@@ -81,10 +117,6 @@ struct SongSettingsSheet: View {
                             .opacity(store.profile.isEmpty ? 0.4 : 1)
                             Spacer(minLength: 0)
                         }
-                        Label("Use headphones: sound from the speaker can trigger drums.", systemImage: "headphones")
-                            .font(.footnote).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
                     section("Keys & feel", "hand.tap") {
@@ -104,6 +136,22 @@ struct SongSettingsSheet: View {
         .presentationDragIndicator(.visible)
         .confirmationDialog("Forget your trained sounds?", isPresented: $confirmForget, titleVisibility: .visible) {
             Button("Forget my sounds", role: .destructive) { store.forgetTraining() }
+        }
+    }
+
+    private func muteLabel(_ m: String) -> String {
+        switch m {
+        case "all": "Mute all"
+        case "others": "Mute others"
+        default: "Keep playing"
+        }
+    }
+
+    private var muteHelp: String {
+        switch settings.voiceRecordMute {
+        case "all": "Silence the whole song while the mic records, so nothing bleeds in. You still hear the click."
+        case "others": "Silence every part except the one you're recording into."
+        default: "Keep the song playing (best with headphones)."
         }
     }
 
@@ -140,11 +188,13 @@ struct SongSettingsSheet: View {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+                        .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
                     if let detail { Text(detail).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true) }
                 }
                 Spacer(minLength: 6)
                 SwitchShape(isOn: isOn.wrappedValue)
             }
+            .padding(.vertical, 4)
             .frame(minHeight: 44)
             .contentShape(Rectangle())
         }
@@ -172,6 +222,10 @@ struct Segments<T: Hashable>: View {
     let options: [T]
     let selection: T
     let label: (T) -> String
+    /// Segment height; the hit area is always at least 44 pt tall.
+    var height: CGFloat = 32
+    /// Stretch segments to fill the width.
+    var fill = false
     let choose: (T) -> Void
 
     var body: some View {
@@ -184,11 +238,14 @@ struct Segments<T: Hashable>: View {
                         .lineLimit(1)
                         .fixedSize()
                         .foregroundStyle(on ? Color.primary : .secondary)
+                        .minimumScaleFactor(0.8)
                         .padding(.horizontal, 9)
-                        .frame(minWidth: 34, minHeight: 32)
+                        .frame(minWidth: 34, maxWidth: fill ? .infinity : nil, minHeight: height)
                         .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(on ? Color.pocketCard : .clear)
                             .shadow(color: .black.opacity(on ? 0.15 : 0), radius: 2, y: 1))
+                        .padding(.vertical, max(0, (44 - height - 6) / 2))
                         .contentShape(Rectangle())
+                        .padding(.vertical, -max(0, (44 - height - 6) / 2))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(label(o))
