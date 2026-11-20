@@ -91,3 +91,10 @@ Events: `status`, `hit` (voice-drum timbre), `songPosition`, `pitch`,
 - Signing/team setup, app icon, final app name.
 - A shared generated mirror of the domain types (Swift and TypeScript are
   hand-written today).
+- From [RUST_VS_SWIFT_2026-11-19.md](RUST_VS_SWIFT_2026-11-19.md): an
+  on-device latency/dropout harness (128 vs 256 frames, speaker, wired, HFP,
+  A2DP); a single duplex RemoteIO host calling a raw (non-JSON) Rust render
+  ABI, compared against today's two CPAL streams; echo-cancelled input and
+  VoiceProcessingIO as session policies; Bluetooth HFP input and input
+  selection; Swift 6 strict concurrency for the shell. Done 2026-11-19: Rust
+  panics are caught at the C boundary.

@@ -192,6 +192,13 @@ Consequences: domain types used by Pocket are mirrored by hand in Swift
 Pocket's settings registry is `PocketSettings.swift`, with rows in
 SETTINGS_INDEX. Layout and build: [ios/SWIFT_APP.md](projects/ios/SWIFT_APP.md).
 
+Checked 2026-11-19 ([RUST_VS_SWIFT_2026-11-19.md](projects/ios/RUST_VS_SWIFT_2026-11-19.md)):
+no iOS limit requires a Swift engine; Apple's own AUv3 sample keeps realtime
+DSP in C++ behind Swift. The real gaps are in iOS audio I/O (two CPAL
+RemoteIO streams instead of one duplex unit; no echo-cancelled or Bluetooth
+HFP input) and native integrations (background audio, Now Playing, App
+Intents, AUv3). Those go in a thin native host; the Rust core stays.
+
 ## Open tradeoffs
 
 - **Duplex alignment:** separate CPAL input and output streams have independent

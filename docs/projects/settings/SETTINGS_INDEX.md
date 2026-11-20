@@ -53,7 +53,9 @@ Pocket's registry is `apps/pocket-ios/Sources/SongBuilder/PocketSettings.swift` 
 | `songBuilder.countInBars` | Count-in | Bars of click before recording starts from a stopped song. | 1 | app | Record from stopped | wired |
 | `songBuilder.clickMode` | Click | Always / While recording / Off. The count-in always clicks. | Always | app | Click checkbox (Always/Off) | wired |
 | `songBuilder.clickVolume` | Click volume | Loudness of the click and count-in. | 0.45 | app | — | wired |
-| `songBuilder.masterVolume` | Song volume | Overall Song Builder output level. | 0.85 | app | — | wired |
+| `songBuilder.masterVolume` | Song volume | Overall Song Builder output level. | 1.0 (was 0.85; too quiet on the iPhone speaker, 2026-11-19) | app | — | wired |
+| `songBuilder.loudnessDb` | Loudness boost | Make-up gain into the master soft limiter: louder on small speakers, at the cost of squashing peaks. Engine `SongSpec.loudnessDb`, 0–12 dB. | 6 dB | app | — (internal) | wired |
+| `audio.ios.sessionMode` | iOS audio mode | `default`: iOS mic gain on and full speaker level. `measurement`: flat signal, no auto gain, but the built-in mic and speaker are much quieter. Engine `AudioConfig.sessionMode`. | Pocket: default · desktop/engine: measurement | app | — (internal) | wired |
 | `songBuilder.defaultKit` | Default drum kit | Kit a new drum part starts with (Studio, 808, Lo-fi). | Studio | app | Add part | wired |
 | `songBuilder.padVelocity` | Pad strength | Velocity of touch-pad hits. | 0.85 | app | Drum pads | wired |
 | `songBuilder.melodyNoteBeats` | Piano note length | Length in beats of a note recorded from the touch piano. | 0.5 | app | Melody part piano | wired |
@@ -63,12 +65,31 @@ Pocket's registry is `apps/pocket-ios/Sources/SongBuilder/PocketSettings.swift` 
 | `songBuilder.voiceDrums.listen` | Voice drums | Listen to the mic while a drum part is selected and turn mouth sounds into hits. Opens the mic with reason `songBuilder`. | on | app | "Use voice" checkbox | wired |
 | `songBuilder.voiceDrums.monitor` | Hear voice hits | Play the drum sound as soon as a mouth sound is recognised (a few tens of ms late). | on | app | — | wired |
 | `songBuilder.voiceDrums.classifier` | Sound recognition | Auto (trained once every sound has enough examples, else rules), Rules, or Trained. | Auto | app | Recognition line under the pads | wired |
-| `songBuilder.voiceDrums.minLevelDb` | Voice hit level | Quietest attack (dBFS) that counts as a hit. | -42 dB | app | — | wired |
-| `songBuilder.voiceDrums.minRiseDb` | Voice hit sharpness | How suddenly (dB) a sound must jump to count. | 10 dB | app | — | wired |
+| `songBuilder.voiceDrums.minLevelDb` | Voice hit level | Quietest attack (dBFS) that counts as a hit. | Derived: = `songBuilder.micSensitivity` gate (−55 dB at the default) | app | — | wired |
+| `songBuilder.voiceDrums.minRiseDb` | Voice hit sharpness | How suddenly (dB) a sound must jump to count. Keep at or below `onsetRiseDb`. | 5 dB (was 10, stricter than the engine's onset detector) | app | — | wired |
+| `songBuilder.micSensitivity` | Mic sensitivity | One slider for how loud a sound must be to count, with a live input meter. Sets the voice-drum gate, the engine onset floor (gate − 3 dB) and the Voice → piano gate (gate + 5 dB). Gate = −25 − 40 × sensitivity dBFS. | 0.75 (gate −55 dB) | app | Drum dock, piano dock, settings sheet | wired |
+| `songBuilder.voiceRecord.mute` | While recording from the mic | `all`: every part goes silent while the mic records (no bleed on the phone speaker); `others`: all but the part recording; `none`: keep playing (headphones). The click and count-in keep playing. Touch pads and keys never mute anything. | all | app | Settings sheet | wired |
+| `songBuilder.voice.monitorOnSpeaker` | Hear voice sounds on the speaker | Play recognised voice drums and sung notes live through the phone speaker (or AirPlay, car, HDMI). Off: they play live only on headphones, because the speaker leaks into the mic and retriggers. They still record and play back in the song. Route from the engine's `audioSessionInfo` output port. | off | app | Settings sheet | wired |
+| `songBuilder.voiceRecord.clickOnSpeaker` | Click while the mic records (speaker) | Keep the click while the mic records through the speaker. Off: the click drops after the count-in so it isn't recorded as hits. | off | app | Settings sheet | wired |
+| `songBuilder.fxPerPart` | FX per part | Presets stacked on one part, run in order (engine `MAX_FX_PER_PART`, part `fx` joined with `+`). | 3 | app | — (internal) | wired |
+| `songBuilder.voicePiano.minClarity` | Voice → piano: pitch confidence | Pitch frames less periodic than this are ignored (no stale notes on breath or consonants). | 0.75 | app | — (internal) | wired |
+| `songBuilder.voicePiano.startFrames` | Voice → piano: note start | Pitch frames (≈ 10 ms each) a key must hold before it sounds. | 2 | app | — (internal) | wired |
+| `songBuilder.voicePiano.releaseFrames` | Voice → piano: note end | Quiet or unpitched frames before the note is released. | 4 (≈ 40 ms) | app | — (internal) | wired |
+| `songBuilder.voicePiano.hysteresisSemitones` | Voice → piano: stickiness | The sounding key is kept until another enabled key is nearer by more than this, so notes don't flicker at the boundary. | 0.15 (15 cents) | app | — (internal) | wired |
+| `songBuilder.voicePiano.tieBreak` | Between two keys | When a sung pitch is exactly halfway between two enabled keys: `down` (lower) or `up` (higher). Otherwise the nearest enabled key always wins. | down | app | Settings sheet | wired |
+| `songBuilder.voicePiano.minNoteSeconds` | Voice → piano: shortest note | Sung notes shorter than this are not recorded. | 0.08 s | app | — (internal) | wired |
+| `songBuilder.voicePiano.maxTranspose` | Voice → piano: octave range | Furthest the part's Octave −/+ can shift the sung note (semitones, in steps of 12). Each part stores its own shift (`Part.transpose`). | 24 (±2 octaves) | app | iOS voice → piano dock › Octave −/+ | wired (iOS) |
+| `songBuilder.voicePiano.keyPresets` | Voice → piano: quick key sets | Table of one-tap key sets in Edit keys mode: All, C major, A minor pentatonic (`PocketSettings.voicePianoKeyPresets`). | All · C major · A minor pent. | app | iOS voice → piano dock › Edit keys | wired (iOS; table, not user-editable) |
+| `songBuilder.micMeter.floorDb` | Mic meter range | Left edge (dBFS) of the live input meter under Mic sensitivity; the right edge is 0 dBFS. The white mark is the gate (`micSensitivity`). | -70 dB | app | — (internal; iOS mic sensitivity meter in voice docks and Song settings) | wired (iOS) |
+| `songBuilder.voiceDrums.onsetRiseDb` | Onset sensitivity | Engine onset detector's required rise (`analysis.onsets.riseDb`), sent while listening. Lower hears softer and faster patterns. | 6 dB (engine default 9) | app | — (internal) | wired |
+| `songBuilder.voiceDrums.onsetFloorDb` | Onset floor | Derived: the sensitivity gate − 3 dB, sent as `analysis.onsets.floorDb`. | −58 dB at the default sensitivity | app | — (internal) | wired |
+| `songBuilder.voiceDrums.minVelocity` | Softest voice hit | Quietest voice hit still plays at this velocity, so soft beatboxing isn't faint. | 0.65 (was 0.35) | app | — (internal) | wired |
 | `songBuilder.voiceDrums.latencyMs` | Mic timing offset | Extra milliseconds to move recorded voice hits earlier, beyond the input + output latency the engine already removes (`song_locate`). | 0 ms | app | — | wired |
 | `songBuilder.voiceDrums.trainingHits` | Training examples | Examples per sound asked for when training, and needed before Auto uses them. | 5 | app | Train my sounds | wired |
-| `songBuilder.voiceDrums.kickMinLow` | Kick: low share | Rules: at least this share of energy below 250 Hz is a kick. | 0.5 | app | — (internal) | wired |
-| `songBuilder.voiceDrums.kickMaxCentroidHz` | Kick: brightness limit | Rules: darker than this centroid is a kick. | 450 Hz | app | — (internal) | wired |
+| `songBuilder.voiceDrums.kickMinLow` | Kick: low share | Rules: at least this share of energy below 250 Hz is a kick. | 0.3 (was 0.5) | app | — (internal) | wired |
+| `songBuilder.voiceDrums.kickMaxCentroidHz` | Kick: brightness limit | Rules: darker than this centroid is a kick. | 900 Hz (was 450; voiced "bah" went to snare) | app | — (internal) | wired |
+| `songBuilder.voiceDrums.kickMaxZcr` | Kick: voiced limit | Rules: a voiced attack (zero-crossing rate below this, per sample) with little hiss is a kick ("bah", "boots"). Checked after hi-hat. | 0.06 | app | — (internal) | wired |
+| `songBuilder.voiceDrums.kickMaxHigh` | Kick: hiss limit | Rules: the voiced-kick test also needs less than this share of energy above 3 kHz. | 0.15 | app | — (internal) | wired |
 | `songBuilder.voiceDrums.hatMinHigh` | Hi-hat: high share | Rules: at least this share of energy above 3 kHz is a hi-hat. | 0.45 | app | — (internal) | wired |
 | `songBuilder.voiceDrums.hatMinCentroidHz` | Hi-hat: brightness | Rules: brighter than this centroid is a hi-hat. | 3200 Hz | app | — (internal) | wired |
 | `songBuilder.appearance` | Appearance (Pocket) | Dark (default), System or Light look for the iOS Song Builder. | Dark | app | iOS Song settings › Appearance | wired (iOS) |

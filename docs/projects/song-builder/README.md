@@ -81,7 +81,58 @@ Gaps and known problems:
   thresholds only).
 - Reversible quantize, starter patterns, kits: **handled**.
 
+## Track types (2026-11-19)
+
+One tap adds a track (`TrackTemplate`). Reference check:
+[REFERENCE_CHECK_VOICE_TRACKS.md](REFERENCE_CHECK_VOICE_TRACKS.md).
+
+| Track | Input | State |
+| --- | --- | --- |
+| Voice drums | Mic: Ba (kick), Da (clap), K (snare), Ts (hat). Da is recognised once trained | Built |
+| Drum pads | Touch | Built |
+| Voice → piano | Mic: sung pitch → nearest **enabled** key (12 on/off keys per track), held while you sing, recorded with its length and loudness, instrument release as the fade | Built; not yet sung on a device |
+| Piano | Touch; keys sound while held and record their held length | Built |
+| Voice (raw) | Mic audio recorded into the loop, with FX | **PENDING**: engine clip recording/playback |
+| Voice + tune | Raw voice pitch-corrected toward the enabled keys | **PENDING**: needs Voice (raw) plus a TD-PSOLA corrector (reference check: ~50–75 ms live latency expected) |
+
+- **Snapping:** the nearest enabled key by pitch distance. Example: with C and
+  C♯ off, a sung C♯ goes to D (1 semitone away) rather than B (2 away). Only
+  an exact halfway pitch uses the "Between two keys" setting (default lower).
+  The sounding key is kept until another is nearer by 15 cents.
+- **Mic auto-mute:** while the mic records into the song, the other parts go
+  silent (`songBuilder.voiceRecord.mute`), so the phone speaker doesn't leak
+  into the mic. Touch pads and keys never mute anything.
+- **FX:** up to 3 presets stacked per track, run in order.
+- **Mic sensitivity:** one slider with a live meter sets every loudness gate.
+
+## First device test (2026-11-19, iPhone speaker, no headphones)
+
+Findings: timid kick; everything quiet; had to be loud and hits were missed;
+most hits read as snare; dropdowns needed several taps. Codex's research and
+evaluation: [REFERENCE_EVAL_2026-11-19.md](REFERENCE_EVAL_2026-11-19.md).
+Fixed the same day (not yet re-tested on the device):
+
+- iOS session mode `default` instead of Measurement (Apple: Measurement lowers
+  playback; it also turns off mic gain) — `audio.ios.sessionMode`.
+- One relaxed hit gate: the engine onset detector gets Song Builder's own
+  rise/floor (6 dB, −58 dB) and the app gate no longer out-strict it (5 dB,
+  −55 dB).
+- Voiced-kick rule ("bah", "boots": low zero-crossing rate, little hiss) and a
+  darker-centroid limit of 900 Hz; hat is checked first.
+- Heavier kicks (higher beater start, more drive for harmonics a phone speaker
+  can play, more click); master 1.0 and +6 dB make-up into the limiter; soft
+  voice hits play at ≥ 0.65 velocity.
+- Part-card tap gesture masked off on the selected card so it no longer
+  competes with its menus.
+
 ## PENDING
+
+- Voice (raw) and Voice + tune tracks (see Track types).
+- Voice → piano: a faster provisional pitch path (YIN window ≈ 35 ms today),
+  per-note envelope velocity, octave-leap handling, tap-to-correct notes
+  ([reference check](REFERENCE_CHECK_VOICE_TRACKS.md)).
+- Mic auto-mute ramps exactly at the first captured frame; today it switches
+  when recording starts (after the count-in), with the engine's gain ramp.
 
 - Real beatboxing on a device: recognition thresholds and gate defaults.
 - Keep the raw voice recording beside the hits (only hit events are stored
@@ -94,4 +145,11 @@ Gaps and known problems:
 - Engine events for melody/hit playback flashes (the grid lights as the playhead passes; piano keys light only on touch).
 - Background audio; idle CPU (part effect chains keep running while stopped,
   to finish tails).
-- Forum and issue-tracker skim for the reference check.
+- From the Codex evaluation: echo-cancelled input for speaker use
+  (`setPrefersEchoCancelledInput`); adaptive noise-floor onsets plus spectral
+  flux; richer hit features (MFCC/log-mel, voicing, a transient window and a
+  body window 10–20 ms later); training that keeps examples or variance,
+  standardises features, rejects outliers and can answer "uncertain"; a
+  distinct kick body layer (80–140 Hz) and loudness-matched kits; master
+  volume in the settings sheet; menus out of nested scroll views; a labelled
+  real-voice test corpus with a confusion harness.
