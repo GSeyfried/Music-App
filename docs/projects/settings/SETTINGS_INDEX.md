@@ -42,6 +42,45 @@ values and profiles hold learned/calibrated data.
 | `voicePercussion.tightness` | Beat tightness | Blend recorded trigger times toward the selected grid while preserving original timing for undo/readjustment. | 50% | track | Voice Percussion primary screen | proposed |
 | `pocket.resumeLastActivity` | Resume where I left off | Put the most recent unfinished song or practice activity at the top of the Pocket home screen. | on | app | Pocket home | proposed |
 
+### Song Builder (wired: VoiceLoop Pocket SwiftUI app; see [song-builder](../song-builder/README.md))
+
+Pocket's registry is `apps/pocket-ios/Sources/SongBuilder/PocketSettings.swift` (same ids as below; stored in UserDefaults). `pocket.songBpm`, `pocket.quantizeSubdivision` and `pocket.quantizeStrength` above are the values a **new** song starts with; each song stores its own tempo, grid and Tightness. Drum kits, melody voices and FX presets are tables in the engine, `crates/voiceloop-engine/src/song.rs` (`DRUM_KITS`, `MELODY_VOICES`, `FX_PRESETS` → `fx_preset`, built from the desktop effect blocks); starter beats are `StarterBeat.all` in `SongModel.swift`. The `scope` column below is where the value lives in Pocket.
+
+| ID | Label | Description | Default | Scope | Connected element | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `songBuilder.loopBars` | Loop length (bars) | Length of a new song's loop. Growing repeats existing material; shrinking drops what falls outside (Undo restores). | 2 | project | Song Builder Bars picker (per song) | wired |
+| `songBuilder.beatsPerBar` | Beats per bar | Meter of new songs. Starter beats are 4/4 and are trimmed in shorter bars. | 4 | project | — (new songs) | wired |
+| `songBuilder.countInBars` | Count-in | Bars of click before recording starts from a stopped song. | 1 | app | Record from stopped | wired |
+| `songBuilder.clickMode` | Click | Always / While recording / Off. The count-in always clicks. | Always | app | Click checkbox (Always/Off) | wired |
+| `songBuilder.clickVolume` | Click volume | Loudness of the click and count-in. | 0.45 | app | — | wired |
+| `songBuilder.masterVolume` | Song volume | Overall Song Builder output level. | 0.85 | app | — | wired |
+| `songBuilder.defaultKit` | Default drum kit | Kit a new drum part starts with (Studio, 808, Lo-fi). | Studio | app | Add part | wired |
+| `songBuilder.padVelocity` | Pad strength | Velocity of touch-pad hits. | 0.85 | app | Drum pads | wired |
+| `songBuilder.melodyNoteBeats` | Piano note length | Length in beats of a note recorded from the touch piano. | 0.5 | app | Melody part piano | wired |
+| `songBuilder.touchLatencyMs` | Touch timing offset | Extra milliseconds to move recorded taps earlier, beyond the output latency the engine already removes. | 0 ms | app | Pads, piano | wired |
+| `songBuilder.earlyHitBeats` | Early-hit window | Hits this many beats before the first downbeat (during the count-in) still count as the downbeat. | 0.5 beat | app | — (internal) | wired |
+| `songBuilder.undoDepth` | Undo steps | How many Song Builder edits Undo can step back through. | 50 | app | Undo/Redo | wired |
+| `songBuilder.voiceDrums.listen` | Voice drums | Listen to the mic while a drum part is selected and turn mouth sounds into hits. Opens the mic with reason `songBuilder`. | on | app | "Use voice" checkbox | wired |
+| `songBuilder.voiceDrums.monitor` | Hear voice hits | Play the drum sound as soon as a mouth sound is recognised (a few tens of ms late). | on | app | — | wired |
+| `songBuilder.voiceDrums.classifier` | Sound recognition | Auto (trained once every sound has enough examples, else rules), Rules, or Trained. | Auto | app | Recognition line under the pads | wired |
+| `songBuilder.voiceDrums.minLevelDb` | Voice hit level | Quietest attack (dBFS) that counts as a hit. | -42 dB | app | — | wired |
+| `songBuilder.voiceDrums.minRiseDb` | Voice hit sharpness | How suddenly (dB) a sound must jump to count. | 10 dB | app | — | wired |
+| `songBuilder.voiceDrums.latencyMs` | Mic timing offset | Extra milliseconds to move recorded voice hits earlier, beyond the input + output latency the engine already removes (`song_locate`). | 0 ms | app | — | wired |
+| `songBuilder.voiceDrums.trainingHits` | Training examples | Examples per sound asked for when training, and needed before Auto uses them. | 5 | app | Train my sounds | wired |
+| `songBuilder.voiceDrums.kickMinLow` | Kick: low share | Rules: at least this share of energy below 250 Hz is a kick. | 0.5 | app | — (internal) | wired |
+| `songBuilder.voiceDrums.kickMaxCentroidHz` | Kick: brightness limit | Rules: darker than this centroid is a kick. | 450 Hz | app | — (internal) | wired |
+| `songBuilder.voiceDrums.hatMinHigh` | Hi-hat: high share | Rules: at least this share of energy above 3 kHz is a hi-hat. | 0.45 | app | — (internal) | wired |
+| `songBuilder.voiceDrums.hatMinCentroidHz` | Hi-hat: brightness | Rules: brighter than this centroid is a hi-hat. | 3200 Hz | app | — (internal) | wired |
+| `songBuilder.appearance` | Appearance (Pocket) | Dark (default), System or Light look for the iOS Song Builder. | Dark | app | iOS Song settings › Appearance | wired (iOS) |
+| `songBuilder.haptics` | Haptics | Light taps on pads, piano keys, Record and step edits (iOS). | on | app | iOS Song settings › Haptics | wired (iOS) |
+| `songBuilder.padFlashMs` | Pad flash time | How long a drum pad stays lit after a touch, voice or training hit. | 160 ms | app | — (internal; iOS drum pads) | wired (iOS) |
+| `songBuilder.gridMinStepPt` | Step grid cell width | Narrowest step-grid cell (pt) before the grid scrolls sideways (iOS). | 18 pt | app | — (internal; iOS step grid) | wired (iOS) |
+| `songBuilder.color.<key>` | Song Builder colours | Lane and part colours (hex). Keys and defaults: kick `#FF8A3D`, snare `#4C9DFF`, hat `#34D399`, clap `#B57CFF`, openHat `#2CD3D3`, drums part `#FF5C7A`, melody part `#FFC145`, record `#FF3B4E`. | see description | app | — (internal; iOS pads, grid, part cards, Record) | wired (iOS) |
+| `analysis.hits.enabled` | Hit timbre | Engine: describe each onset's timbre (`hit` event). | on | app (engine `AnalysisConfig.hits`) | — | wired |
+| `analysis.hits.windowSeconds` | Hit window | Engine: sound after the onset that is described. | 0.04 s | app (engine) | — | wired |
+| `analysis.hits.lowHz` | Hit low band edge | Engine: upper edge of the low band. | 250 Hz | app (engine) | — | wired |
+| `analysis.hits.highHz` | Hit high band edge | Engine: lower edge of the high band. | 3000 Hz | app (engine) | — | wired |
+
 ## Audio devices and I/O (exists: `AudioConfig`, `routing.rs`; stored in `audio-settings.json`)
 
 | ID | Label | Description | Default | Scope | Connected element | Status |

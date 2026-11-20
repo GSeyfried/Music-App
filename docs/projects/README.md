@@ -25,6 +25,7 @@ Use lowercase-kebab-case folder names (for example `audio-player/`).
 | [ios](ios/README.md): iPhone/iPad feasibility, touch guidance and [focused mobile products](ios/PRODUCT_APPS.md) | Compile-level investigation and product definition complete; Xcode/device proof blocked |
 | [workstation-buildout](workstation-buildout/PROGRESS.md): cross-project integration and handoff | Active working tree; not integrated into `main` |
 | [settings](settings/README.md): settings registry and [settings index](settings/SETTINGS_INDEX.md) | Typed registry and settings UI implemented; override model and hardware verification incomplete |
+| [song-builder](song-builder/README.md): Pocket Song Builder: voice drums (beatboxing), Tightness, kits, starter beats, FX presets ([SwiftUI app](ios/SWIFT_APP.md)) | Engine and SwiftUI app built 2026-11-19; real-voice and device testing pending |
 | [track-system](track-system/README.md): unified tracks, tool modes, templates, presets, and voice instruments | Product direction and architecture proposal; MIDI/voice track slices not started |
 | [sound-library](sound-library/README.md): recorded/imported sounds, instruments, kits, sampler articulation, and Ring/Linger controls | Product direction and architecture proposal; preview piano is the only current sampled instrument |
 | [visualization](visualization/README.md): loop-circle histogram/ticks, note colors, pitch-reactive theme | Proposed 2026-11-17; not started |

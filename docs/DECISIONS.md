@@ -170,6 +170,28 @@ source audio, never a destructive sample edit. Full source-span persistence
 and the layer trim command/UI remain PENDING before trim is presented as a
 working control.
 
+## D-021 VoiceLoop Pocket is a native SwiftUI app over the Rust engine (Accepted, 2026-11-19)
+
+Pocket (the iPhone/iPad app, [PRODUCT_APPS.md](projects/ios/PRODUCT_APPS.md))
+uses a **SwiftUI** interface linked directly to the Rust engine through a small
+C interface (`crates/voiceloop-ffi`: JSON commands in by name, JSON events
+out, the same contract as the Tauri commands). There is no Tauri or web view on
+iOS. The desktop app keeps Tauri + React (D-001 unchanged for desktop) and no
+longer has a Pocket tab.
+
+Why: native iOS features (App Intents/Siri for the hands-free commands,
+haptics, Files/share sheet, background audio, audio-session control) and lower
+touch latency. Web Audio in a web view follows the ring/silent switch and can't
+share the engine's audio session, so Song Builder's playback moved into the
+engine (`voiceloop-engine/src/song.rs`) on the output clock. Nothing is
+duplicated where it matters: the engine, analysis, DSP and effects stay in
+Rust and are shared with desktop. Only the thin UI and a small model are Swift.
+
+Consequences: domain types used by Pocket are mirrored by hand in Swift
+(`apps/pocket-ios/Sources/Engine/EngineBridge.swift`) as well as TypeScript.
+Pocket's settings registry is `PocketSettings.swift`, with rows in
+SETTINGS_INDEX. Layout and build: [ios/SWIFT_APP.md](projects/ios/SWIFT_APP.md).
+
 ## Open tradeoffs
 
 - **Duplex alignment:** separate CPAL input and output streams have independent
